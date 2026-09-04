@@ -33,6 +33,7 @@ jest.mock('../ThreadService', () => ({
   default: {
     getOwnedThread: jest.fn(),
     getOwnedThreadWithSession: jest.fn(),
+    serializeThread: jest.fn(),
   },
 }));
 
@@ -46,12 +47,70 @@ import AgentThreadService from '../ThreadService';
 
 const mockMessageQuery = AgentMessage.query as jest.Mock;
 const mockGetOwnedThread = AgentThreadService.getOwnedThread as jest.Mock;
+const mockGetOwnedThreadWithSession = AgentThreadService.getOwnedThreadWithSession as jest.Mock;
+const mockSerializeThread = AgentThreadService.serializeThread as jest.Mock;
+
+function canonicalListQuery(rows: unknown[]) {
+  const systemBuilder = {
+    where: jest.fn(),
+    whereRaw: jest.fn(),
+  };
+  systemBuilder.where.mockReturnValue(systemBuilder);
+  systemBuilder.whereRaw.mockReturnValue(systemBuilder);
+
+  const roleBuilder = {
+    whereIn: jest.fn(),
+    orWhere: jest.fn(),
+  };
+  roleBuilder.whereIn.mockReturnValue(roleBuilder);
+  roleBuilder.orWhere.mockImplementation((callback) => {
+    callback(systemBuilder);
+    return roleBuilder;
+  });
+
+  const sameTimestampBuilder = { where: jest.fn() };
+  sameTimestampBuilder.where.mockReturnValue(sameTimestampBuilder);
+  const cursorBuilder = {
+    where: jest.fn(),
+    orWhere: jest.fn(),
+  };
+  cursorBuilder.where.mockReturnValue(cursorBuilder);
+  cursorBuilder.orWhere.mockImplementation((callback) => {
+    callback(sameTimestampBuilder);
+    return cursorBuilder;
+  });
+
+  let callbackCount = 0;
+  const query: any = {
+    alias: jest.fn(),
+    leftJoin: jest.fn(),
+    where: jest.fn(),
+    select: jest.fn(),
+    orderBy: jest.fn(),
+    limit: jest.fn(),
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+  };
+  query.alias.mockReturnValue(query);
+  query.leftJoin.mockReturnValue(query);
+  query.where.mockImplementation((first) => {
+    if (typeof first === 'function') {
+      first(callbackCount++ === 0 ? roleBuilder : cursorBuilder);
+    }
+    return query;
+  });
+  query.select.mockReturnValue(query);
+  query.orderBy.mockReturnValue(query);
+  query.limit.mockReturnValue(query);
+  return { query, roleBuilder, systemBuilder, cursorBuilder, sameTimestampBuilder };
+}
 
 describe('AgentMessageStore', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockMessageQuery.mockReset();
     mockGetOwnedThread.mockReset();
+    mockGetOwnedThreadWithSession.mockReset();
+    mockSerializeThread.mockReset();
   });
 
   describe('serializeCanonicalMessage', () => {
@@ -820,5 +879,328 @@ describe('AgentMessageStore', () => {
         expect.objectContaining({ type: 'dynamic-tool', toolName: 'write_file', state: 'output-available' })
       );
     });
+  });
+
+  describe('listCanonicalMessages', () => {
+    const thread = { id: 17, uuid: 'thread-uuid' };
+    const session = { uuid: 'session-uuid' };
+
+    beforeEach(() => {
+      mockGetOwnedThreadWithSession.mockResolvedValue({ thread, session });
+      mockSerializeThread.mockReturnValue({ id: 'thread-uuid', sessionId: 'session-uuid' });
+    });
+
+    it('returns an ascending page from the descending database window with a stable next cursor', async () => {
+      const rows = [
+        {
+          id: 30,
+          uuid: '33333333-3333-4333-8333-333333333333',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Newest' }],
+          metadata: {},
+          createdAt: '2026-05-03T00:00:00.000Z',
+        },
+        {
+          id: 20,
+          uuid: '22222222-2222-4222-8222-222222222222',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Older' }],
+          metadata: {},
+          createdAt: '2026-05-02T00:00:00.000Z',
+        },
+        {
+          id: 10,
+          uuid: '11111111-1111-4111-8111-111111111111',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Oldest lookahead' }],
+          metadata: {},
+          createdAt: '2026-05-01T00:00:00.000Z',
+        },
+      ];
+      const list = canonicalListQuery(rows);
+      mockMessageQuery.mockReturnValueOnce(list.query);
+
+      const result = await AgentMessageStore.listCanonicalMessages('thread-uuid', 'sample-user', { limit: 2 });
+
+      expect(list.query.limit).toHaveBeenCalledWith(3);
+      expect(list.roleBuilder.whereIn).toHaveBeenCalledWith('message.role', ['user', 'assistant']);
+      expect(list.systemBuilder.where).toHaveBeenCalledWith('message.role', 'system');
+      expect(list.systemBuilder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('metadata'), [
+        'kind',
+        'agent_switch',
+        'environment_update',
+        'environment_state',
+        'runtime_controls_update',
+      ]);
+      expect(result.thread).toEqual({ id: 'thread-uuid', sessionId: 'session-uuid' });
+      expect(result.messages.map((message) => message.id)).toEqual([
+        '22222222-2222-4222-8222-222222222222',
+        '33333333-3333-4333-8333-333333333333',
+      ]);
+      expect(result.pagination).toEqual({
+        hasMore: true,
+        nextBeforeMessageId: '22222222-2222-4222-8222-222222222222',
+      });
+    });
+
+    it.each([
+      ['an omitted limit', undefined, 51],
+      ['a zero limit', 0, 51],
+      ['a negative limit', -8, 2],
+      ['a fractional limit', 2.9, 3],
+      ['a limit above the maximum', 500, 101],
+    ])('normalizes %s before querying', async (_label, limit, expectedDatabaseLimit) => {
+      const list = canonicalListQuery([]);
+      mockMessageQuery.mockReturnValueOnce(list.query);
+
+      await AgentMessageStore.listCanonicalMessages('thread-uuid', 'sample-user', { limit });
+
+      expect(list.query.limit).toHaveBeenCalledWith(expectedDatabaseLimit);
+    });
+
+    it('applies the compound timestamp/id cursor and omits non-canonical rows', async () => {
+      const cursor = {
+        id: 25,
+        uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        createdAt: '2026-05-02T00:00:00.000Z',
+      };
+      const list = canonicalListQuery([
+        {
+          id: 20,
+          uuid: '22222222-2222-4222-8222-222222222222',
+          role: 'tool',
+          parts: [{ type: 'text', text: 'not public' }],
+          metadata: {},
+          createdAt: '2026-05-01T00:00:00.000Z',
+        },
+      ]);
+      mockMessageQuery
+        .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(cursor) })
+        .mockReturnValueOnce(list.query);
+
+      const result = await AgentMessageStore.listCanonicalMessages('thread-uuid', 'sample-user', {
+        beforeMessageId: cursor.uuid,
+      });
+
+      expect(list.cursorBuilder.where).toHaveBeenCalledWith('message.createdAt', '<', '2026-05-02T00:00:00.000Z');
+      expect(list.sameTimestampBuilder.where).toHaveBeenNthCalledWith(
+        1,
+        'message.createdAt',
+        '=',
+        '2026-05-02T00:00:00.000Z'
+      );
+      expect(list.sameTimestampBuilder.where).toHaveBeenNthCalledWith(2, 'message.id', '<', 25);
+      expect(result.messages).toEqual([]);
+      expect(result.pagination).toEqual({ hasMore: false, nextBeforeMessageId: null });
+    });
+
+    it('rejects a missing cursor id', async () => {
+      mockMessageQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) });
+
+      await expect(
+        AgentMessageStore.listCanonicalMessages('thread-uuid', 'sample-user', {
+          beforeMessageId: 'missing-message',
+        })
+      ).rejects.toThrow('Agent message cursor not found');
+    });
+
+    it('rejects a cursor row without a creation timestamp', async () => {
+      const list = canonicalListQuery([]);
+      mockMessageQuery
+        .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue({ id: 25, uuid: 'cursor-without-time' }) })
+        .mockReturnValueOnce(list.query);
+
+      await expect(
+        AgentMessageStore.listCanonicalMessages('thread-uuid', 'sample-user', {
+          beforeMessageId: 'cursor-without-time',
+        })
+      ).rejects.toThrow('Agent message cursor not found');
+    });
+  });
+
+  describe('run message lookup and insertion', () => {
+    it('does not query for a blank canonical client message id', async () => {
+      await expect(AgentMessageStore.findCanonicalMessageByClientMessageId({ id: 17 }, '   ')).resolves.toBeUndefined();
+      expect(mockMessageQuery).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['returns a row found by either canonical client-id location', { id: 11 }],
+      ['normalizes a missing row to undefined', null],
+    ])('%s', async (_label, row) => {
+      const metadataBuilder = { where: jest.fn(), whereRaw: jest.fn() };
+      metadataBuilder.where.mockReturnValue(metadataBuilder);
+      metadataBuilder.whereRaw.mockReturnValue(metadataBuilder);
+      const query: any = {
+        where: jest.fn(),
+        orWhere: jest.fn(),
+        first: jest.fn().mockResolvedValue(row),
+      };
+      query.where.mockReturnValue(query);
+      query.orWhere.mockImplementation((callback) => {
+        callback(metadataBuilder);
+        return query;
+      });
+      mockMessageQuery.mockReturnValueOnce(query);
+
+      const result = await AgentMessageStore.findCanonicalMessageByClientMessageId({ id: 17 }, '  client-message-1  ');
+
+      expect(query.where).toHaveBeenCalledWith({ threadId: 17, clientMessageId: 'client-message-1' });
+      expect(metadataBuilder.whereRaw).toHaveBeenCalledWith('"metadata"->>? = ?', [
+        'clientMessageId',
+        'client-message-1',
+      ]);
+      expect(result).toBe(row || undefined);
+    });
+
+    it.each([
+      ['a trimmed client id', '  client-message-1  ', { clientMessageId: 'client-message-1' }],
+      ['no client id', undefined, {}],
+    ])('inserts a user run message with %s', async (_label, clientMessageId, metadata) => {
+      const insertAndFetch = jest.fn().mockImplementation(async (input) => input);
+      mockMessageQuery.mockReturnValueOnce({ insertAndFetch });
+
+      const result = await AgentMessageStore.insertUserMessageForRun(
+        { id: 17 },
+        { id: 29 },
+        {
+          clientMessageId,
+          parts: [{ type: 'text', text: 'Run this' }, { type: 'unknown-part' } as any],
+        }
+      );
+
+      expect(insertAndFetch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 17,
+          runId: 29,
+          role: 'user',
+          parts: [{ type: 'text', text: 'Run this' }],
+          clientMessageId: clientMessageId ? 'client-message-1' : null,
+          metadata,
+        })
+      );
+      expect(result).toEqual(insertAndFetch.mock.calls[0][0]);
+    });
+  });
+
+  describe('upsert boundaries', () => {
+    it('returns without querying when every incoming message has empty canonical parts', async () => {
+      await AgentMessageStore.upsertCanonicalMessagesForThread({ id: 17 }, [
+        { id: 'empty-message', role: 'user', parts: [] },
+      ]);
+
+      expect(mockMessageQuery).not.toHaveBeenCalled();
+    });
+
+    it('inserts an id-less message without performing an existing-id lookup', async () => {
+      const insert = jest.fn().mockResolvedValue({
+        id: 11,
+        uuid: '11111111-1111-4111-8111-111111111111',
+        clientMessageId: null,
+        metadata: {},
+      });
+      mockMessageQuery.mockReturnValueOnce({ insert });
+
+      await AgentMessageStore.upsertCanonicalMessagesForThread(
+        { id: 17 },
+        [{ role: 'assistant', parts: [{ type: 'text', text: 'No client id' }] }],
+        { runId: 29 }
+      );
+
+      expect(mockMessageQuery).toHaveBeenCalledTimes(1);
+      expect(insert).toHaveBeenCalledWith(expect.objectContaining({ threadId: 17, runId: 29 }));
+    });
+
+    it('looks up UUID and explicit client ids and reuses ids returned by an earlier patch', async () => {
+      const uuid = '22222222-2222-4222-8222-222222222222';
+      const existingRow = {
+        id: 11,
+        uuid,
+        role: 'assistant',
+        runId: 9,
+        clientMessageId: null,
+        metadata: {},
+      };
+      const lookup: any = {
+        where: jest.fn(),
+        whereIn: jest.fn(),
+        orWhereIn: jest.fn(),
+        orWhereRaw: jest.fn(),
+      };
+      lookup.where.mockImplementation((first) => {
+        if (typeof first === 'function') {
+          first(lookup);
+          return Promise.resolve([existingRow]);
+        }
+        return lookup;
+      });
+      lookup.whereIn.mockReturnValue(lookup);
+      lookup.orWhereIn.mockReturnValue(lookup);
+      lookup.orWhereRaw.mockReturnValue(lookup);
+      const updatedRow = {
+        ...existingRow,
+        clientMessageId: 'new-client-id',
+        metadata: { clientMessageId: 'new-client-id' },
+      };
+      const firstPatch = jest.fn().mockResolvedValue(updatedRow);
+      const secondPatch = jest.fn().mockResolvedValue(updatedRow);
+      mockMessageQuery
+        .mockReturnValueOnce(lookup)
+        .mockReturnValueOnce({ patchAndFetchById: firstPatch })
+        .mockReturnValueOnce({ patchAndFetchById: secondPatch });
+
+      await AgentMessageStore.upsertCanonicalMessagesForThread(
+        { id: 17 },
+        [
+          {
+            id: uuid,
+            clientMessageId: 'new-client-id',
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'First pass' }],
+          },
+          {
+            id: 'new-client-id',
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Second pass' }],
+          },
+        ],
+        { runId: 29 }
+      );
+
+      expect(lookup.whereIn).toHaveBeenCalledWith('uuid', [uuid]);
+      expect(lookup.orWhereIn).toHaveBeenCalledWith('clientMessageId', [uuid, 'new-client-id']);
+      expect(firstPatch).toHaveBeenCalledWith(11, expect.objectContaining({ clientMessageId: 'new-client-id' }));
+      expect(secondPatch).toHaveBeenCalledWith(11, expect.objectContaining({ runId: 9 }));
+    });
+  });
+
+  it('preserves an invalid stored assistant timestamp instead of inventing a duration', () => {
+    const result = AgentMessageStore.serializeCanonicalMessage(
+      {
+        uuid: '22222222-2222-4222-8222-222222222222',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Done' }],
+        metadata: {},
+        runStartedAt: 'not-a-time',
+        runCompletedAt: 'also-not-a-time',
+      } as any,
+      'thread-uuid'
+    );
+
+    expect(result.metadata).toEqual({ createdAt: 'not-a-time', completedAt: 'also-not-a-time' });
+  });
+
+  it('rejects direct serialization of a message with no canonical content', () => {
+    expect(() =>
+      AgentMessageStore.serializeCanonicalMessage(
+        {
+          uuid: '22222222-2222-4222-8222-222222222222',
+          role: 'assistant',
+          parts: [],
+          metadata: {},
+        } as any,
+        'thread-uuid'
+      )
+    ).toThrow('Agent message is not a public canonical message');
   });
 });

@@ -117,7 +117,11 @@ import AgentSandbox from 'server/models/AgentSandbox';
 import AgentSandboxExposure from 'server/models/AgentSandboxExposure';
 import AgentThread from 'server/models/AgentThread';
 import AgentUsageService from 'server/services/agent/AgentUsageService';
-import AgentSessionReadService from '../SessionReadService';
+import AgentThreadService from '../ThreadService';
+import AgentSessionReadService, {
+  DEFAULT_AGENT_SESSION_LIST_LIMIT,
+  MAX_AGENT_SESSION_LIST_LIMIT,
+} from '../SessionReadService';
 import { AgentChatStatus, AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 
 const mockSessionQuery = AgentSession.query as jest.Mock;
@@ -126,6 +130,7 @@ const mockSandboxQuery = AgentSandbox.query as jest.Mock;
 const mockSandboxExposureQuery = AgentSandboxExposure.query as jest.Mock;
 const mockThreadQuery = AgentThread.query as jest.Mock;
 const mockAggregateSessionsUsage = AgentUsageService.aggregateSessionsUsage as jest.Mock;
+const mockAggregateRuns = AgentUsageService.aggregateRuns as jest.Mock;
 
 const canonicalFailure = {
   stage: 'connect_runtime',
@@ -255,7 +260,7 @@ function buildSandbox(overrides: Record<string, unknown> = {}) {
 }
 
 function mockSingleSessionRelations(
-  source: unknown,
+  source: unknown | null,
   sandboxes: unknown[],
   activeDefaultThreads: unknown[] = [],
   threadSummaryRows: unknown[] = activeDefaultThreads.length ? [buildThreadSummaryRow()] : []
@@ -266,7 +271,7 @@ function mockSingleSessionRelations(
     sessionId: 17,
   };
 
-  mockSourceQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([source]) });
+  mockSourceQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue(source === null ? [] : [source]) });
   mockSandboxQuery.mockReturnValueOnce(buildOrderedQuery(sandboxes, 2));
   mockThreadQuery.mockReturnValueOnce({ whereIn: jest.fn().mockResolvedValue([defaultThread]) });
   mockThreadQuery.mockReturnValueOnce(buildOrderedQuery(activeDefaultThreads, 1));
@@ -407,7 +412,9 @@ describe('AgentSessionReadService', () => {
       limit: 1000,
     });
 
-    expect(sessionQuery.page).toHaveBeenCalledWith(1, 100);
+    expect(DEFAULT_AGENT_SESSION_LIST_LIMIT).toBe(25);
+    expect(MAX_AGENT_SESSION_LIST_LIMIT).toBe(100);
+    expect(sessionQuery.page).toHaveBeenCalledWith(1, MAX_AGENT_SESSION_LIST_LIMIT);
     expect(result.metadata.pagination).toEqual({
       current: 2,
       total: 2,
@@ -980,5 +987,265 @@ describe('AgentSessionReadService', () => {
         origin: 'legacy',
       })
     );
+  });
+
+  it('returns an empty list without issuing relation queries', async () => {
+    await expect(AgentSessionReadService.listSessionRecords([])).resolves.toEqual([]);
+
+    expect(mockSourceQuery).not.toHaveBeenCalled();
+    expect(mockSandboxQuery).not.toHaveBeenCalled();
+    expect(mockThreadQuery).not.toHaveBeenCalled();
+    expect(mockAggregateSessionsUsage).not.toHaveBeenCalled();
+  });
+
+  it('returns null for an unowned session and delegates an owned session to serialization', async () => {
+    const findOne = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(buildSession());
+    mockSessionQuery.mockReturnValue({ findOne });
+    const serialize = jest.spyOn(AgentSessionReadService, 'serializeSessionRecord').mockResolvedValue({ id: 'record' });
+
+    await expect(AgentSessionReadService.getOwnedSessionRecord('missing', 'sample-user')).resolves.toBeNull();
+    await expect(AgentSessionReadService.getOwnedSessionRecord('session-1', 'sample-user')).resolves.toEqual({
+      id: 'record',
+    });
+
+    expect(findOne).toHaveBeenNthCalledWith(1, { uuid: 'missing', userId: 'sample-user' });
+    expect(findOne).toHaveBeenNthCalledWith(2, { uuid: 'session-1', userId: 'sample-user' });
+    expect(serialize).toHaveBeenCalledTimes(1);
+    serialize.mockRestore();
+  });
+
+  it('serializes one session by delegating to the batched relation loader', async () => {
+    const session = buildSession();
+    const list = jest.spyOn(AgentSessionReadService, 'listSessionRecords').mockResolvedValue([{ id: 'record' }] as any);
+
+    await expect(AgentSessionReadService.serializeSessionRecord(session as any)).resolves.toEqual({ id: 'record' });
+    expect(list).toHaveBeenCalledWith([session]);
+
+    list.mockRestore();
+  });
+
+  it('rejects a session whose required source relation is missing', async () => {
+    const session = buildSession();
+    mockSingleSessionRelations(null, [buildSandbox()]);
+
+    await expect(AgentSessionReadService.listSessionRecords([session] as any)).rejects.toThrow(
+      'Agent session source missing for session session-1'
+    );
+  });
+
+  it('serializes malformed sandbox provider state as an empty public object', async () => {
+    const session = buildSession();
+    mockSingleSessionRelations(buildSource(), [
+      buildSandbox({ status: 'ready', error: null, providerState: 'invalid' }),
+    ]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.sandbox.providerState).toEqual({});
+    expect(record.sandbox.error).toBeNull();
+  });
+
+  it('normalizes Date activity, ignores an invalid Date, and clamps a non-finite conversation count', async () => {
+    const session = buildSession({ lastActivity: new Date('2026-04-24T12:10:00.000Z') });
+    const defaultThread = { id: 9, uuid: 'thread-1', sessionId: 17, title: 'Useful title' };
+    mockSingleSessionRelations(
+      buildSource(),
+      [],
+      [defaultThread],
+      [buildThreadSummaryRow({ conversationCount: 'not-a-number', lastActivityAt: new Date(Number.NaN) })]
+    );
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary).toEqual({
+      activeTitle: 'Useful title',
+      conversationCount: 0,
+      lastActivityAt: '2026-04-24T12:10:00.000Z',
+    });
+  });
+
+  it('ignores blank timestamps and message parts that cannot produce a title', async () => {
+    const session = buildSession({ lastActivity: '   ', updatedAt: null, createdAt: null });
+    mockThreadKnexRaw.mockResolvedValueOnce({
+      rows: [
+        {
+          sessionId: 17,
+          parts: [{ type: 'image', image: 'ignored' }, { type: 'text', text: '   ' }, null],
+        },
+      ],
+    });
+    mockSingleSessionRelations(buildSource(), []);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.title).toBeNull();
+    expect(record.conversationSummary.lastActivityAt).toBeNull();
+  });
+
+  it('adds the owning session id to serialized thread output', async () => {
+    (AgentThreadService.serializeThread as jest.Mock).mockReturnValue({ id: 'thread-1', title: 'Work' });
+
+    await expect(
+      AgentSessionReadService.serializeThread({ uuid: 'thread-1' } as any, buildSession() as any)
+    ).resolves.toEqual({
+      id: 'thread-1',
+      title: 'Work',
+      session: { id: 'session-1' },
+    });
+    expect(AgentThreadService.serializeThread).toHaveBeenCalledWith({ uuid: 'thread-1' }, 'session-1');
+  });
+
+  it('defaults invalid pagination and includes archived rows only when explicitly requested', async () => {
+    const sessionQuery = buildPagedSessionQuery([], 0);
+    mockSessionQuery.mockReturnValueOnce(sessionQuery);
+    const list = jest.spyOn(AgentSessionReadService, 'listSessionRecords').mockResolvedValue([]);
+
+    const result = await AgentSessionReadService.listOwnedSessionRecords('sample-user', {
+      page: Number.NaN,
+      limit: -2,
+      includeArchived: true,
+    });
+
+    expect(sessionQuery.where).toHaveBeenCalledWith({ userId: 'sample-user' });
+    expect(sessionQuery.whereIn).not.toHaveBeenCalled();
+    expect(sessionQuery.page).toHaveBeenCalledWith(0, DEFAULT_AGENT_SESSION_LIST_LIMIT);
+    expect(result).toEqual({
+      records: [],
+      metadata: {
+        pagination: {
+          current: 1,
+          total: 1,
+          items: 0,
+          limit: DEFAULT_AGENT_SESSION_LIST_LIMIT,
+        },
+      },
+    });
+    list.mockRestore();
+  });
+
+  it('projects only safe nonblank provider fields and uses empty-session relation fallbacks', async () => {
+    const session = buildSession({ workspaceRepos: [], selectedServices: [] });
+    const source = buildSource({
+      status: 'ready',
+      error: null,
+      input: {
+        defaults: { provider: '   ' },
+        repo: 'stale/repository',
+        branch: 'stale-branch',
+      },
+    });
+    const sandbox = buildSandbox({
+      status: 'ready',
+      error: null,
+      providerState: {
+        namespace: '  projected-namespace  ',
+        podName: '   ',
+        pvcName: '',
+        workspaceStorage: {
+          size: ' ',
+          accessMode: ' ReadWriteMany ',
+          pvcName: '',
+        },
+        selectedServices: [
+          {
+            name: ' ',
+            repositoryFullName: ' Example/API ',
+            branch: '',
+            deployableName: ' api ',
+            deployUuid: ' ',
+          },
+          { name: ' ', repositoryFullName: ' ' },
+        ],
+      },
+    });
+    mockAggregateSessionsUsage.mockResolvedValueOnce(new Map());
+    mockSingleSessionRelations(source, [sandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.session.defaults.provider).toBeNull();
+    expect(record.source.input).toEqual(
+      expect.objectContaining({
+        repo: null,
+        branch: null,
+        primaryRepo: null,
+        primaryBranch: null,
+        workspaceRepos: [],
+        selectedServices: [],
+        services: [],
+      })
+    );
+    expect(record.sandbox.providerState).toEqual({
+      namespace: 'projected-namespace',
+      workspaceStorage: { accessMode: 'ReadWriteMany' },
+      selectedServices: [{ repositoryFullName: 'Example/API', deployableName: 'api' }],
+    });
+    expect(record.sandbox.error).toBeNull();
+    expect(record.usage).toEqual({
+      usageSummary: { totalTokens: 0 },
+      usageByModel: [],
+      usageCompleteness: {
+        runCount: 0,
+        reportedRunCount: 0,
+        missingUsageRunCount: 0,
+        complete: true,
+      },
+    });
+    expect(mockAggregateRuns).toHaveBeenCalledWith([]);
+  });
+
+  it('selects the explicitly primary repository and omits empty nested provider state', async () => {
+    const session = buildSession({
+      workspaceRepos: [
+        { repo: 'example-org/secondary', branch: 'secondary-branch', primary: false },
+        { repo: 'example-org/primary', branch: 'primary-branch', primary: true },
+      ],
+    });
+    const sandbox = buildSandbox({
+      status: 'ready',
+      error: null,
+      providerState: {
+        namespace: 'sample-namespace',
+        workspaceStorage: { size: ' ', accessMode: '', pvcName: '   ' },
+        selectedServices: [{ name: ' ', repositoryFullName: '', branch: '   ' }],
+      },
+    });
+    mockSingleSessionRelations(buildSource({ status: 'ready', error: null }), [sandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.source.input).toEqual(
+      expect.objectContaining({
+        repo: 'example-org/primary',
+        branch: 'primary-branch',
+        primaryRepo: 'example-org/primary',
+        primaryBranch: 'primary-branch',
+      })
+    );
+    expect(record.sandbox.providerState).toEqual({ namespace: 'sample-namespace' });
+  });
+
+  it('projects the configured retention deadline for a suspended disposable workspace', async () => {
+    const session = buildSession({
+      keepWorkspace: false,
+      updatedAt: '2026-04-24T12:05:00.000Z',
+    });
+    const sandbox = buildSandbox({ status: 'suspended', error: null });
+    mockSingleSessionRelations(buildSource({ status: 'ready', error: null }), [sandbox]);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.sandbox.status).toBe('suspended');
+    expect(record.sandbox.retainedUntil).toBe('2026-04-25T12:05:00.000Z');
+    expect(record.sandbox.error).toBeNull();
+  });
+
+  it('omits a nonblank but unparseable activity timestamp', async () => {
+    const session = buildSession({ lastActivity: 'not-a-date', updatedAt: null, createdAt: null });
+    mockSingleSessionRelations(buildSource(), []);
+
+    const [record] = await AgentSessionReadService.listSessionRecords([session] as any);
+
+    expect(record.conversationSummary.lastActivityAt).toBeNull();
   });
 });

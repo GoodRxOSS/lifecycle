@@ -101,9 +101,9 @@ const runtimeControlsState = {
   disabledReason: null,
 };
 
-function makeRequest(body?: Record<string, unknown>): NextRequest {
+function makeRequest(body?: unknown): NextRequest {
   return {
-    json: jest.fn().mockResolvedValue(body || {}),
+    json: jest.fn().mockResolvedValue(body === undefined ? {} : body),
     headers: new Headers([['x-request-id', 'req-test']]),
     nextUrl: new URL('http://localhost/api/v2/ai/agent/threads/thread-1/runtime-controls'),
   } as unknown as NextRequest;
@@ -161,6 +161,70 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
     });
   });
 
+  it('PATCH trims choice ids before passing them to the service', async () => {
+    const response = await PATCH(makeRequest({ toolChoiceIds: [' rtc_optional '], mcpChoiceIds: [' rtc_mcp '] }), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockPatchChoices).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolChoiceIds: ['rtc_optional'],
+        mcpChoiceIds: ['rtc_mcp'],
+      })
+    );
+  });
+
+  it('PATCH preserves omitted choice collections as undefined', async () => {
+    const response = await PATCH(makeRequest({}), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockPatchChoices).toHaveBeenCalledWith(
+      expect.objectContaining({ toolChoiceIds: undefined, mcpChoiceIds: undefined })
+    );
+  });
+
+  it.each([
+    { label: 'a null body', body: null, message: 'Request body must be an object.' },
+    { label: 'an array body', body: [], message: 'Request body must be an object.' },
+    { label: 'a scalar body', body: 'tool', message: 'Request body must be an object.' },
+    {
+      label: 'unsupported fields',
+      body: { toolChoiceIds: [], futureChoiceIds: [], anotherField: true },
+      message: 'Unsupported runtime-control fields: futureChoiceIds, anotherField.',
+    },
+    {
+      label: 'a non-string tool choice',
+      body: { toolChoiceIds: [1] },
+      message: 'toolChoiceIds must contain only choice ids.',
+    },
+    {
+      label: 'a blank tool choice',
+      body: { toolChoiceIds: [' '] },
+      message: 'toolChoiceIds must contain only choice ids.',
+    },
+    {
+      label: 'a non-array MCP choice collection',
+      body: { mcpChoiceIds: 'rtc_mcp' },
+      message: 'mcpChoiceIds must be an array of choice ids.',
+    },
+    {
+      label: 'a blank MCP choice',
+      body: { mcpChoiceIds: [''] },
+      message: 'mcpChoiceIds must contain only choice ids.',
+    },
+  ])('rejects $label before patching choices', async ({ body, message }) => {
+    const response = await PATCH(makeRequest(body), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe(message);
+    expect(mockPatchChoices).not.toHaveBeenCalled();
+  });
+
   it('returns 400 for malformed bodies and unknown choices', async () => {
     const malformed = await PATCH(makeRequest({ toolChoiceIds: 'workspace_files' }), {
       params: Promise.resolve({ threadId: 'thread-1' }),
@@ -209,5 +273,26 @@ describe('/api/v2/ai/agent/threads/[threadId]/runtime-controls', () => {
     const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
 
     expect(response.status).toBe(401);
+  });
+
+  it('rejects an unauthenticated PATCH before reading JSON', async () => {
+    mockGetRequestUserIdentity.mockReturnValue(null);
+    const request = makeRequest({ toolChoiceIds: [] });
+
+    const response = await PATCH(request, { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(401);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(mockPatchChoices).not.toHaveBeenCalled();
+  });
+
+  it('maps an unexpected patch failure to 500', async () => {
+    mockPatchChoices.mockRejectedValue(new Error('runtime control store unavailable'));
+
+    const response = await PATCH(makeRequest({ toolChoiceIds: [] }), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
+
+    expect(response.status).toBe(500);
   });
 });

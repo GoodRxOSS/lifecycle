@@ -67,7 +67,12 @@ jest.mock('../WorkspaceRuntimeStateService', () => ({
   },
 }));
 
-import AgentThreadService from 'server/services/agent/ThreadService';
+import AgentThreadService, {
+  buildRuntimeControlChoicesMetadataPatch,
+  buildToolApprovalAllowlistMetadataPatch,
+  getRuntimeControlChoices,
+  getToolApprovalAllowlist,
+} from 'server/services/agent/ThreadService';
 import AgentRunService, { TERMINAL_RUN_STATUSES } from 'server/services/agent/RunService';
 
 const trx = { trx: true };
@@ -127,6 +132,29 @@ function mockThreadFindOne(thread: unknown) {
   const findOne = jest.fn().mockResolvedValue(thread);
   mockAgentThreadQuery.mockReturnValueOnce({ findOne });
   return findOne;
+}
+
+function mockOwnedThreadQuery(thread: unknown) {
+  const query = {
+    alias: jest.fn(),
+    joinRelated: jest.fn(),
+    where: jest.fn(),
+    select: jest.fn(),
+    first: jest.fn().mockResolvedValue(thread),
+  };
+  query.alias.mockReturnValue(query);
+  query.joinRelated.mockReturnValue(query);
+  query.where.mockReturnValue(query);
+  query.select.mockReturnValue(query);
+  mockAgentThreadQuery.mockReturnValueOnce(query);
+  return query;
+}
+
+function mockThreadMetadataPatch(thread: unknown, patchedThread: unknown) {
+  const findById = jest.fn().mockResolvedValue(thread);
+  const patchAndFetchById = jest.fn().mockResolvedValue(patchedThread);
+  mockAgentThreadQuery.mockReturnValueOnce({ findById }).mockReturnValueOnce({ patchAndFetchById });
+  return { findById, patchAndFetchById };
 }
 
 function mockThreadInsert(thread: unknown) {
@@ -230,6 +258,62 @@ describe('AgentThreadService', () => {
     await expect(AgentThreadService.getDefaultThreadForSession('session-1', 'user-123')).resolves.toBe(existingThread);
   });
 
+  it('returns an owned thread through the user-scoped relation query', async () => {
+    const thread = { id: 3, uuid: 'thread-1', sessionId: 17 };
+    const query = mockOwnedThreadQuery(thread);
+
+    await expect(AgentThreadService.getOwnedThread('thread-1', 'user-123')).resolves.toBe(thread);
+
+    expect(query.alias).toHaveBeenCalledWith('thread');
+    expect(query.joinRelated).toHaveBeenCalledWith('session');
+    expect(query.where).toHaveBeenNthCalledWith(1, 'thread.uuid', 'thread-1');
+    expect(query.where).toHaveBeenNthCalledWith(2, 'session.userId', 'user-123');
+    expect(query.select).toHaveBeenCalledWith('thread.*');
+  });
+
+  it('rejects an owned-thread lookup when the scoped query finds nothing', async () => {
+    mockOwnedThreadQuery(null);
+
+    await expect(AgentThreadService.getOwnedThread('missing', 'user-123')).rejects.toThrow('Agent thread not found');
+  });
+
+  it('returns an owned thread together with its verified session', async () => {
+    const thread = { id: 3, uuid: 'thread-1', sessionId: 17 };
+    const session = buildSession({ id: 17, userId: 'user-123' });
+    const query = mockOwnedThreadQuery(thread);
+    const findById = jest.fn().mockResolvedValue(session);
+    mockAgentSessionQuery.mockReturnValueOnce({ findById });
+
+    await expect(AgentThreadService.getOwnedThreadWithSession('thread-1', 'user-123')).resolves.toEqual({
+      thread,
+      session,
+    });
+
+    expect(query.select).toHaveBeenCalledWith('thread.*', 'session.uuid as sessionUuid');
+    expect(findById).toHaveBeenCalledWith(17);
+  });
+
+  it('rejects an owned-thread-with-session lookup when the thread is absent', async () => {
+    mockOwnedThreadQuery(null);
+
+    await expect(AgentThreadService.getOwnedThreadWithSession('missing', 'user-123')).rejects.toThrow(
+      'Agent thread not found'
+    );
+    expect(mockAgentSessionQuery).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing session', null],
+    ['different owner', buildSession({ userId: 'another-user' })],
+  ])('rejects a thread whose backing session has a %s', async (_description, session) => {
+    mockOwnedThreadQuery({ id: 3, uuid: 'thread-1', sessionId: 17 });
+    mockAgentSessionQuery.mockReturnValueOnce({ findById: jest.fn().mockResolvedValue(session) });
+
+    await expect(AgentThreadService.getOwnedThreadWithSession('thread-1', 'user-123')).rejects.toThrow(
+      'Agent session not found'
+    );
+  });
+
   it('prefers the session current-thread pointer over the legacy default-thread marker', async () => {
     const session = { id: 17, uuid: 'sample-session', userId: 'sample-user', defaultThreadId: 31 };
     const currentThread = { id: 31, uuid: 'sample-thread-2', sessionId: 17, isDefault: false };
@@ -248,6 +332,46 @@ describe('AgentThreadService', () => {
       archivedAt: null,
     });
     expect(mockAgentThreadQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the legacy default thread when the session pointer is absent', async () => {
+    const session = { id: 17, uuid: 'sample-session', userId: 'sample-user', defaultThreadId: null };
+    const legacyDefault = { id: 30, uuid: 'legacy-default', sessionId: 17, isDefault: true };
+    mockAgentSessionQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) });
+    const findOne = jest.fn().mockResolvedValue(legacyDefault);
+    mockAgentThreadQuery.mockReturnValueOnce({ findOne });
+
+    await expect(AgentThreadService.getDefaultThreadForSession('sample-session', 'sample-user')).resolves.toBe(
+      legacyDefault
+    );
+
+    expect(findOne).toHaveBeenCalledWith({ sessionId: 17, isDefault: true, archivedAt: null });
+  });
+
+  it('reports the original failure when default-thread insertion loses without a concurrent winner', async () => {
+    const session = { id: 17, uuid: 'session-1', userId: 'user-123' };
+    mockAgentSessionQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) });
+    mockAgentThreadQuery
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ insertAndFetch: jest.fn().mockRejectedValue('database offline') })
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(null) });
+
+    await expect(AgentThreadService.getDefaultThreadForSession('session-1', 'user-123')).rejects.toThrow(
+      'Failed to create default thread: database offline'
+    );
+  });
+
+  it('preserves an Error message when default-thread insertion fails without a winner', async () => {
+    const session = { id: 17, uuid: 'session-1', userId: 'user-123' };
+    mockAgentSessionQuery.mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) });
+    mockAgentThreadQuery
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ insertAndFetch: jest.fn().mockRejectedValue(new Error('connection refused')) })
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(null) });
+
+    await expect(AgentThreadService.getDefaultThreadForSession('session-1', 'user-123')).rejects.toThrow(
+      'Failed to create default thread: connection refused'
+    );
   });
 
   it('creates a default thread before listing threads for a session', async () => {
@@ -350,12 +474,15 @@ describe('AgentThreadService', () => {
       uuid: 'sample-run-prior-thread',
       threadId: 102,
       status: 'failed',
-      usageSummary: {},
+      resolvedProvider: null,
+      resolvedModel: null,
+      usageSummary: undefined,
       queuedAt: '2026-05-09T00:08:00.000Z',
       startedAt: '2026-05-09T00:09:00.000Z',
       completedAt: '2026-05-09T00:10:00.000Z',
-      createdAt: '2026-05-09T00:08:00.000Z',
-      updatedAt: '2026-05-09T00:10:00.000Z',
+      cancelledAt: 'not-a-date',
+      createdAt: undefined,
+      updatedAt: undefined,
     };
     mockAgentSessionQuery
       .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) })
@@ -422,7 +549,15 @@ describe('AgentThreadService', () => {
           messageCount: 1,
           runCount: 1,
           pendingActionsCount: 2,
-          latestRun: expect.objectContaining({ id: 'sample-run-prior-thread', status: 'failed' }),
+          latestRun: expect.objectContaining({
+            id: 'sample-run-prior-thread',
+            status: 'failed',
+            resolvedProvider: 'openai',
+            resolvedModel: 'gpt-5',
+            usageSummary: {},
+            createdAt: null,
+            updatedAt: null,
+          }),
           usage: expect.objectContaining({
             usageSummary: { totalTokens: 0 },
             usageCompleteness: {
@@ -488,6 +623,22 @@ describe('AgentThreadService', () => {
     ]);
   });
 
+  it('returns empty history without querying child records when no active threads exist', async () => {
+    const session = buildSession({ defaultThreadId: 101 });
+    const currentThread = { id: 101, uuid: 'current', sessionId: 17, archivedAt: null };
+    mockAgentSessionQuery
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) })
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(session) });
+    mockThreadFindOne(currentThread);
+    mockThreadList([]);
+
+    await expect(AgentThreadService.listThreadHistoryForSession('sample-session', 'sample-user')).resolves.toEqual([]);
+
+    expect(mockAgentMessageQuery).not.toHaveBeenCalled();
+    expect(mockAgentRunQuery).not.toHaveBeenCalled();
+    expect(mockAgentPendingActionQuery).not.toHaveBeenCalled();
+  });
+
   it.each(['archived', 'error'])('blocks new threads for %s sessions', async (status) => {
     mockOwnedSessionLock(buildSession({ status }));
 
@@ -495,6 +646,26 @@ describe('AgentThreadService', () => {
       'Cannot create a thread for an inactive session'
     );
     expect(mockAgentThreadQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns a typed not-found reason when the target session does not exist', async () => {
+    mockOwnedSessionLock(null as any);
+
+    await expect(AgentThreadService.createThread('missing-session', 'sample-user')).rejects.toMatchObject({
+      name: 'AgentThreadCreateNotFoundError',
+      reason: 'session_not_found',
+    });
+    expect(mockAgentRunQuery).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes a session that is still starting from other unavailable sessions', async () => {
+    mockOwnedSessionLock(buildSession({ sessionKind: 'environment', workspaceStatus: 'provisioning' }));
+
+    await expect(AgentThreadService.createThread('sample-session', 'sample-user')).rejects.toMatchObject({
+      name: 'AgentThreadCreateConflictError',
+      reason: 'session_starting',
+    });
+    expect(mockAgentRunQuery).not.toHaveBeenCalled();
   });
 
   it('blocks new threads when the session runtime cannot accept messages', async () => {
@@ -542,6 +713,26 @@ describe('AgentThreadService', () => {
     });
     expect(patchAndFetchById).toHaveBeenCalledWith(17, {
       defaultThreadId: 31,
+    });
+  });
+
+  it('creates an untitled thread when optional input and current-thread metadata are absent', async () => {
+    const createdThread = { id: 32, uuid: 'sample-thread-untitled', sessionId: 17, isDefault: true };
+    mockOwnedSessionLock(buildSession({ defaultThreadId: 23 }));
+    mockActiveRun();
+    mockPendingAction();
+    mockThreadFindOne(null);
+    mockDefaultThreadDemotion();
+    const insertAndFetch = mockThreadInsert(createdThread);
+    mockDefaultThreadPointerPatch();
+
+    await expect(AgentThreadService.createThread('sample-session', 'sample-user', {})).resolves.toBe(createdThread);
+
+    expect(insertAndFetch).toHaveBeenCalledWith({
+      sessionId: 17,
+      title: null,
+      isDefault: true,
+      metadata: { sessionUuid: 'sample-session' },
     });
   });
 
@@ -722,6 +913,8 @@ describe('AgentThreadService', () => {
         metadata: {},
       } as any)
     ).toBeNull();
+    expect(AgentThreadService.getSelectedAgentDefinitionId({ metadata: null } as any)).toBeNull();
+    expect(AgentThreadService.getSelectedAgentDefinitionId({ metadata: [] } as any)).toBeNull();
   });
 
   it('builds a scoped selected agent definition metadata patch', () => {
@@ -745,5 +938,176 @@ describe('AgentThreadService', () => {
         },
       } as any)
     ).toBeNull();
+  });
+
+  it('normalizes runtime-control metadata from persisted thread state', () => {
+    const thread = {
+      metadata: {
+        runtimeControlChoices: {
+          version: 1,
+          toolChoiceIds: [' tool-1 ', 'tool-1', '', 12],
+          mcpChoiceIds: ['mcp-1', ' mcp-2 '],
+        },
+      },
+    } as any;
+
+    expect(getRuntimeControlChoices(thread)).toEqual({
+      version: 1,
+      toolChoiceIds: ['tool-1'],
+      mcpChoiceIds: ['mcp-1', 'mcp-2'],
+    });
+  });
+
+  it.each([
+    ['missing metadata', {}],
+    ['array metadata', { runtimeControlChoices: [] }],
+    ['unsupported version', { runtimeControlChoices: { version: 2, toolChoiceIds: [], mcpChoiceIds: [] } }],
+    ['missing tool choices', { runtimeControlChoices: { version: 1, mcpChoiceIds: [] } }],
+    ['missing MCP choices', { runtimeControlChoices: { version: 1, toolChoiceIds: [] } }],
+  ])('rejects %s for runtime-control choices', (_description, metadata) => {
+    expect(getRuntimeControlChoices({ metadata } as any)).toBeNull();
+  });
+
+  it('builds detached runtime-control metadata arrays', () => {
+    const choices = { version: 1 as const, toolChoiceIds: ['tool-1'], mcpChoiceIds: ['mcp-1'] };
+    const patch = buildRuntimeControlChoicesMetadataPatch(choices);
+    choices.toolChoiceIds.push('tool-2');
+
+    expect(patch).toEqual({
+      runtimeControlChoices: { version: 1, toolChoiceIds: ['tool-1'], mcpChoiceIds: ['mcp-1'] },
+    });
+  });
+
+  it('normalizes and deduplicates the persisted tool approval allowlist', () => {
+    const thread = {
+      metadata: {
+        toolApprovalAllowlist: { version: 1, toolKeys: [' shell ', 'shell', '', 4, 'github'] },
+      },
+    } as any;
+
+    expect(getToolApprovalAllowlist(thread)).toEqual(['shell', 'github']);
+    expect(buildToolApprovalAllowlistMetadataPatch([' shell ', 'shell', '', 'github'])).toEqual({
+      toolApprovalAllowlist: { version: 1, toolKeys: ['shell', 'github'] },
+    });
+  });
+
+  it.each([
+    ['missing metadata', {}],
+    ['array metadata', { toolApprovalAllowlist: [] }],
+    ['unsupported version', { toolApprovalAllowlist: { version: 2, toolKeys: [] } }],
+    ['missing keys', { toolApprovalAllowlist: { version: 1 } }],
+  ])('returns an empty tool allowlist for %s', (_description, metadata) => {
+    expect(getToolApprovalAllowlist({ metadata } as any)).toEqual([]);
+  });
+
+  it('patches runtime-control choices while preserving unrelated thread metadata', async () => {
+    const thread = { id: 21, metadata: { sessionUuid: 'session-1', preserved: true } };
+    const patchedThread = { ...thread, metadata: { ...thread.metadata, runtimeControlChoices: {} } };
+    const { findById, patchAndFetchById } = mockThreadMetadataPatch(thread, patchedThread);
+    const choices = { version: 1 as const, toolChoiceIds: ['tool-1'], mcpChoiceIds: ['mcp-1'] };
+
+    await expect(AgentThreadService.patchRuntimeControlChoices(21, choices, trx as any)).resolves.toBe(patchedThread);
+
+    expect(findById).toHaveBeenCalledWith(21);
+    expect(patchAndFetchById).toHaveBeenCalledWith(21, {
+      metadata: {
+        sessionUuid: 'session-1',
+        preserved: true,
+        runtimeControlChoices: choices,
+      },
+    });
+    expect(mockAgentThreadQuery).toHaveBeenNthCalledWith(1, trx);
+    expect(mockAgentThreadQuery).toHaveBeenNthCalledWith(2, trx);
+
+    const emptyMetadataResult = { id: 22, metadata: { runtimeControlChoices: choices } };
+    const emptyMetadataPatch = mockThreadMetadataPatch(
+      { id: 22, metadata: null },
+      emptyMetadataResult
+    ).patchAndFetchById;
+    await expect(AgentThreadService.patchRuntimeControlChoices(22, choices)).resolves.toBe(emptyMetadataResult);
+    expect(emptyMetadataPatch).toHaveBeenCalledWith(22, {
+      metadata: { runtimeControlChoices: choices },
+    });
+  });
+
+  it('sets and extends tool approval allowlists without duplicates', async () => {
+    const setThread = { id: 21, metadata: null };
+    const setResult = { id: 21, metadata: { toolApprovalAllowlist: { version: 1, toolKeys: ['shell'] } } };
+    const setPatch = mockThreadMetadataPatch(setThread, setResult).patchAndFetchById;
+
+    await expect(AgentThreadService.setToolApprovalAllowlist(21, [' shell ', 'shell'])).resolves.toBe(setResult);
+    expect(setPatch).toHaveBeenCalledWith(21, {
+      metadata: { toolApprovalAllowlist: { version: 1, toolKeys: ['shell'] } },
+    });
+
+    const existing = {
+      id: 22,
+      metadata: { preserved: true, toolApprovalAllowlist: { version: 1, toolKeys: ['shell'] } },
+    };
+    const addResult = { id: 22, metadata: existing.metadata };
+    const addPatch = mockThreadMetadataPatch(existing, addResult).patchAndFetchById;
+
+    await expect(AgentThreadService.addToolApprovalAllowlistEntry(22, ' shell ')).resolves.toBe(addResult);
+    expect(addPatch).toHaveBeenCalledWith(22, {
+      metadata: {
+        preserved: true,
+        toolApprovalAllowlist: { version: 1, toolKeys: ['shell'] },
+      },
+    });
+
+    const emptyMetadataAddResult = {
+      id: 23,
+      metadata: { toolApprovalAllowlist: { version: 1, toolKeys: ['github'] } },
+    };
+    const emptyMetadataAddPatch = mockThreadMetadataPatch(
+      { id: 23, metadata: null },
+      emptyMetadataAddResult
+    ).patchAndFetchById;
+    await expect(AgentThreadService.addToolApprovalAllowlistEntry(23, 'github')).resolves.toBe(emptyMetadataAddResult);
+    expect(emptyMetadataAddPatch).toHaveBeenCalledWith(23, {
+      metadata: { toolApprovalAllowlist: { version: 1, toolKeys: ['github'] } },
+    });
+  });
+
+  it.each([
+    [
+      'runtime choices',
+      () => AgentThreadService.patchRuntimeControlChoices(999, { version: 1, toolChoiceIds: [], mcpChoiceIds: [] }),
+    ],
+    ['allowlist replacement', () => AgentThreadService.setToolApprovalAllowlist(999, [])],
+    ['allowlist extension', () => AgentThreadService.addToolApprovalAllowlistEntry(999, 'shell')],
+  ])('rejects %s updates for a missing thread', async (_description, update) => {
+    mockAgentThreadQuery.mockReturnValueOnce({ findById: jest.fn().mockResolvedValue(null) });
+
+    await expect(update()).rejects.toThrow('Agent thread not found');
+    expect(mockAgentThreadQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes nullable storage fields with safe metadata and timestamp defaults', () => {
+    expect(
+      AgentThreadService.serializeThread(
+        {
+          uuid: 'thread-1',
+          title: null,
+          isDefault: false,
+          archivedAt: null,
+          lastRunAt: null,
+          metadata: null,
+          createdAt: null,
+          updatedAt: undefined,
+        } as any,
+        'session-1'
+      )
+    ).toEqual({
+      id: 'thread-1',
+      sessionId: 'session-1',
+      title: null,
+      isDefault: false,
+      archivedAt: null,
+      lastRunAt: null,
+      metadata: {},
+      createdAt: null,
+      updatedAt: null,
+    });
   });
 });

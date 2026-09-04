@@ -49,6 +49,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => {
 import AgentRun from 'server/models/AgentRun';
 import AgentRunEvent from 'server/models/AgentRunEvent';
 import AgentRunEventService, { RUN_EVENT_STREAM_POLL_INTERVAL_MS } from '../RunEventService';
+import { normalizeRunEventPageLimit } from '../RunEventService';
 import { AgentRunOwnershipLostError } from '../AgentRunOwnershipLostError';
 
 const mockRunQuery = AgentRun.query as jest.Mock;
@@ -58,6 +59,8 @@ const mockRunEventQuery = AgentRunEvent.query as jest.Mock;
 
 describe('AgentRunEventService', () => {
   beforeEach(() => {
+    delete (globalThis as any).__lifecycleRunEventNotify;
+    delete (globalThis as any).__lifecyclePgNotificationListeners;
     jest.clearAllMocks();
     mockRunTransaction.mockImplementation(async (callback) => callback({ trx: true }));
     mockRunEventKnex.mockReturnValue({
@@ -911,5 +914,523 @@ describe('AgentRunEventService', () => {
     expect(listRunEventsPage).toHaveBeenCalled();
     expect(typeof text).toBe('string');
     ensureTerminal.mockRestore();
+  });
+
+  it.each([
+    [undefined, 100],
+    [Number.NaN, 100],
+    [0, 1],
+    [1.9, 1],
+    [501, 500],
+  ])('normalizes event page limit %p to %s', (input, expected) => {
+    expect(normalizeRunEventPageLimit(input)).toBe(expected);
+  });
+
+  it('falls back to numeric relation ids and the cursor for an empty event page', async () => {
+    const limit = jest.fn().mockResolvedValue([]);
+    const orderById = jest.fn().mockReturnValue({ limit });
+    const orderBySequence = jest.fn().mockReturnValue({ orderBy: orderById });
+    const whereSequence = jest.fn().mockReturnValue({ orderBy: orderBySequence });
+    const whereRun = jest.fn().mockReturnValue({ where: whereSequence });
+    mockRunEventQuery.mockReturnValue({ where: whereRun });
+
+    const result = await AgentRunEventService.listRunEventsPageForRun(
+      {
+        id: 17,
+        uuid: 'run-1',
+        threadId: 11,
+        sessionId: 13,
+        status: 'running',
+      } as any,
+      { afterSequence: -2.8, limit: Number.POSITIVE_INFINITY }
+    );
+
+    expect(whereSequence).toHaveBeenCalledWith('sequence', '>', 0);
+    expect(limit).toHaveBeenCalledWith(101);
+    expect(result).toEqual(
+      expect.objectContaining({
+        events: [],
+        nextSequence: 0,
+        hasMore: false,
+        limit: 100,
+      })
+    );
+  });
+
+  it('loads a run by UUID before delegating event page construction', async () => {
+    const run = { id: 17, uuid: 'run-1', status: 'running' };
+    const first = jest.fn().mockResolvedValue(run);
+    const select = jest.fn().mockReturnValue({ first });
+    const where = jest.fn().mockReturnValue({ select });
+    const joinRelated = jest.fn().mockReturnValue({ where });
+    const alias = jest.fn().mockReturnValue({ joinRelated });
+    mockRunQuery.mockReturnValue({ alias });
+    const page = { events: [], nextSequence: 0 } as any;
+    const listForRun = jest.spyOn(AgentRunEventService, 'listRunEventsPageForRun').mockResolvedValue(page);
+
+    await expect(AgentRunEventService.listRunEventsPage('run-1', { limit: 25 })).resolves.toBe(page);
+
+    expect(alias).toHaveBeenCalledWith('run');
+    expect(joinRelated).toHaveBeenCalledWith('[thread, session]');
+    expect(where).toHaveBeenCalledWith('run.uuid', 'run-1');
+    expect(select).toHaveBeenCalledWith('run.*', 'thread.uuid as threadUuid', 'session.uuid as sessionUuid');
+    expect(listForRun).toHaveBeenCalledWith(run, { limit: 25 });
+  });
+
+  it('returns null when event-page run lookup misses', async () => {
+    const first = jest.fn().mockResolvedValue(undefined);
+    const select = jest.fn().mockReturnValue({ first });
+    const where = jest.fn().mockReturnValue({ select });
+    const joinRelated = jest.fn().mockReturnValue({ where });
+    const alias = jest.fn().mockReturnValue({ joinRelated });
+    mockRunQuery.mockReturnValue({ alias });
+
+    await expect(AgentRunEventService.listRunEventsPage('missing')).resolves.toBeNull();
+  });
+
+  it('returns immediately for nonpositive waits and already-aborted waits', async () => {
+    const ensureListening = jest.spyOn(AgentRunEventService as any, 'ensureNotificationListener');
+
+    await expect(AgentRunEventService.waitForRunEventNotification('run-1', 2, 0)).resolves.toBe(false);
+    await expect(
+      AgentRunEventService.waitForRunEventNotification('run-1', 2, 100, { aborted: true } as AbortSignal)
+    ).resolves.toBe(false);
+    expect(ensureListening).not.toHaveBeenCalled();
+  });
+
+  it('receives valid PostgreSQL notifications, ignores stale and invalid payloads, and removes its subscriber', async () => {
+    let notificationHandler: ((notification: { channel?: string; payload?: string }) => void) | undefined;
+    const connection = {
+      on: jest.fn((event: string, handler: (notification: { channel?: string; payload?: string }) => void) => {
+        if (event === 'notification') notificationHandler = handler;
+      }),
+      query: jest.fn().mockResolvedValue(undefined),
+      removeListener: jest.fn(),
+    };
+    const acquireConnection = jest.fn().mockResolvedValue(connection);
+    mockRunEventKnex.mockReturnValue({
+      client: {
+        acquireConnection,
+        releaseConnection: jest.fn(),
+      },
+    });
+
+    const promise = AgentRunEventService.waitForRunEventNotification('run-1', 7, 5000);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(notificationHandler).toBeDefined();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if ((globalThis as any).__lifecycleRunEventNotify?.subscribers?.has('run-1')) break;
+      await Promise.resolve();
+    }
+    expect((globalThis as any).__lifecycleRunEventNotify.subscribers.has('run-1')).toBe(true);
+
+    notificationHandler?.({ channel: 'agent_run_events', payload: undefined });
+    notificationHandler?.({ channel: 'agent_run_events', payload: '{invalid' });
+    notificationHandler?.({ channel: 'agent_run_events', payload: JSON.stringify({ runId: 'run-1' }) });
+    notificationHandler?.({
+      channel: 'agent_run_events',
+      payload: JSON.stringify({ runId: 'run-1', latestSequence: 7 }),
+    });
+    notificationHandler?.({
+      channel: 'agent_run_events',
+      payload: JSON.stringify({ runId: 'unsubscribed-run', latestSequence: 9 }),
+    });
+    notificationHandler?.({
+      channel: 'agent_run_events',
+      payload: JSON.stringify({ runId: 'run-1', latestSequence: 8 }),
+    });
+
+    await expect(promise).resolves.toBe(true);
+    expect((globalThis as any).__lifecycleRunEventNotify.subscribers.has('run-1')).toBe(false);
+  });
+
+  it('cleans a notification wait on abort and on timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      jest.spyOn(AgentRunEventService as any, 'ensureNotificationListener').mockResolvedValue(undefined);
+      const controller = new AbortController();
+      const aborted = AgentRunEventService.waitForRunEventNotification('run-abort', 0, 1000, controller.signal);
+      await Promise.resolve();
+      controller.abort();
+      await expect(aborted).resolves.toBe(false);
+
+      const timedOut = AgentRunEventService.waitForRunEventNotification('run-timeout', 0, 50);
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(50);
+      await expect(timedOut).resolves.toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('contains PostgreSQL notify failures', async () => {
+    const failure = new Error('notify unavailable');
+    const raw = jest.fn().mockRejectedValue(failure);
+    mockRunEventKnex.mockReturnValue({ raw });
+
+    await expect(AgentRunEventService.notifyRunEventsInserted('run-1', 9)).resolves.toBeUndefined();
+
+    expect(raw).toHaveBeenCalledWith('select pg_notify(?, ?)', [
+      'agent_run_events',
+      JSON.stringify({ runId: 'run-1', latestSequence: 9 }),
+    ]);
+  });
+
+  it('emits keepalives while a run remains open before its terminal event arrives', async () => {
+    const terminalEvent = {
+      uuid: 'event-2',
+      runUuid: 'run-1',
+      threadUuid: 'thread-1',
+      sessionUuid: 'session-1',
+      runId: 17,
+      sequence: 2,
+      eventType: 'run.completed',
+      payload: { status: 'completed' },
+      createdAt: null,
+      updatedAt: null,
+    } as any;
+    jest
+      .spyOn(AgentRunEventService, 'listRunEventsPage')
+      .mockResolvedValueOnce({
+        events: [],
+        nextSequence: 1,
+        hasMore: false,
+        run: { id: 'run-1', status: 'running' },
+        limit: 1,
+        maxLimit: 500,
+      })
+      .mockResolvedValueOnce({
+        events: [terminalEvent],
+        nextSequence: 2,
+        hasMore: false,
+        run: { id: 'run-1', status: 'completed' },
+        limit: 1,
+        maxLimit: 500,
+      });
+    const findOne = jest
+      .fn()
+      .mockResolvedValueOnce({ uuid: 'run-1', status: 'running' })
+      .mockResolvedValueOnce({ uuid: 'run-1', status: 'completed' });
+    mockRunQuery.mockReturnValue({ findOne });
+    const wait = jest.spyOn(AgentRunEventService, 'waitForRunEventNotification').mockResolvedValue(false);
+
+    const text = await new Response(
+      AgentRunEventService.createCanonicalRunEventStream('run-1', Number.NaN, {
+        pageLimit: 0,
+        pollIntervalMs: 5,
+      })
+    ).text();
+
+    expect(wait).toHaveBeenCalledWith('run-1', 1, 5, expect.any(AbortSignal));
+    expect(text).toContain(': keepalive');
+    expect(text).toContain('event: run.completed');
+  });
+
+  it('closes a stream whose run or event page no longer exists and supports consumer cancellation', async () => {
+    const list = jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue(null);
+    const missingPageText = await new Response(AgentRunEventService.createCanonicalRunEventStream('missing', 0)).text();
+    expect(missingPageText).toBe('');
+
+    list.mockImplementation(() => new Promise(() => undefined));
+    const stream = AgentRunEventService.createCanonicalRunEventStream('run-1', 0);
+    await expect(stream.cancel()).resolves.toBeUndefined();
+  });
+
+  it('does not enqueue a page that finishes loading after the consumer disconnects', async () => {
+    let resolvePage!: (page: any) => void;
+    const page = new Promise<any>((resolve) => {
+      resolvePage = resolve;
+    });
+    const list = jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockReturnValue(page);
+    const stream = AgentRunEventService.createCanonicalRunEventStream('run-1', 0);
+
+    await expect(stream.cancel()).resolves.toBeUndefined();
+    resolvePage({
+      events: [
+        {
+          uuid: 'event-1',
+          runUuid: 'run-1',
+          threadUuid: 'thread-1',
+          sessionUuid: 'session-1',
+          runId: 17,
+          sequence: 1,
+          eventType: 'message.delta',
+          payload: { partType: 'text', partId: 'text-1', delta: 'late' },
+          createdAt: null,
+          updatedAt: null,
+        },
+      ],
+      nextSequence: 1,
+      hasMore: false,
+      run: { id: 'run-1', status: 'running' },
+      limit: 100,
+      maxLimit: 500,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(mockRunQuery).not.toHaveBeenCalled();
+  });
+
+  it('does not enqueue a keepalive when the consumer disconnects during the run lookup', async () => {
+    jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue({
+      events: [],
+      nextSequence: 0,
+      hasMore: false,
+      run: { id: 'run-1', status: 'running' },
+      limit: 100,
+      maxLimit: 500,
+    });
+    let resolveRun!: (run: any) => void;
+    const run = new Promise<any>((resolve) => {
+      resolveRun = resolve;
+    });
+    const findOne = jest.fn().mockReturnValue(run);
+    mockRunQuery.mockReturnValue({ findOne });
+    const wait = jest.spyOn(AgentRunEventService, 'waitForRunEventNotification');
+    const stream = AgentRunEventService.createCanonicalRunEventStream('run-1', 0);
+
+    await Promise.resolve();
+    await expect(stream.cancel()).resolves.toBeUndefined();
+    resolveRun({ uuid: 'run-1', status: 'running' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(findOne).toHaveBeenCalledWith({ uuid: 'run-1' });
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it('closes after draining when the run disappears before its status check', async () => {
+    jest.spyOn(AgentRunEventService, 'listRunEventsPage').mockResolvedValue({
+      events: [],
+      nextSequence: 0,
+      hasMore: false,
+      run: { id: 'run-1', status: 'running' },
+      limit: 100,
+      maxLimit: 500,
+    });
+    mockRunQuery.mockReturnValue({ findOne: jest.fn().mockResolvedValue(undefined) });
+
+    await expect(new Response(AgentRunEventService.createCanonicalRunEventStream('run-1', 0)).text()).resolves.toBe('');
+  });
+
+  it('closes when the terminal-status final drain can no longer find the run page', async () => {
+    jest
+      .spyOn(AgentRunEventService, 'listRunEventsPage')
+      .mockResolvedValueOnce({
+        events: [],
+        nextSequence: 0,
+        hasMore: false,
+        run: { id: 'run-1', status: 'running' },
+        limit: 100,
+        maxLimit: 500,
+      })
+      .mockResolvedValueOnce(null);
+    mockRunQuery.mockReturnValue({
+      findOne: jest.fn().mockResolvedValue({ uuid: 'run-1', status: 'completed' }),
+    });
+
+    await expect(new Response(AgentRunEventService.createCanonicalRunEventStream('run-1', 0)).text()).resolves.toBe('');
+  });
+
+  it('repairs a missing terminal event atomically and notifies the stream', async () => {
+    const trx = { id: 'trx' };
+    mockRunTransaction.mockImplementation(async (callback) => callback(trx));
+    const run = {
+      id: 17,
+      uuid: 'run-1',
+      status: 'completed',
+      error: null,
+      usageSummary: undefined,
+      transition: null,
+    };
+    const forUpdate = jest.fn().mockResolvedValue(run);
+    const runFindOne = jest.fn().mockReturnValue({ forUpdate });
+    mockRunQuery.mockReturnValue({ findOne: runFindOne });
+    const existingFirst = jest.fn().mockResolvedValue(undefined);
+    const latestFirst = jest.fn().mockResolvedValue({ sequence: 4 });
+    const insert = jest.fn().mockResolvedValue(undefined);
+    mockRunEventQuery
+      .mockReturnValueOnce({ where: jest.fn(() => ({ first: existingFirst })) })
+      .mockReturnValueOnce({
+        where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: latestFirst })) })),
+      })
+      .mockReturnValueOnce({ insert });
+
+    await expect((AgentRunEventService as any).ensureTerminalEventForTerminalRun('run-1')).resolves.toBe(true);
+
+    expect(insert).toHaveBeenCalledWith([
+      {
+        runId: 17,
+        sequence: 5,
+        eventType: 'run.completed',
+        payload: {
+          status: 'completed',
+          error: null,
+          usageSummary: {},
+          transition: null,
+          repaired: true,
+        },
+      },
+    ]);
+    expect(mockRunEventKnex().raw).toHaveBeenCalledWith('select pg_notify(?, ?)', [
+      'agent_run_events',
+      JSON.stringify({ runId: 'run-1', latestSequence: 5 }),
+    ]);
+  });
+
+  it('does not repair a missing, open, or already-repaired terminal run', async () => {
+    const missingForUpdate = jest.fn().mockResolvedValue(undefined);
+    mockRunQuery.mockReturnValueOnce({ findOne: jest.fn(() => ({ forUpdate: missingForUpdate })) });
+    await expect((AgentRunEventService as any).ensureTerminalEventForTerminalRun('missing')).resolves.toBe(false);
+
+    const runningForUpdate = jest.fn().mockResolvedValue({ id: 17, uuid: 'run-1', status: 'running' });
+    mockRunQuery.mockReturnValueOnce({ findOne: jest.fn(() => ({ forUpdate: runningForUpdate })) });
+    await expect((AgentRunEventService as any).ensureTerminalEventForTerminalRun('run-1')).resolves.toBe(false);
+
+    const completed = { id: 17, uuid: 'run-1', status: 'completed' };
+    mockRunQuery.mockReturnValueOnce({
+      findOne: jest.fn(() => ({ forUpdate: jest.fn().mockResolvedValue(completed) })),
+    });
+    mockRunEventQuery.mockReturnValueOnce({
+      where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ id: 99 }) })),
+    });
+    await expect((AgentRunEventService as any).ensureTerminalEventForTerminalRun('run-1')).resolves.toBe(false);
+    expect(mockRunEventKnex().raw).not.toHaveBeenCalled();
+  });
+
+  it('appends a single event after the latest sequence and reports a missing locked run', async () => {
+    const lockedRun = { id: 17, uuid: 'run-1', status: 'running' };
+    mockRunQuery.mockReturnValueOnce({
+      findById: jest.fn(() => ({ forUpdate: jest.fn().mockResolvedValue(lockedRun) })),
+    });
+    const latestFirst = jest.fn().mockResolvedValue({ sequence: 3 });
+    const insert = jest.fn().mockResolvedValue(undefined);
+    mockRunEventQuery
+      .mockReturnValueOnce({
+        where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: latestFirst })) })),
+      })
+      .mockReturnValueOnce({ insert });
+
+    await expect(AgentRunEventService.appendEvent(17, 'run.note', { note: 'hello' })).resolves.toBe(4);
+    expect(insert).toHaveBeenCalledWith([
+      { runId: 17, sequence: 4, eventType: 'run.note', payload: { note: 'hello' } },
+    ]);
+
+    mockRunQuery.mockReturnValueOnce({
+      findById: jest.fn(() => ({ forUpdate: jest.fn().mockResolvedValue(undefined) })),
+    });
+    await expect(AgentRunEventService.appendEvent(18, 'run.note', {})).rejects.toThrow('Agent run not found');
+  });
+
+  it('appends status events for an existing run and ignores a missing run', async () => {
+    const run = { id: 17, uuid: 'run-1', status: 'running' };
+    mockRunQuery
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) })
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(run) })
+      .mockReturnValueOnce({
+        findById: jest.fn(() => ({ forUpdate: jest.fn().mockResolvedValue(run) })),
+      });
+
+    await expect(AgentRunEventService.appendStatusEvent('missing', 'run.failed', {})).resolves.toBeUndefined();
+
+    const latestFirst = jest.fn().mockResolvedValue(undefined);
+    const insert = jest.fn().mockResolvedValue(undefined);
+    mockRunEventQuery
+      .mockReturnValueOnce({
+        where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: latestFirst })) })),
+      })
+      .mockReturnValueOnce({ insert });
+    await AgentRunEventService.appendStatusEvent('run-1', 'run.completed', { status: 'completed' });
+
+    expect(insert).toHaveBeenCalledWith([
+      { runId: 17, sequence: 1, eventType: 'run.completed', payload: { status: 'completed' } },
+    ]);
+    expect(mockRunEventKnex().raw).toHaveBeenCalled();
+  });
+
+  it('handles empty and missing-run chunk append requests without writes', async () => {
+    await AgentRunEventService.appendEventsForChunks('run-1', []);
+    await AgentRunEventService.appendEventsForChunksForExecutionOwner('run-1', 'worker-1', []);
+    await expect(
+      AgentRunEventService.appendChunkEventsForRunInTransaction({ id: 17 }, [], {} as any)
+    ).resolves.toBeNull();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+
+    mockRunQuery
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) })
+      .mockReturnValueOnce({ findOne: jest.fn().mockResolvedValue(undefined) });
+    await AgentRunEventService.appendEventsForChunks('missing', [{ type: 'start' } as any]);
+    await AgentRunEventService.appendEventsForChunksForExecutionOwner('missing', 'worker-1', [
+      { type: 'start' } as any,
+    ]);
+    expect(mockRunEventQuery).not.toHaveBeenCalled();
+  });
+
+  it('appends chunk and status events inside a caller-owned transaction without locking the run', async () => {
+    const trx = { id: 'trx' } as any;
+    const latestFirst = jest.fn().mockResolvedValue(undefined);
+    const chunkInsert = jest.fn().mockResolvedValue(undefined);
+    const statusLatestFirst = jest.fn().mockResolvedValue({ sequence: 1 });
+    const statusInsert = jest.fn().mockResolvedValue(undefined);
+    mockRunEventQuery
+      .mockReturnValueOnce({
+        where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: latestFirst })) })),
+      })
+      .mockReturnValueOnce({ insert: chunkInsert })
+      .mockReturnValueOnce({
+        where: jest.fn(() => ({ orderBy: jest.fn(() => ({ first: statusLatestFirst })) })),
+      })
+      .mockReturnValueOnce({ insert: statusInsert });
+
+    await expect(
+      AgentRunEventService.appendChunkEventsForRunInTransaction(
+        { id: 17, uuid: 'run-1' },
+        [{ type: 'text-delta', id: 'text-1', delta: 'Hello' } as any],
+        trx
+      )
+    ).resolves.toBe(1);
+    await expect(
+      AgentRunEventService.appendStatusEventForRunInTransaction(
+        { id: 17, uuid: 'run-1' },
+        'run.completed',
+        { status: 'completed' },
+        trx
+      )
+    ).resolves.toBe(2);
+
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(chunkInsert).toHaveBeenCalled();
+    expect(statusInsert).toHaveBeenCalled();
+  });
+
+  it('serializes fallback identifiers and nullish public fields', () => {
+    expect(
+      AgentRunEventService.serializeRunEvent({
+        uuid: 'event-1',
+        runId: 17,
+        threadId: 11,
+        sessionId: 13,
+        sequence: 1,
+        eventType: 'run.note',
+        payload: null,
+        createdAt: undefined,
+        updatedAt: undefined,
+      } as any)
+    ).toEqual({
+      id: 'event-1',
+      runId: '17',
+      threadId: '11',
+      sessionId: '13',
+      sequence: 1,
+      eventType: 'run.note',
+      version: 1,
+      payload: {},
+      createdAt: null,
+      updatedAt: null,
+    });
   });
 });

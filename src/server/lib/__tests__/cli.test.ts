@@ -24,6 +24,9 @@ const mockDeleteExternalSecret = jest.fn();
 const mockCreateOrUpdateNamespace = jest.fn();
 const mockLoggerDebug = jest.fn();
 const mockLoggerError = jest.fn();
+const mockLoggerInfo = jest.fn();
+const mockUpdateLogContext = jest.fn();
+const mockWithLogContext = jest.fn((_ctx, fn) => fn());
 const mockDeployQuery = jest.fn();
 
 jest.mock('server/lib/shell', () => ({
@@ -34,11 +37,11 @@ jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
     debug: mockLoggerDebug,
     error: mockLoggerError,
-    info: jest.fn(),
+    info: mockLoggerInfo,
     warn: jest.fn(),
   })),
-  updateLogContext: jest.fn(),
-  withLogContext: jest.fn((_ctx, fn) => fn()),
+  updateLogContext: (...args: any[]) => mockUpdateLogContext(...args),
+  withLogContext: (...args: any[]) => mockWithLogContext(...args),
 }));
 
 jest.mock('server/services/globalConfig', () => ({
@@ -81,7 +84,16 @@ jest.mock('server/models', () => ({
     query: () => mockDeployQuery(),
   },
 }));
-import { codefreshDeploy, codefreshDestroy, deleteBuild } from '../cli';
+import { DeployTypes } from 'shared/constants';
+import {
+  cliDeploy,
+  codefreshDeploy,
+  codefreshDestroy,
+  deleteBuild,
+  deleteDeploy,
+  deployBuild,
+  waitForCodefresh,
+} from '../cli';
 
 const secretProviders = {
   aws: {
@@ -311,5 +323,179 @@ describe('CLI build cleanup', () => {
 
     expect(withGraphFetched).toHaveBeenCalledWith({ build: true, deployable: true });
     expect(withGraphFetched.mock.calls[0][0]).not.toHaveProperty('service');
+  });
+});
+
+describe('generic CLI deploy lifecycle', () => {
+  const databaseSettings = {
+    auroraRestoreSettings: {
+      region: 'us-east-1',
+      sourceCluster: 'source-aurora',
+    },
+    rdsRestoreSettings: {
+      region: 'us-west-2',
+      sourceInstance: 'source-rds',
+    },
+  };
+
+  function createCliDeploy(type: DeployTypes = DeployTypes.AURORA_RESTORE, overrides: Record<string, unknown> = {}) {
+    return {
+      uuid: `${type}-deploy-uuid`,
+      active: true,
+      env: {},
+      build: {
+        uuid: 'build-uuid',
+        sha: 'build-sha',
+        namespace: 'env-build-uuid',
+        commentRuntimeEnv: {},
+      },
+      deployable: {
+        type,
+        name: `${type}-service`,
+        command: type === DeployTypes.AURORA_RESTORE ? 'scripts/aurora-helper.ts' : 'scripts/docker-helper.ts',
+        arguments: '--restore latest',
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    } as any;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDeployQuery.mockReset();
+    mockShellPromise.mockReset().mockResolvedValue('command-output');
+    mockGetAllConfigs.mockReset().mockResolvedValue(databaseSettings);
+  });
+
+  test('deployBuild invokes only CLI-backed deploys with per-service log context', async () => {
+    const cli = createCliDeploy();
+    const nonCli = createCliDeploy(DeployTypes.DOCKER);
+
+    await deployBuild({ deploys: [cli, nonCli] } as any);
+
+    expect(cli.$fetchGraph).toHaveBeenCalledWith('[build, deployable]');
+    expect(nonCli.$fetchGraph).not.toHaveBeenCalled();
+    expect(mockWithLogContext).toHaveBeenCalledWith(
+      { deployUuid: 'aurora-restore-deploy-uuid', serviceName: 'aurora-restore-service' },
+      expect.any(Function)
+    );
+    expect(mockShellPromise).toHaveBeenCalledWith(
+      `AWS_REGION=us-east-1 pnpm run babel-node -- scripts/aurora-helper.ts deploy --stackName build-uuid-build-sha --serviceName aurora-restore-service --buildUUID build-uuid --restore latest --settings '${JSON.stringify(
+        databaseSettings.auroraRestoreSettings
+      )}'`
+    );
+  });
+
+  test('cliDeploy fetches relations and propagates shell failures', async () => {
+    const failure = new Error('helper failed');
+    const deploy = createCliDeploy();
+    mockShellPromise.mockRejectedValueOnce(failure);
+
+    await expect(cliDeploy(deploy)).rejects.toBe(failure);
+
+    expect(deploy.$fetchGraph).toHaveBeenCalledWith('[build, deployable]');
+  });
+
+  test('deleteDeploy selects RDS settings and builds the destroy context', async () => {
+    const deploy = createCliDeploy(DeployTypes.AURORA_RESTORE, {
+      deployable: {
+        type: DeployTypes.AURORA_RESTORE,
+        name: 'rds-service',
+        command: 'scripts/rds-helper.ts',
+        arguments: '--snapshot latest',
+      },
+    });
+
+    await deleteDeploy(deploy);
+
+    expect(mockShellPromise).toHaveBeenCalledWith(
+      `AWS_REGION=us-west-2 pnpm run babel-node -- scripts/rds-helper.ts destroy --stackName build-uuid-build-sha --serviceName rds-service --buildUUID build-uuid --snapshot latest --settings '${JSON.stringify(
+        databaseSettings.rdsRestoreSettings
+      )}'`
+    );
+  });
+
+  test.each([
+    ['success', true],
+    ['failed', false],
+    [undefined, undefined],
+  ])('waitForCodefresh maps status %p to %p', async (status, expected) => {
+    mockShellPromise.mockResolvedValueOnce(undefined).mockResolvedValueOnce(status);
+
+    await expect(waitForCodefresh('codefresh-id')).resolves.toBe(expected);
+
+    expect(mockShellPromise).toHaveBeenNthCalledWith(1, 'codefresh wait -t 60 codefresh-id');
+    expect(mockShellPromise).toHaveBeenNthCalledWith(
+      2,
+      'codefresh get build codefresh-id --output json | jq -r ".status"'
+    );
+  });
+
+  test('waitForCodefresh translates CLI failures into the public pipeline error', async () => {
+    mockShellPromise.mockRejectedValueOnce(new Error('timed out'));
+
+    await expect(waitForCodefresh('codefresh-id')).rejects.toThrow(
+      'Codefresh Pipeline Failure. Status was Error: timed out'
+    );
+  });
+
+  test('deleteBuild destroys each active CLI-backed deploy and ignores inactive or non-CLI deploys', async () => {
+    const codefresh = createDeploy({
+      active: true,
+      env: { PLAIN: 'value' },
+      deployable: {
+        ...createDeploy().deployable,
+        type: DeployTypes.CODEFRESH,
+        destroyTrigger: undefined,
+      },
+    });
+    const aurora = createCliDeploy();
+    const inactive = createCliDeploy(DeployTypes.AURORA_RESTORE, {
+      uuid: 'inactive-deploy',
+      active: false,
+    });
+    const docker = createCliDeploy(DeployTypes.DOCKER);
+    const withGraphFetched = jest.fn().mockResolvedValue([codefresh, aurora, inactive, docker]);
+    const where = jest.fn(() => ({ withGraphFetched }));
+    mockDeployQuery.mockReturnValue({ where });
+    mockShellPromise.mockResolvedValue('destroy-id\n');
+
+    await deleteBuild({ id: 42, uuid: 'build-uuid' } as any);
+
+    expect(where).toHaveBeenCalledWith({ buildId: 42 });
+    expect(mockWithLogContext).toHaveBeenCalledTimes(2);
+    expect(codefresh.$query().patch).toHaveBeenCalledWith({ sha: null });
+    expect(
+      mockShellPromise.mock.calls.some(([command]) => command.includes("codefresh run 'deployable/destroy'"))
+    ).toBe(true);
+    expect(
+      mockShellPromise.mock.calls.some(([command]) =>
+        command.includes('scripts/aurora-helper.ts destroy --stackName build-uuid-build-sha')
+      )
+    ).toBe(true);
+    expect(mockLoggerInfo).toHaveBeenCalledWith('CLI: deleting');
+    expect(mockLoggerInfo).toHaveBeenCalledWith('CLI: deleted');
+  });
+
+  test('codefresh deploy and destroy omit optional triggers and destroy preserves undefined CLI output', async () => {
+    const deploy = createDeploy({
+      env: { ENABLED: true, EMPTY: null },
+      deployable: {
+        ...createDeploy().deployable,
+        deployTrigger: undefined,
+        destroyTrigger: undefined,
+      },
+    });
+    mockShellPromise.mockResolvedValueOnce('deploy-id\n');
+
+    await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).resolves.toBe('deploy-id');
+    expect(mockShellPromise.mock.calls[0][0]).not.toContain('--trigger');
+
+    mockShellPromise.mockClear();
+    mockShellPromise.mockResolvedValueOnce(undefined);
+    await expect(codefreshDestroy(deploy)).resolves.toBeUndefined();
+    expect(mockShellPromise.mock.calls[0][0]).not.toContain('--trigger');
+    expect(mockDeleteExternalSecret).not.toHaveBeenCalled();
+    expect(mockUpdateLogContext).toHaveBeenCalledWith({ buildUuid: 'build-uuid' });
   });
 });

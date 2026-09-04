@@ -33,6 +33,7 @@ jest.mock('../ThreadService', () => ({
   __esModule: true,
   default: {
     getOwnedThread: jest.fn(),
+    addToolApprovalAllowlistEntry: jest.fn(),
   },
 }));
 
@@ -99,6 +100,7 @@ const mockPendingActionQuery = AgentPendingAction.query as jest.Mock;
 const mockPendingActionTransaction = AgentPendingAction.transaction as jest.Mock;
 const mockRunQuery = AgentRun.query as jest.Mock;
 const mockGetOwnedThread = AgentThreadService.getOwnedThread as jest.Mock;
+const mockAddToolApprovalAllowlistEntry = AgentThreadService.addToolApprovalAllowlistEntry as jest.Mock;
 
 function toolPart(toolName: string, part: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -139,6 +141,24 @@ function makeTransactionalRunQuery(run: unknown, queuedRun?: unknown) {
   return query;
 }
 
+function serializeAction(payload: unknown, capabilityKey: string = 'read') {
+  return ApprovalService.serializePendingAction({
+    uuid: 'action-display',
+    threadId: 3,
+    runId: 4,
+    kind: 'tool_approval',
+    status: 'pending',
+    capabilityKey,
+    title: 'Approve tool',
+    description: 'Tool requires approval',
+    payload,
+    resolution: null,
+    resolvedAt: null,
+    createdAt: null,
+    updatedAt: null,
+  } as any);
+}
+
 describe('ApprovalService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -147,6 +167,7 @@ describe('ApprovalService', () => {
     mockEnqueueRun.mockResolvedValue(undefined);
     mockGetApprovalGitHubAuthHandoffByAction.mockResolvedValue(null);
     mockClearApprovalGitHubAuthHandoff.mockResolvedValue(undefined);
+    mockAddToolApprovalAllowlistEntry.mockResolvedValue(undefined);
     mockFetchGitHubAuthenticatedUser.mockResolvedValue({
       ok: true,
       id: 12_345,
@@ -191,6 +212,9 @@ describe('ApprovalService', () => {
     expect(ApprovalService.normalizePendingActionResponseBody({ approved: true, alwaysAllow: 'yes' })).toEqual(
       new Error('alwaysAllow must be a boolean when provided')
     );
+    expect(ApprovalService.normalizePendingActionResponseBody({ approved: true, reason: 42 })).toEqual(
+      new Error('reason must be a string when provided')
+    );
     expect(ApprovalService.normalizePendingActionResponseBody({})).toEqual(new Error('approved must be a boolean'));
     expect(ApprovalService.normalizePendingActionResponseBody(null)).toEqual(
       new Error('Request body must be a JSON object')
@@ -228,6 +252,7 @@ describe('ApprovalService', () => {
         { toolKey: 'mcp__server__writer', capabilityKey: 'git_write' } as never,
       ])
     ).toBe(false);
+    expect(ApprovalService.isToolKeyAlwaysAllowEligible('mcp__workspace_core__unregistered_tool')).toBe(true);
   });
 
   it('serializes display-ready pending action fields without exposing raw payload state', () => {
@@ -453,6 +478,108 @@ describe('ApprovalService', () => {
     expect(serialized.riskLabels).toEqual(['Deployment change']);
   });
 
+  it('formats scalar, object, truncated, and unserializable approval arguments safely', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const serialized = serializeAction({
+      toolName: 'mcp__sample__tool',
+      input: {
+        count: 3,
+        enabled: false,
+        optional: null,
+        metadata: { region: 'us-west-2' },
+        circular,
+        longValue: 'x'.repeat(200),
+      },
+    });
+
+    expect(serialized.argumentsSummary.slice(0, 5)).toEqual([
+      { name: 'count', value: '3' },
+      { name: 'enabled', value: 'false' },
+      { name: 'optional', value: 'null' },
+      { name: 'metadata', value: '{"region":"us-west-2"}' },
+      { name: 'circular', value: '[unserializable]' },
+    ]);
+    expect(serialized.argumentsSummary[5]).toEqual({
+      name: 'longValue',
+      value: `${'x'.repeat(157)}...`,
+    });
+  });
+
+  it('extracts string and argv command previews while ignoring non-object inputs', () => {
+    expect(serializeAction({ toolName: 'shell', input: 'pnpm test' }).argumentsSummary).toEqual([]);
+    expect(serializeAction({ toolName: 'shell', input: 'pnpm test' }).commandPreview).toBeNull();
+    expect(serializeAction({ toolName: 'shell', input: { command: ['pnpm', '', 'test', 42] } }).commandPreview).toBe(
+      'pnpm test'
+    );
+    expect(serializeAction({ toolName: 'shell', input: { command: `echo ${'x'.repeat(200)}` } }).commandPreview).toBe(
+      `echo ${'x'.repeat(152)}...`
+    );
+    expect(serializeAction({ toolName: 'shell', input: { command: [] } }).commandPreview).toBeNull();
+  });
+
+  it('omits malformed file-change summaries and exposes every supported risk label', () => {
+    const serialized = serializeAction({
+      toolName: 'mcp__sample__tool',
+      toolCallId: 'tool-call-1',
+      fileChanges: [
+        null,
+        { path: 'missing-kind.txt' },
+        {
+          path: 'valid.txt',
+          kind: 'created',
+          stage: 'approved',
+          schemaValidation: { valid: false, error: 'invalid yaml' },
+        },
+      ],
+    });
+
+    expect(serialized.fileChangePreview).toHaveLength(1);
+    expect(serialized.fileChangePreview[0]).toEqual(
+      expect.objectContaining({
+        path: 'valid.txt',
+        kind: 'created',
+        stage: 'approved',
+        schemaValidation: { valid: false, error: 'invalid yaml' },
+      })
+    );
+
+    expect(
+      ['shell_exec', 'network_access', 'external_mcp_write', 'external_mcp_read', 'read', 'unknown'].map(
+        (capabilityKey) => serializeAction({}, capabilityKey).riskLabels
+      )
+    ).toEqual([['Shell command'], ['Network access'], ['MCP write'], ['MCP read'], ['Read-only'], []]);
+  });
+
+  it('normalizes supported file-change stages and derives stable fallback metadata', () => {
+    const serialized = serializeAction({
+      fileChanges: [
+        { path: 'applied.txt', kind: 'edited', stage: 'applied' },
+        { path: 'denied.txt', kind: 'deleted', stage: 'denied' },
+        { path: 'failed.txt', kind: 'created', stage: 'failed' },
+        { path: 'defaulted.txt', kind: 'created' },
+      ],
+    });
+
+    expect(serialized.fileChangePreview.map(({ path, kind, stage }) => ({ path, kind, stage }))).toEqual([
+      { path: 'applied.txt', kind: 'edited', stage: 'applied' },
+      { path: 'denied.txt', kind: 'deleted', stage: 'denied' },
+      { path: 'failed.txt', kind: 'created', stage: 'failed' },
+      { path: 'defaulted.txt', kind: 'created', stage: 'awaiting-approval' },
+    ]);
+    expect(serialized.fileChangePreview[3]).toEqual(
+      expect.objectContaining({
+        id: 'defaulted.txt:file-change:defaulted.txt',
+        toolCallId: 'defaulted.txt:file-change',
+        sourceTool: 'tool',
+        displayPath: 'defaulted.txt',
+        summary: 'created defaulted.txt',
+        additions: 0,
+        deletions: 0,
+      })
+    );
+  });
+
   it('lists only pending actions for the owned thread', async () => {
     const query: any = {};
     query.alias = jest.fn().mockReturnValue(query);
@@ -472,6 +599,219 @@ describe('ApprovalService', () => {
     expect(query.where).toHaveBeenCalledWith('action.threadId', 7);
     expect(query.where).toHaveBeenCalledWith('action.status', 'pending');
     expect(query.orderBy).toHaveBeenCalledWith('action.createdAt', 'asc');
+  });
+
+  it('rejects direct GitHub authorization checks that were not marked as user-write-authorized', async () => {
+    await expect(
+      ApprovalService.requireGitHubWriteAuthorization(
+        { githubToken: 'app-token', source: 'app', writeAuthorized: false },
+        'action-1',
+        'tool-call-1',
+        null
+      )
+    ).rejects.toMatchObject({
+      httpStatus: 409,
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+      details: { actionId: 'action-1', toolCallId: 'tool-call-1' },
+    });
+    expect(mockFetchGitHubAuthenticatedUser).not.toHaveBeenCalled();
+  });
+
+  it('preserves the current fail-open repository behavior when the permission probe is unavailable', async () => {
+    mockFetchGitHubRepositoryWritePermission.mockRejectedValueOnce(new Error('GitHub unavailable'));
+
+    await expect(
+      ApprovalService.requireGitHubWriteAuthorization(
+        { githubToken: 'user-token', source: 'user', writeAuthorized: true },
+        'action-1',
+        'tool-call-1',
+        { owner: 'example-org', repo: 'example-repo', fullName: 'example-org/example-repo' }
+      )
+    ).resolves.toBeUndefined();
+    expect(mockFetchGitHubAuthenticatedUser).toHaveBeenCalledWith('user-token');
+    expect(mockFetchGitHubRepositoryWritePermission).toHaveBeenCalledWith('user-token', 'example-org', 'example-repo');
+  });
+
+  it('rejects an approval tool part without the runtime approval id before querying persistence', async () => {
+    await expect(
+      ApprovalService.upsertApprovalRequest({
+        thread: { id: 7 } as any,
+        run: { id: 11 } as any,
+        message: { parts: [] } as any,
+        toolPart: toolPart('mcp__workspace_core__write_file', {
+          state: 'approval-requested',
+          toolCallId: 'tool-call-1',
+        }) as any,
+        capabilityKey: 'workspace_write',
+      })
+    ).rejects.toThrow('Missing approval id');
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('updates an existing pending approval request instead of inserting a duplicate', async () => {
+    const existing = { id: 44, status: 'pending' };
+    const lookupQuery: any = {};
+    lookupQuery.where = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.whereRaw = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.first = jest.fn().mockResolvedValue(existing);
+    const patchQuery = {
+      patchAndFetchById: jest.fn().mockResolvedValue({ ...existing, capabilityKey: 'workspace_write' }),
+    };
+    mockPendingActionQuery.mockImplementationOnce(() => lookupQuery).mockImplementationOnce(() => patchQuery);
+
+    await expect(
+      ApprovalService.upsertApprovalRequestFromStream({
+        thread: { id: 7 } as any,
+        run: { id: 11 } as any,
+        approvalId: 'approval-1',
+        toolCallId: 'tool-call-1',
+        toolName: 'mcp__workspace_core__write_file',
+        input: { path: 'sample.txt', content: 'hello' },
+        capabilityKey: 'external_mcp_write',
+      })
+    ).resolves.toEqual({ ...existing, capabilityKey: 'workspace_write' });
+    expect(patchQuery.patchAndFetchById).toHaveBeenCalledWith(
+      44,
+      expect.objectContaining({
+        capabilityKey: 'workspace_write',
+        payload: expect.objectContaining({ approvalId: 'approval-1', toolName: 'mcp__workspace_core__write_file' }),
+      })
+    );
+  });
+
+  it('persists an approval part without an optional tool-call identifier', async () => {
+    const lookupQuery: any = {};
+    lookupQuery.where = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.whereRaw = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.first = jest.fn().mockResolvedValue(null);
+    const insertQuery = { insertAndFetch: jest.fn().mockResolvedValue({ id: 1, status: 'pending' }) };
+    mockPendingActionQuery.mockImplementationOnce(() => lookupQuery).mockImplementationOnce(() => insertQuery);
+
+    await ApprovalService.upsertApprovalRequest({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      message: { parts: [] } as any,
+      toolPart: toolPart('mcp__workspace_core__write_file', {
+        approval: { id: 'approval-1' },
+        input: { path: 'sample.txt', content: 'hello' },
+        state: 'approval-requested',
+      }) as any,
+      capabilityKey: 'workspace_write',
+    });
+
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          approvalId: 'approval-1',
+          toolCallId: null,
+          toolName: 'mcp__workspace_core__write_file',
+        }),
+      })
+    );
+    expect(insertQuery.insertAndFetch.mock.calls[0][0].payload).not.toHaveProperty('fileChanges');
+  });
+
+  it('ignores irrelevant messages and returns the pending approval derived from a typed tool part', async () => {
+    const lookupQuery: any = {};
+    lookupQuery.where = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.whereRaw = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.first = jest.fn().mockResolvedValue(null);
+    const pendingAction = { id: 1, status: 'pending' };
+    const insertQuery = { insertAndFetch: jest.fn().mockResolvedValue(pendingAction) };
+    mockPendingActionQuery.mockImplementationOnce(() => lookupQuery).mockImplementationOnce(() => insertQuery);
+    const matchingChange = {
+      id: 'change-1',
+      toolCallId: 'tool-call-1',
+      sourceTool: 'shell',
+      displayPath: 'sample.txt',
+      path: '/workspace/sample.txt',
+      kind: 'edited',
+      stage: 'awaiting-approval',
+    };
+    const unrelatedChange = { ...matchingChange, id: 'change-2', toolCallId: 'tool-call-2' };
+
+    await expect(
+      ApprovalService.syncApprovalRequestStateFromMessages({
+        thread: { id: 7 } as any,
+        run: { id: 11 } as any,
+        messages: [
+          {
+            role: 'user',
+            parts: [{ type: 'tool-shell', state: 'approval-requested', approval: { id: 'ignored' } }],
+          },
+          {
+            role: 'assistant',
+            parts: [
+              null,
+              { type: 'text', text: 'checking' },
+              { type: 'tool-shell', state: 'input-available', approval: { id: 'not-requested' } },
+              { type: 'data-file-change', data: matchingChange },
+              { type: 'data-file-change', data: unrelatedChange },
+              {
+                type: 'tool-shell',
+                state: 'approval-requested',
+                approval: { id: 'approval-1' },
+                toolCallId: 'tool-call-1',
+                input: { command: 'pnpm test' },
+              },
+            ],
+          },
+        ] as any,
+      })
+    ).resolves.toEqual({ pendingActions: [pendingAction], resolvedActionCount: 0 });
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Approve shell',
+        payload: expect.objectContaining({
+          toolName: 'shell',
+          fileChanges: [expect.objectContaining({ id: 'change-1', toolCallId: 'tool-call-1' })],
+        }),
+      })
+    );
+  });
+
+  it('returns null directly when stream policy denies the requested tool', async () => {
+    await expect(
+      ApprovalService.upsertApprovalRequestFromStream({
+        thread: { id: 7 } as any,
+        run: { id: 11 } as any,
+        approvalId: 'approval-1',
+        toolCallId: 'tool-call-1',
+        toolName: 'mcp__workspace_core__write_file',
+        capabilityKey: 'workspace_write',
+        approvalPolicy: { defaultMode: 'deny', rules: { workspace_write: 'deny' } } as any,
+      })
+    ).resolves.toBeNull();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('persists the documented stream defaults when optional tool details are absent', async () => {
+    const lookupQuery: any = {};
+    lookupQuery.where = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.whereRaw = jest.fn().mockReturnValue(lookupQuery);
+    lookupQuery.first = jest.fn().mockResolvedValue(null);
+    const insertQuery = { insertAndFetch: jest.fn().mockResolvedValue({ id: 1, status: 'pending' }) };
+    mockPendingActionQuery.mockImplementationOnce(() => lookupQuery).mockImplementationOnce(() => insertQuery);
+
+    await ApprovalService.upsertApprovalRequestFromStream({
+      thread: { id: 7 } as any,
+      run: { id: 11 } as any,
+      approvalId: 'approval-1',
+      toolCallId: 'tool-call-1',
+    });
+
+    expect(insertQuery.insertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilityKey: 'external_mcp_write',
+        title: 'Approve tool',
+        payload: {
+          approvalId: 'approval-1',
+          toolCallId: 'tool-call-1',
+          toolName: 'tool',
+          input: null,
+        },
+      })
+    );
   });
 
   it('classifies session workspace approval requests by their workspace capability', async () => {
@@ -1086,15 +1426,9 @@ describe('ApprovalService', () => {
     mockPendingActionQuery.mockReturnValue(pendingQuery);
     mockRunQuery.mockReturnValue(runQuery);
 
-    await ApprovalService.resolvePendingAction(
-      'action-1',
-      'sample-user',
-      'approved',
-      {
-        approved: true,
-      },
-      { githubToken: 'sample-gh-token' }
-    );
+    await ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', undefined, {
+      githubToken: 'sample-gh-token',
+    });
 
     expect(pendingQuery.where).toHaveBeenCalledWith({ runId: 11, status: 'pending' });
     expect(runQuery.patchAndFetchById).toHaveBeenCalledWith(
@@ -1105,6 +1439,13 @@ describe('ApprovalService', () => {
         executionOwner: null,
         leaseExpiresAt: null,
         heartbeatAt: null,
+      })
+    );
+    expect(pendingQuery.patchAndFetchById).toHaveBeenCalledWith(
+      99,
+      expect.objectContaining({
+        status: 'approved',
+        resolution: { approved: true },
       })
     );
     expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
@@ -1136,8 +1477,7 @@ describe('ApprovalService', () => {
         approvalId: 'approval-1',
         toolCallId: 'tool-1',
         input: {
-          repository_owner: 'example-org',
-          repository_name: 'example-repo',
+          repository: 'example-org/example-repo',
         },
       },
       runUuid: 'run-uuid',
@@ -1167,6 +1507,7 @@ describe('ApprovalService', () => {
 
     mockPendingActionQuery.mockReturnValue(pendingQuery);
     mockRunQuery.mockReturnValue(runQuery);
+    mockGetApprovalGitHubAuthHandoffByAction.mockRejectedValueOnce(new Error('handoff lookup unavailable'));
 
     await ApprovalService.resolvePendingAction(
       'action-1',
@@ -1220,7 +1561,7 @@ describe('ApprovalService', () => {
       runId: 11,
       status: 'pending',
       capabilityKey: 'git_write',
-      payload: { approvalId: 'approval-1', toolCallId: 'tool-1' },
+      payload: { approvalId: 'approval-1', toolCallId: null },
       runUuid: 'run-uuid',
     };
     const pendingQuery = makeTransactionalPendingActionQuery(action, action);
@@ -1251,6 +1592,7 @@ describe('ApprovalService', () => {
     ).rejects.toMatchObject({
       httpStatus: 409,
       code: 'GITHUB_USER_AUTH_REQUIRED',
+      details: { actionId: 'action-1', toolCallId: null },
     });
 
     expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
@@ -1641,6 +1983,65 @@ describe('ApprovalService', () => {
     expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
   });
 
+  it('resolves a non-tool pending action without emitting tool approval events', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      kind: 'user_input',
+      status: 'pending',
+      capabilityKey: 'read',
+      payload: { prompt: 'Choose a deployment target' },
+      runUuid: 'run-uuid',
+    };
+    const updatedAction = {
+      ...action,
+      status: 'denied',
+      resolution: { approved: false, reason: 'skip' },
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action, null, updatedAction);
+    const queuedRun = { id: 11, uuid: 'run-uuid', status: 'queued', usageSummary: {}, error: null };
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(
+      makeTransactionalRunQuery(
+        { id: 11, uuid: 'run-uuid', status: 'waiting_for_approval', usageSummary: {}, error: null },
+        queuedRun
+      )
+    );
+
+    await expect(
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'denied', {
+        approved: false,
+        reason: 'skip',
+      })
+    ).resolves.toBe(updatedAction);
+
+    expect(pendingQuery.patchAndFetchById).toHaveBeenCalledWith(
+      99,
+      expect.objectContaining({ status: 'denied', resolution: { approved: false, reason: 'skip' } })
+    );
+    expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'approval.resolved',
+      expect.anything(),
+      expect.anything()
+    );
+    expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'approval.responded',
+      expect.anything(),
+      expect.anything()
+    );
+    expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+      queuedRun,
+      'run.queued',
+      expect.objectContaining({ status: 'queued' }),
+      { trx: true }
+    );
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', expect.anything());
+  });
+
   it('resumes denied Debug repair approvals so the model reads the denial feedback', async () => {
     const action = {
       id: 99,
@@ -1789,17 +2190,64 @@ describe('ApprovalService', () => {
     });
   });
 
-  it('requeues an already queued run from an already resolved action', async () => {
+  it('requeues an already-approved non-git action with the current request auth', async () => {
     const resolvedAction = {
       id: 99,
       uuid: 'action-1',
       threadId: 7,
       runId: 11,
       status: 'approved',
+      capabilityKey: 'workspace_write',
+      payload: { approvalId: 'approval-1' },
+      runUuid: 'run-uuid',
+      resolution: { approved: true },
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(resolvedAction, resolvedAction, null);
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(
+      makeTransactionalRunQuery({
+        id: 11,
+        uuid: 'run-uuid',
+        status: 'queued',
+        usageSummary: {},
+        error: null,
+      })
+    );
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        { githubToken: 'request-token' }
+      )
+    ).resolves.toBe(resolvedAction);
+
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockFetchGitHubAuthenticatedUser).not.toHaveBeenCalled();
+    expect(mockStoreApprovalGitHubAuthHandoff).not.toHaveBeenCalled();
+    expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', {
+      githubAuth: expect.objectContaining({
+        githubToken: 'request-token',
+        source: 'user',
+        writeAuthorized: false,
+      }),
+    });
+  });
+
+  it('requeues an already queued run from an already resolved action', async () => {
+    const resolvedAction = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'denied',
       payload: { approvalId: 'approval-1' },
       runUuid: 'run-uuid',
       resolution: {
-        approved: true,
+        approved: false,
       },
     };
     const pendingQuery = makeTransactionalPendingActionQuery(resolvedAction, resolvedAction, null);
@@ -1814,8 +2262,8 @@ describe('ApprovalService', () => {
     mockRunQuery.mockReturnValue(runQuery);
 
     await expect(
-      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', {
-        approved: true,
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'denied', {
+        approved: false,
       })
     ).resolves.toBe(resolvedAction);
 
@@ -1864,5 +2312,184 @@ describe('ApprovalService', () => {
     expect(mockAppendStatusEventForRunInTransaction).not.toHaveBeenCalled();
     expect(mockPatchStatus).not.toHaveBeenCalled();
     expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('rejects an action id that is not owned by the requesting user before opening a transaction', async () => {
+    const pendingQuery = makeTransactionalPendingActionQuery(undefined);
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+
+    await expect(
+      ApprovalService.resolvePendingAction('missing-action', 'sample-user', 'approved', { approved: true })
+    ).rejects.toThrow('Pending action not found');
+    expect(mockPendingActionTransaction).not.toHaveBeenCalled();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+  });
+
+  it('fails the locked resolution transaction when the action run no longer exists', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      payload: { approvalId: 'approval-1' },
+      runUuid: 'run-uuid',
+    };
+    mockPendingActionQuery.mockReturnValue(makeTransactionalPendingActionQuery(action));
+    mockRunQuery.mockReturnValue(makeTransactionalRunQuery(undefined));
+
+    await expect(
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', { approved: true })
+    ).rejects.toThrow('Agent run not found');
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockNotifyRunEventsInserted).not.toHaveBeenCalled();
+  });
+
+  it('fails the locked resolution transaction when the pending action disappears after ownership lookup', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      payload: { approvalId: 'approval-1' },
+      runUuid: 'run-uuid',
+    };
+    mockPendingActionQuery.mockReturnValue(makeTransactionalPendingActionQuery(action, undefined));
+    mockRunQuery.mockReturnValue(
+      makeTransactionalRunQuery({ id: 11, uuid: 'run-uuid', status: 'waiting_for_approval' })
+    );
+
+    await expect(
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', { approved: true })
+    ).rejects.toThrow('Pending action not found');
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockNotifyRunEventsInserted).not.toHaveBeenCalled();
+  });
+
+  it('fails atomically when the resolved action cannot be reloaded at the end of the transaction', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      status: 'pending',
+      payload: { approvalId: 'approval-1' },
+      runUuid: 'run-uuid',
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action, null, undefined);
+    const queuedRun = { id: 11, uuid: 'run-uuid', status: 'queued', usageSummary: {}, error: null };
+    const runQuery = makeTransactionalRunQuery(
+      { id: 11, uuid: 'run-uuid', status: 'waiting_for_approval', usageSummary: {}, error: null },
+      queuedRun
+    );
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(runQuery);
+
+    await expect(
+      ApprovalService.resolvePendingAction('action-1', 'sample-user', 'approved', { approved: true })
+    ).rejects.toThrow('Pending action not found');
+    expect(pendingQuery.patchAndFetchById).toHaveBeenCalled();
+    expect(mockEnqueueRun).not.toHaveBeenCalled();
+    expect(mockNotifyRunEventsInserted).not.toHaveBeenCalled();
+  });
+
+  it('adds an eligible approved tool to the thread allowlist and emits its audit event', async () => {
+    const action = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      kind: 'tool_approval',
+      status: 'pending',
+      capabilityKey: 'workspace_write',
+      payload: {
+        approvalId: 'approval-1',
+        toolCallId: 'tool-call-1',
+        toolName: 'mcp__workspace_core__write_file',
+      },
+      runUuid: 'run-uuid',
+    };
+    const updatedAction = { ...action, status: 'approved' };
+    const pendingQuery = makeTransactionalPendingActionQuery(action, action, null, updatedAction);
+    const queuedRun = { id: 11, uuid: 'run-uuid', status: 'queued', usageSummary: {}, error: null };
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(
+      makeTransactionalRunQuery(
+        { id: 11, uuid: 'run-uuid', status: 'waiting_for_approval', usageSummary: {}, error: null },
+        queuedRun
+      )
+    );
+
+    await ApprovalService.resolvePendingAction(
+      'action-1',
+      'sample-user',
+      'approved',
+      { approved: true },
+      { alwaysAllow: true }
+    );
+
+    expect(mockAddToolApprovalAllowlistEntry).toHaveBeenCalledWith(7, 'mcp__workspace_core__write_file', { trx: true });
+    expect(mockAppendStatusEventForRunInTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ uuid: 'run-uuid', status: 'waiting_for_approval' }),
+      'approval.always_allowed',
+      {
+        actionId: 'action-1',
+        toolCallId: 'tool-call-1',
+        toolName: 'mcp__workspace_core__write_file',
+      },
+      { trx: true }
+    );
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', expect.anything());
+  });
+
+  it('clears a pre-resolved GitHub handoff when a concurrent denial wins the action lock', async () => {
+    const actionSeed = {
+      id: 99,
+      uuid: 'action-1',
+      threadId: 7,
+      runId: 11,
+      kind: 'tool_approval',
+      status: 'pending',
+      capabilityKey: 'git_write',
+      payload: { approvalId: 'approval-1', toolCallId: 'tool-call-1' },
+      runUuid: 'run-uuid',
+    };
+    const concurrentlyDeniedAction = {
+      ...actionSeed,
+      status: 'denied',
+      resolution: { approved: false },
+    };
+    const pendingQuery = makeTransactionalPendingActionQuery(actionSeed, concurrentlyDeniedAction, null);
+    const queuedRun = { id: 11, uuid: 'run-uuid', status: 'queued', usageSummary: {}, error: null };
+    mockPendingActionQuery.mockReturnValue(pendingQuery);
+    mockRunQuery.mockReturnValue(
+      makeTransactionalRunQuery(
+        { id: 11, uuid: 'run-uuid', status: 'waiting_for_approval', usageSummary: {}, error: null },
+        queuedRun
+      )
+    );
+
+    await expect(
+      ApprovalService.resolvePendingAction(
+        'action-1',
+        'sample-user',
+        'approved',
+        { approved: true },
+        {
+          githubAuth: {
+            githubToken: 'user-token',
+            source: 'user',
+            githubUsername: 'octocat',
+          },
+        }
+      )
+    ).resolves.toBe(concurrentlyDeniedAction);
+
+    expect(mockStoreApprovalGitHubAuthHandoff).toHaveBeenCalledTimes(1);
+    expect(mockClearApprovalGitHubAuthHandoff).toHaveBeenCalledWith('run-uuid', 'action-1', 'tool-call-1');
+    expect(pendingQuery.patchAndFetchById).not.toHaveBeenCalled();
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-uuid', 'approval_resolved', expect.anything());
   });
 });

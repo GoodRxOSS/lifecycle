@@ -18,7 +18,7 @@ import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 
 mockRedisClient();
 
-import { ParsingError } from 'server/lib/yamlConfigParser';
+import { EmptyFileError, ParsingError } from 'server/lib/yamlConfigParser';
 import { ValidationError } from 'server/lib/yamlConfigValidator';
 import type { LifecycleConfig } from '../Config';
 import type { DependencyService, Service } from '../YamlService';
@@ -113,6 +113,22 @@ describe('resolveExactEnvironmentService', () => {
 });
 
 describe('resolveEnvironmentServices', () => {
+  it('returns an empty complete result when the environment and service catalog are empty', async () => {
+    const root = repository(1, 'org/root');
+    const deps = dependencies({ repositories: [root] });
+
+    const result = await resolveEnvironmentServices({
+      rootRepository: root,
+      rootBranch: 'main',
+      rootConfig: config({}),
+      dependencies: deps.value,
+    });
+
+    expect(result).toEqual({ services: [], unresolved: [], pending: [], complete: true, truncated: false });
+    expect(deps.resolveRepository).not.toHaveBeenCalled();
+    expect(deps.fetchConfig).not.toHaveBeenCalled();
+  });
+
   it('emits exactly one row per environment entry and never promotes requires to rows', async () => {
     const root = repository(1, 'org/root');
     const remote = repository(2, 'org/remote');
@@ -468,6 +484,43 @@ describe('resolveEnvironmentServices', () => {
     expect(second.services.map(({ name }) => name)).toEqual(first.services.map(({ name }) => name));
   });
 
+  it('extends a stable collision suffix when its short form is already a real service name', async () => {
+    const root = repository(1, 'org/root');
+    const remote = repository(2, 'org/remote');
+    const deps = dependencies({
+      repositories: [root, remote],
+      configs: new Map([[configKey(remote.fullName, 'main'), config({ services: [githubService('shared')] })]]),
+    });
+    const first = await resolveEnvironmentServices({
+      rootRepository: root,
+      rootBranch: 'main',
+      rootConfig: config({
+        defaults: [{ name: 'shared' }, { name: 'shared', repository: remote.fullName }],
+        services: [githubService('shared')],
+      }),
+      dependencies: deps.value,
+    });
+    const shortCollisionName = first.services.find((service) => service.repository === remote.fullName)?.name;
+    expect(shortCollisionName).toMatch(/^shared-[0-9a-f]{6}$/);
+
+    const result = await resolveEnvironmentServices({
+      rootRepository: root,
+      rootBranch: 'main',
+      rootConfig: config({
+        defaults: [{ name: 'shared' }, { name: 'shared', repository: remote.fullName }, { name: shortCollisionName }],
+        services: [githubService('shared'), dockerService(shortCollisionName!)],
+      }),
+      dependencies: deps.value,
+    });
+
+    const remoteShared = result.services.find((service) => service.repository === remote.fullName);
+    expect(result.services.find((service) => service.originalName === shortCollisionName)?.name).toBe(
+      shortCollisionName
+    );
+    expect(remoteShared?.name).not.toBe(shortCollisionName);
+    expect(remoteShared?.name).toMatch(new RegExp(`^${shortCollisionName}[0-9a-f]{2,}$`));
+  });
+
   it('reports serviceId references as unsupported instead of resolving a coincident YAML name', async () => {
     const root = repository(1, 'org/root');
     const deps = dependencies({ repositories: [root] });
@@ -513,8 +566,12 @@ describe('resolveEnvironmentServices', () => {
     const failures = new Map<string, unknown>([
       ['org/parse', new ParsingError('bad yaml')],
       ['org/validate', new ValidationError('invalid')],
+      ['org/empty', new EmptyFileError('empty config')],
       ['org/rate', Object.assign(new Error('API rate limit exceeded'), { status: 403 })],
       ['org/limited', Object.assign(new Error('boom'), { status: 429 })],
+      ['org/retry-header', Object.assign(new Error('boom'), { response: { headers: { 'Retry-After': '30' } } })],
+      ['org/remaining-header', Object.assign(new Error('boom'), { headers: { 'X-RateLimit-Remaining': 0 } })],
+      ['org/primitive', 'offline'],
       ['org/generic', new Error('socket hang up')],
     ]);
     const deps = dependencies({
@@ -523,9 +580,13 @@ describe('resolveEnvironmentServices', () => {
         remote,
         repository(3, 'org/parse'),
         repository(4, 'org/validate'),
-        repository(5, 'org/rate'),
-        repository(6, 'org/limited'),
-        repository(7, 'org/generic'),
+        repository(5, 'org/empty'),
+        repository(6, 'org/rate'),
+        repository(7, 'org/limited'),
+        repository(8, 'org/retry-header'),
+        repository(9, 'org/remaining-header'),
+        repository(10, 'org/primitive'),
+        repository(11, 'org/generic'),
       ],
       fetchConfig: async (repo: ResolverRepository) => {
         const failure = failures.get(repo.fullName);
@@ -543,9 +604,13 @@ describe('resolveEnvironmentServices', () => {
           { name: 'b', repository: remote.fullName },
           { name: 'c', repository: 'org/parse' },
           { name: 'd', repository: 'org/validate' },
-          { name: 'e', repository: 'org/rate' },
-          { name: 'f', repository: 'org/limited' },
-          { name: 'g', repository: 'org/generic' },
+          { name: 'e', repository: 'org/empty' },
+          { name: 'f', repository: 'org/rate' },
+          { name: 'g', repository: 'org/limited' },
+          { name: 'h', repository: 'org/retry-header' },
+          { name: 'i', repository: 'org/remaining-header' },
+          { name: 'j', repository: 'org/primitive' },
+          { name: 'k', repository: 'org/generic' },
         ],
       }),
       dependencies: deps.value,
@@ -556,11 +621,37 @@ describe('resolveEnvironmentServices', () => {
       { name: 'b', status: 'unresolved', reason: 'config_unavailable' },
       { name: 'c', status: 'invalid', reason: 'invalid_lifecycle_yaml' },
       { name: 'd', status: 'invalid', reason: 'invalid_lifecycle_yaml' },
-      { name: 'e', status: 'rate_limited', reason: 'github_rate_limited' },
+      { name: 'e', status: 'unresolved', reason: 'config_unavailable' },
       { name: 'f', status: 'rate_limited', reason: 'github_rate_limited' },
-      { name: 'g', status: 'unresolved', reason: 'config_fetch_failed' },
+      { name: 'g', status: 'rate_limited', reason: 'github_rate_limited' },
+      { name: 'h', status: 'rate_limited', reason: 'github_rate_limited' },
+      { name: 'i', status: 'rate_limited', reason: 'github_rate_limited' },
+      { name: 'j', status: 'unresolved', reason: 'config_fetch_failed' },
+      { name: 'k', status: 'unresolved', reason: 'config_fetch_failed' },
     ]);
-    expect(result.unresolved).toHaveLength(7);
+    expect(result.unresolved).toHaveLength(11);
+  });
+
+  it('classifies a repository lookup rejection without attempting to fetch its config', async () => {
+    const root = repository(1, 'org/root');
+    const resolveError = new Error('repository service unavailable');
+    const resolveRepository = jest.fn().mockRejectedValue(resolveError);
+    const fetchConfig = jest.fn();
+
+    const result = await resolveEnvironmentServices({
+      rootRepository: root,
+      rootBranch: 'main',
+      rootConfig: config({ defaults: [{ name: 'web', repository: 'org/remote' }] }),
+      dependencies: { resolveRepository, fetchConfig },
+    });
+
+    expect(result.services[0]).toMatchObject({
+      name: 'web',
+      repository: 'org/remote',
+      status: 'unresolved',
+      reason: 'config_fetch_failed',
+    });
+    expect(fetchConfig).not.toHaveBeenCalled();
   });
 
   it('preserves entry order even when concurrent fetches finish in reverse order', async () => {

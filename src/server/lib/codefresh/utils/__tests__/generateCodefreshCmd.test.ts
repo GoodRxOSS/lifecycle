@@ -15,7 +15,11 @@
  */
 
 import { generateOptions } from 'server/lib/codefresh/__fixtures__/codefresh';
-import { generateCodefreshCmd } from 'server/lib/codefresh/utils/generateCodefreshCmd';
+import {
+  deletePendingHelmReleaseStep,
+  generateCodefreshCmd,
+  waitForInProgressDeploys,
+} from 'server/lib/codefresh/utils/generateCodefreshCmd';
 
 jest.mock('server/lib/codefresh/utils/generateYaml');
 import * as yaml from 'server/lib/codefresh/utils/generateYaml';
@@ -51,5 +55,53 @@ describe('generateCodefreshCmd', () => {
     const result = generateCodefreshCmd(customImageOptions);
 
     expect(result).toContain('latest');
+  });
+
+  it('includes the selected runtime and every build environment variable', () => {
+    jest.spyOn(yaml, 'generateYaml').mockReturnValue('yaml');
+
+    const result = generateCodefreshCmd({
+      ...generateOptions,
+      runtimeName: 'production-runtime',
+      envVars: { API_URL: 'https://api.example.test', EMPTY_VALUE: '' },
+    });
+
+    expect(result).toContain('--runtime-name production-runtime');
+    expect(result).toContain("-v 'API_URL'='https://api.example.test'");
+    expect(result).toContain("-v 'EMPTY_VALUE'=''");
+  });
+});
+
+describe('Codefresh deployment coordination steps', () => {
+  it('builds the pending Helm release cleanup step for the deployment namespace', () => {
+    expect(
+      deletePendingHelmReleaseStep({
+        deploy: { uuid: 'deploy-123' } as never,
+        namespace: 'candidate-123',
+      })
+    ).toEqual({
+      title: 'Delete Pending Helm Releases',
+      stage: 'Cleanup',
+      image: 'alpine/helm:3.7.2',
+      fail_fast: false,
+      commands: [
+        'helm list -n candidate-123 -m 1000 --pending -q | grep deploy-123 | xargs --no-run-if-empty helm uninstall --wait -n candidate-123',
+      ],
+    });
+  });
+
+  it('builds the wait step with the requested deployment and pipeline identifiers', () => {
+    const step = waitForInProgressDeploys({ deployUUID: 'deploy-123', pipelineId: 'pipeline-456' });
+
+    expect(step).toMatchObject({
+      title: 'Wait for pending deploys to finish',
+      stage: 'Wait',
+      image: 'codefresh/cli:0.87.4',
+      fail_fast: false,
+    });
+    expect(step.commands).toHaveLength(1);
+    expect(step.commands[0]).toContain('pipeline=pipeline-456&status=running');
+    expect(step.commands[0]).toContain('.value=="deploy-123"');
+    expect(step.commands[0]).toContain('if [ "{}" != "$CF_BUILD_ID" ]');
   });
 });

@@ -133,6 +133,17 @@ describe('/api/v2/config/api-keys', () => {
     expect(mockSetApiKeysConfig).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed JSON before writing config', async () => {
+    const request = makeRequest();
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockSetApiKeysConfig).not.toHaveBeenCalled();
+  });
+
   it('rejects partial replacement updates', async () => {
     const response = await PUT(makeRequest({ issuanceEnabled: true }));
     const body = await response.json();

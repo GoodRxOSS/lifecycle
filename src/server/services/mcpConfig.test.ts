@@ -58,6 +58,7 @@ function setup(
     enablement?: McpEnablementResult;
     sitesAvailable?: boolean;
     hasApplicationSigningKey?: boolean;
+    rowConfig?: unknown;
   } = {}
 ): {
   service: McpConfigService;
@@ -68,7 +69,7 @@ function setup(
   const query = {
     where: jest.fn().mockReturnThis(),
     forUpdate: jest.fn().mockReturnThis(),
-    first: jest.fn(async () => ({ config: stored })),
+    first: jest.fn(async () => ({ config: options.rowConfig === undefined ? stored : options.rowConfig })),
   };
   const trx = Object.assign(
     jest.fn(() => query),
@@ -230,4 +231,25 @@ it('fails runtime changes closed when the application key disappears', async () 
     allowChanges: false,
     sitesAvailable: true,
   });
+});
+
+it.each([
+  ['a matching JSON string', '{"enabled":true,"allowChanges":false}', 'noop'],
+  ['malformed JSON', '{not-json', 'updated'],
+  ['a non-object row', null, 'updated'],
+] as const)('normalizes %s from the locked audit row', async (_label, rowConfig, outcome) => {
+  const { service, dependencies } = setup({ enabled: false, allowChanges: false }, { rowConfig, enablement: ready() });
+
+  await service.setConfig({ enabled: true, allowChanges: false }, 'admin-1', null);
+
+  expect(dependencies.recordAudit).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({
+      outcome,
+      meta: {
+        before: outcome === 'noop' ? { enabled: true, allowChanges: false } : { enabled: false, allowChanges: false },
+        after: { enabled: true, allowChanges: false },
+      },
+    })
+  );
 });

@@ -25,11 +25,16 @@ import {
   repo,
   revision,
 } from 'server/lib/codefresh/__fixtures__/codefresh';
+import { updateLogContext } from 'server/lib/logger';
 import * as utils from 'server/lib/codefresh/utils';
+
+jest.mock('server/lib/logger', () => ({
+  updateLogContext: jest.fn(),
+}));
 
 describe('constructBuildArgs', () => {
   it('returns an empty array when no env vars are passed', () => {
-    const result = utils.constructBuildArgs({});
+    const result = utils.constructBuildArgs();
     expect(result).toEqual([]);
   });
 
@@ -52,6 +57,19 @@ test('generateBuildStep', () => {
   const options = { ...generateBuildStepOptions, imageName: 'test-image', ecrRepo: 'lfc/lifecycle-deployments' };
   const result = utils.generateBuildStep(options);
   expect(result).toEqual(buildStep);
+});
+
+test('generateBuildStep includes an explicit registry cache source', () => {
+  const result = utils.generateBuildStep({
+    ...generateBuildStepOptions,
+    ecrRepo: 'lfc/lifecycle-deployments',
+    cacheFrom: 'account.example.test/lfc/cache:latest',
+  });
+
+  expect(result).toMatchObject({
+    no_cf_cache: false,
+    build_arguments: ['BUILDKIT_INLINE_CACHE=1', '--cache-from=account.example.test/lfc/cache:latest'],
+  });
 });
 
 test('generateAfterBuildStep without appShort', () => {
@@ -78,5 +96,23 @@ describe('constructStages', () => {
   it('returns all build items when defined', () => {
     const result = utils.constructStages({ afterBuildPipelineId: 'bar' });
     expect(result).toEqual(['Checkout', 'Build', 'PostBuild']);
+  });
+});
+
+describe('getCodefreshPipelineIdFromOutput', () => {
+  it('returns and records the first trimmed 24-character hexadecimal pipeline id', () => {
+    const pipelineId = 'ABCDEF0123456789abcdef01';
+
+    expect(utils.getCodefreshPipelineIdFromOutput(`starting build\n  ${pipelineId}  \nfinished`)).toBe(pipelineId);
+    expect(updateLogContext).toHaveBeenCalledWith({ pipelineId });
+  });
+
+  it('rejects output without a complete pipeline id and does not change log context', () => {
+    const output = 'starting build\nabc123\nnot-hex-0123456789012345';
+
+    expect(() => utils.getCodefreshPipelineIdFromOutput(output)).toThrow(
+      `Could not find pipeline ID in Codefresh output: ${output}`
+    );
+    expect(updateLogContext).not.toHaveBeenCalled();
   });
 });

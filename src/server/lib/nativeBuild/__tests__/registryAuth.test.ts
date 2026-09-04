@@ -17,6 +17,7 @@
 const mockCreateSecret = jest.fn();
 const mockDeleteSecret = jest.fn();
 const mockGetAccessToken = jest.fn();
+const mockInfo = jest.fn();
 const mockWarn = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => {
@@ -41,10 +42,12 @@ jest.mock('google-auth-library', () => ({
 
 jest.mock('server/lib/logger', () => ({
   getLogger: () => ({
-    info: jest.fn(),
+    info: mockInfo,
     warn: mockWarn,
   }),
 }));
+
+import * as k8s from '@kubernetes/client-node';
 
 import {
   buildGarDockerConfig,
@@ -89,6 +92,7 @@ describe('native build registry auth', () => {
       ['non-array registryAuth', { type: 'gar', registry: 'us-central1-docker.pkg.dev' }],
       ['non-object entry', ['gar']],
       ['unsupported provider', [{ type: 'ecr', registry: '123456789.dkr.ecr.us-east-1.amazonaws.com' }]],
+      ['non-string GAR registry', [{ type: 'gar', registry: 42 }]],
       ['registry path', [{ type: 'gar', registry: 'us-central1-docker.pkg.dev/project/repo' }]],
       ['registry scheme', [{ type: 'gar', registry: 'https://us-central1-docker.pkg.dev' }]],
       [
@@ -204,6 +208,22 @@ describe('native build registry auth', () => {
       expect(mockCreateSecret).not.toHaveBeenCalled();
     });
 
+    it('fails closed with a sanitized message when ADC token acquisition rejects', async () => {
+      mockGetAccessToken.mockRejectedValue(new Error('credential-body-must-not-leak'));
+
+      await expect(
+        createNativeBuildRegistryAuthSecret({
+          namespace: 'env-test-123',
+          secretName: 'test-build-registry-auth',
+          registryAuth: [{ type: 'gar', registry: 'us-central1-docker.pkg.dev' }],
+          deployUuid: 'deploy-123',
+        })
+      ).rejects.toThrow(
+        'Build: GAR access token acquisition failed registries=us-central1-docker.pkg.dev verify=google_application_default_credentials'
+      );
+      expect(mockCreateSecret).not.toHaveBeenCalled();
+    });
+
     it('fails closed without exposing credentials when Secret creation fails', async () => {
       mockCreateSecret.mockRejectedValue(new Error('gar-access-token'));
 
@@ -221,6 +241,27 @@ describe('native build registry auth', () => {
   });
 
   describe('deleteNativeBuildRegistryAuthSecret', () => {
+    it('deletes the temporary Secret and records successful cleanup', async () => {
+      await expect(deleteNativeBuildRegistryAuthSecret('env-test-123', 'test-build-registry-auth')).resolves.toBe(
+        undefined
+      );
+
+      expect(mockDeleteSecret).toHaveBeenCalledWith('test-build-registry-auth', 'env-test-123');
+      expect(mockInfo).toHaveBeenCalledWith(
+        'Build: registry auth cleaned secretName=test-build-registry-auth namespace=env-test-123'
+      );
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('treats an already-absent Secret as successful cleanup', async () => {
+      mockDeleteSecret.mockRejectedValue(new k8s.HttpError({ statusCode: 404 } as any, { message: 'not found' }, 404));
+
+      await expect(deleteNativeBuildRegistryAuthSecret('env-test-123', 'test-build-registry-auth')).resolves.toBe(
+        undefined
+      );
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
     it('does not fail the build when Secret cleanup fails', async () => {
       mockDeleteSecret.mockRejectedValue(new Error('cleanup failed'));
 

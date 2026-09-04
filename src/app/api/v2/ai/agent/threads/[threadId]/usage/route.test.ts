@@ -124,4 +124,21 @@ describe('GET /api/v2/ai/agent/threads/[threadId]/usage', () => {
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Agent thread not found');
   });
+
+  it('maps a missing backing session to 404', async () => {
+    mockGetOwnedThreadUsage.mockRejectedValue(new Error('Agent session not found'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Agent session not found');
+  });
+
+  it('maps an unexpected usage-service failure to 500', async () => {
+    mockGetOwnedThreadUsage.mockRejectedValue(new Error('usage store unavailable'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(500);
+  });
 });

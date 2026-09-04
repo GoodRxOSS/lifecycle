@@ -19,7 +19,7 @@ jest.mock('server/lib/agentSession/runtimeConfig', () => ({
   DEFAULT_AGENT_SESSION_MAX_RUN_INPUT_TOKENS: 400_000,
 }));
 
-import { resolveDebugToolLoopControls } from '../debugToolLoopControls';
+import { resolveDebugIntent, resolveDebugToolLoopControls } from '../debugToolLoopControls';
 import type { AgentRuntimeToolMetadata } from '../CapabilityService';
 import type { AgentDebugRunIntent, AgentRunPlanSnapshotV1 } from '../runPlanTypes';
 
@@ -392,6 +392,78 @@ describe('resolveDebugToolLoopControls', () => {
     });
   });
 
+  it('recognizes a JSON-string ready envelope but ignores malformed and missing workspace results', async () => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildFreeformRunPlan(),
+      tools: freeformTools,
+      toolMetadata: freeformMetadata,
+      maxIterations: 14,
+      maxRunInputTokens: 400_000,
+    });
+
+    for (const output of [null, { value: '{not-json' }]) {
+      const step = await controls.prepareStep?.({
+        stepNumber: 0,
+        steps: [{ toolResults: [{ toolName: 'mcp__lifecycle__request_workspace', output }] }],
+      } as any);
+      expect((step as { activeTools: string[] }).activeTools).not.toContain('mcp__workspace_core__read_file');
+    }
+
+    const widened = await controls.prepareStep?.({
+      stepNumber: 1,
+      steps: [
+        {
+          toolResults: [
+            {
+              toolName: 'mcp__lifecycle__request_workspace',
+              output: { value: JSON.stringify({ status: 'ready' }) },
+            },
+          ],
+        },
+      ],
+    } as any);
+    expect((widened as { activeTools: string[] }).activeTools).toContain('mcp__workspace_core__read_file');
+  });
+
+  it('adds workspace guidance when prior instructions are absent or an instruction array', async () => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildFreeformRunPlan(),
+      tools: freeformTools,
+      toolMetadata: freeformMetadata,
+      maxIterations: 14,
+      maxRunInputTokens: 400_000,
+      workspaceReadyInstructions: 'WORKSPACE_GUIDANCE_SENTINEL',
+    });
+    const readySteps = [
+      { toolResults: [{ toolName: 'mcp__lifecycle__request_workspace', output: { status: 'ready' } }] },
+    ];
+
+    const withoutInitial = await controls.prepareStep?.({ stepNumber: 1, steps: readySteps } as any);
+    expect((withoutInitial as { instructions: string }).instructions).toBe('WORKSPACE_GUIDANCE_SENTINEL');
+
+    const instructionArray = [{ role: 'system', content: 'Base.' }];
+    const withArray = await controls.prepareStep?.({
+      stepNumber: 2,
+      steps: [],
+      initialInstructions: instructionArray,
+    } as any);
+    expect((withArray as { instructions: unknown[] }).instructions).toEqual([
+      ...instructionArray,
+      { role: 'system', content: 'WORKSPACE_GUIDANCE_SENTINEL' },
+    ]);
+
+    const withEmptyString = await controls.prepareStep?.({
+      stepNumber: 3,
+      steps: [],
+      initialInstructions: '',
+    } as any);
+    expect((withEmptyString as { instructions: string }).instructions).toBe('WORKSPACE_GUIDANCE_SENTINEL');
+  });
+
+  it('resolves no intent when no run-plan snapshot exists', () => {
+    expect(resolveDebugIntent()).toBeNull();
+  });
+
   it('fails closed to diagnosis for Debug build-context snapshots without a resolved intent', () => {
     const controls = resolveDebugToolLoopControls({
       runPlanSnapshot: buildRunPlan(),
@@ -448,6 +520,26 @@ describe('resolveDebugToolLoopControls', () => {
     expectStepCountStopCondition(controls, 14);
   });
 
+  it('leaves a build-context toolset unchanged when no registered tool needs a workspace', async () => {
+    const buildContextPlan = {
+      ...buildRunPlan(),
+      agent: { id: 'custom.docs-helper', label: 'Docs Helper', sourceKind: 'build_context_chat' },
+    } as AgentRunPlanSnapshotV1;
+    const readOnlyTools = { mcp__docs__search_docs: {} } as any;
+    const readOnlyMetadata = metadata.filter(({ toolKey }) => toolKey === 'mcp__docs__search_docs');
+
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildContextPlan,
+      tools: readOnlyTools,
+      toolMetadata: readOnlyMetadata,
+      maxIterations: 4,
+      maxRunInputTokens: 400_000,
+    });
+
+    expect(controls.activeTools).toBeUndefined();
+    expect(await controls.prepareStep?.({ stepNumber: 0, steps: [] } as any)).toBeUndefined();
+  });
+
   it('leaves non-build-context runs without an intent unconstrained even if workspace tools exist', async () => {
     const customWorkspaceRunPlan = {
       ...buildRunPlan(),
@@ -468,6 +560,21 @@ describe('resolveDebugToolLoopControls', () => {
     expect(controls.activeTools).toBeUndefined();
     expect(await controls.prepareStep?.({ stepNumber: 1, steps: underBudgetSteps } as any)).toBeUndefined();
     expect(controls.effectiveMaxIterations).toBe(14);
+  });
+
+  it('uses unconstrained no-snapshot controls and degrades to a tools-off answer at the token budget', async () => {
+    const controls = resolveDebugToolLoopControls({
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 4,
+      maxRunInputTokens: 400_000,
+    });
+
+    expect(controls.activeTools).toBeUndefined();
+    expect(await controls.prepareStep?.({ stepNumber: 0, steps: underBudgetSteps } as any)).toBeUndefined();
+    expect(await controls.prepareStep?.({ stepNumber: 1, steps: overBudgetSteps } as any)).toEqual({
+      toolChoice: 'none',
+    });
   });
 
   it('at budget exhaustion sets toolChoice none but keeps tools active (no NoSuchTool spam)', async () => {
@@ -658,6 +765,45 @@ describe('resolveDebugToolLoopControls', () => {
     expect(controls.activeTools).not.toContain('mcp__sample__denied_repair');
     expect(controls.effectiveMaxIterations).toBe(14);
     expectStepCountStopCondition(controls, 14);
+  });
+
+  it.each([
+    ['a missing result', undefined, false],
+    ['a primitive success result', 1, true],
+    ['an error envelope', { type: 'error-json', value: 'failed' }, false],
+    ['an explicit unsuccessful result', { success: false }, false],
+    ['an isError result', { isError: true }, false],
+    ['a nested unsuccessful result', { value: { success: false } }, false],
+    ['an object result without an error marker', {}, true],
+  ])('treats %s according to its success markers', async (_label, output, mutationLanded) => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildRunPlan('repair'),
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 14,
+      maxRunInputTokens: 400_000,
+    });
+
+    const step = await controls.prepareStep?.({
+      stepNumber: 1,
+      steps: [{ toolResults: [{ toolName: 'mcp__lifecycle__update_file', output }] }],
+    } as any);
+
+    expect(step?.activeTools?.includes('mcp__lifecycle__update_file')).toBe(!mutationLanded);
+  });
+
+  it('keeps repair tools active when a step has no tool results', async () => {
+    const controls = resolveDebugToolLoopControls({
+      runPlanSnapshot: buildRunPlan('repair'),
+      tools,
+      toolMetadata: metadata,
+      maxIterations: 14,
+      maxRunInputTokens: 400_000,
+    });
+
+    const step = await controls.prepareStep?.({ stepNumber: 1, steps: [{}] } as any);
+
+    expect(step?.activeTools).toContain('mcp__lifecycle__update_file');
   });
 
   it('narrows a repair run to read-only tools after the first successful mutation', async () => {

@@ -115,4 +115,37 @@ describe('GET /api/v2/ai/admin/agent/sessions/[sessionId]', () => {
       })
     );
   });
+
+  it('maps a missing session to 404', async () => {
+    mockGetSession.mockRejectedValue(new Error('Agent session not found'));
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions/missing-session'), {
+      params: Promise.resolve({ sessionId: 'missing-session' }),
+    });
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Agent session not found');
+  });
+
+  it('maps an unexpected admin-service failure to 500', async () => {
+    mockGetSession.mockRejectedValue(new Error('admin session store unavailable'));
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions/session-1'), {
+      params: Promise.resolve({ sessionId: 'session-1' }),
+    });
+
+    expect(response.status).toBe(500);
+  });
+
+  it('rejects unauthenticated requests before loading the session', async () => {
+    mockGetUser.mockReturnValue(undefined);
+    mockGetRequestUserIdentity.mockReturnValue(undefined);
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/sessions/session-1'), {
+      params: Promise.resolve({ sessionId: 'session-1' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(mockGetSession).not.toHaveBeenCalled();
+  });
 });

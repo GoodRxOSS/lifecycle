@@ -20,6 +20,7 @@ import {
   readChatPreviewGrantClaims,
   verifyChatPreviewGrant,
 } from 'server/lib/agentSession/chatPreviewGrant';
+import { createCipheriv, createHash, randomBytes } from 'crypto';
 
 const originalSecret = process.env.CHAT_PREVIEW_GRANT_SECRET;
 const originalEncryptionKey = process.env.ENCRYPTION_KEY;
@@ -27,6 +28,21 @@ const originalEnableAuth = process.env.ENABLE_AUTH;
 const originalNextAuthSecret = process.env.NEXTAUTH_SECRET;
 const originalGithubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
 const PREVIEW_HOST = '3000--abcdef1234567890.preview.lifecycle.dev';
+
+function mintRawGrant(claims: unknown): string {
+  const iv = randomBytes(12);
+  const key = createHash('sha256').update('test-preview-secret', 'utf8').digest();
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from('lifecycle.chat-preview-grant.v1', 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(claims), 'utf8'), cipher.final()]);
+
+  return [
+    'lfcpg_v1',
+    iv.toString('base64url'),
+    ciphertext.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+  ].join('.');
+}
 
 describe('chat preview grants', () => {
   beforeEach(() => {
@@ -91,6 +107,41 @@ describe('chat preview grants', () => {
         previewHost: PREVIEW_HOST,
       })
     ).toBe(true);
+  });
+
+  it('uses the local development secret only when authentication is disabled', () => {
+    delete process.env.CHAT_PREVIEW_GRANT_SECRET;
+    delete process.env.ENCRYPTION_KEY;
+    delete process.env.NEXTAUTH_SECRET;
+    delete process.env.GITHUB_WEBHOOK_SECRET;
+    process.env.ENABLE_AUTH = 'false';
+
+    const { grant } = createChatPreviewGrant({
+      sessionId: 'session-123',
+      port: 3000,
+      userId: 'user-123',
+      previewHost: PREVIEW_HOST,
+    });
+
+    expect(
+      verifyChatPreviewGrant(grant, {
+        sessionId: 'session-123',
+        port: 3000,
+        userId: 'user-123',
+        previewHost: PREVIEW_HOST,
+      })
+    ).toBe(true);
+  });
+
+  it('rejects a blank preview host before minting a grant', () => {
+    expect(() =>
+      createChatPreviewGrant({
+        sessionId: 'session-123',
+        port: 3000,
+        userId: 'user-123',
+        previewHost: '   ',
+      })
+    ).toThrow('previewHost is required to mint a chat preview grant.');
   });
 
   it('rejects grants replayed onto another preview target', () => {
@@ -198,6 +249,7 @@ describe('chat preview grants', () => {
     const tampered = [prefix, iv, ciphertext, tamperedTag].join('.');
 
     expect(readChatPreviewGrantClaims('not-a-grant')).toBeNull();
+    expect(readChatPreviewGrantClaims(null)).toBeNull();
     expect(readChatPreviewGrantClaims('lfcpg_v1.bad.bad.bad')).toBeNull();
     expect(readChatPreviewGrantClaims(tampered)).toBeNull();
     expect(
@@ -208,6 +260,23 @@ describe('chat preview grants', () => {
         previewHost: PREVIEW_HOST,
       })
     ).toBe(false);
+    expect(getChatPreviewGrantMaxAgeSeconds('not-a-grant')).toBeNull();
+  });
+
+  it('rejects an authentic grant whose decrypted claims violate the grant contract', () => {
+    const malformedGrant = mintRawGrant({
+      v: 1,
+      sessionId: 'session-123',
+      port: '3000',
+      userId: 'user-123',
+      previewHost: PREVIEW_HOST,
+      iat: 1782734400,
+      exp: 1782738000,
+      jti: 'grant-1',
+    });
+
+    expect(readChatPreviewGrantClaims(malformedGrant)).toBeNull();
+    expect(readChatPreviewGrantClaims(mintRawGrant(null))).toBeNull();
   });
 
   it('clamps grant ttl to the supported range', () => {

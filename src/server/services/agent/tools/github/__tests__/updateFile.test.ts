@@ -112,6 +112,21 @@ describe('validateDiff', () => {
     expect(result.linesRemoved).toBe(0);
     expect(result.linesChanged).toBe(1);
   });
+
+  it('uses a bounded conservative count instead of building an oversized diff matrix', () => {
+    const oldContent = Array.from({ length: 1001 }, (_, index) => `old-${index}`).join('\n');
+    const newContent = Array.from({ length: 1000 }, (_, index) => `new-${index}`).join('\n');
+
+    const result = validateDiff(oldContent, newContent);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        valid: false,
+        linesRemoved: 1001,
+        linesChanged: 2001,
+      })
+    );
+  });
 });
 
 describe('GitHubClient write path safety', () => {
@@ -160,12 +175,47 @@ describe('UpdateFileTool', () => {
     tool = new UpdateFileTool(mockGithubClient);
   });
 
+  it('stops before validation or GitHub access when the operation is already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await tool.execute(baseArgs, controller.signal);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('CANCELLED');
+    expect(mockGithubClient.isRepoAllowed).not.toHaveBeenCalled();
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
+  });
+
   it('rejects repositories outside the build scope', async () => {
     mockGithubClient.isRepoAllowed.mockReturnValue(false);
     const result = await tool.execute(baseArgs);
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('REPO_NOT_ALLOWED');
     expect(mockOctokit.request).not.toHaveBeenCalled();
+  });
+
+  it('rejects file paths outside the configured write scope before GitHub access', async () => {
+    mockGithubClient.isFilePathAllowed.mockReturnValue(false);
+
+    const result = await tool.execute({ ...baseArgs, file_path: '../secrets/token.txt' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FILE_PATH_NOT_ALLOWED');
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a branch that violates the GitHub client policy before GitHub access', async () => {
+    mockGithubClient.validateBranch.mockReturnValue({ valid: false, error: 'Only feature-branch is allowed' });
+
+    const result = await tool.execute(baseArgs);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toEqual({
+      code: 'BRANCH_VALIDATION_FAILED',
+      message: 'Only feature-branch is allowed',
+    });
+    expect(mockGithubClient.getOctokitWithAuth).not.toHaveBeenCalled();
   });
 
   it('fails closed when an approved write has no user GitHub auth', async () => {
@@ -183,6 +233,40 @@ describe('UpdateFileTool', () => {
     expect(result.auth).toEqual({ provider: 'github', source: 'none', required: true });
     // The read happened; the commit PUT never did.
     expect(mockOctokit.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a rejected GitHub user authorization response to the reconnect contract', async () => {
+    mockOctokit.request.mockResolvedValueOnce({
+      data: { sha: 'existing-sha', content: Buffer.from('old').toString('base64') },
+    });
+    mockGithubClient.getOctokitWithAuth
+      .mockResolvedValueOnce({ octokit: mockOctokit, auth: userAuth })
+      .mockRejectedValueOnce({ status: 403 });
+
+    const result = await tool.execute(baseArgs);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toEqual({
+      code: 'GITHUB_USER_AUTH_REQUIRED',
+      message: 'GitHub authorization is required to apply this repair. Reconnect GitHub and approve again.',
+    });
+    expect(result.auth).toEqual(userAuth);
+    expect(mockOctokit.request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [new Error('GitHub unavailable'), 'GitHub unavailable'],
+    [{}, 'Failed to commit changes'],
+  ])('returns the execution error contract for an unexpected GitHub failure', async (failure, expectedMessage) => {
+    mockGithubClient.getOctokitWithAuth.mockRejectedValueOnce(failure);
+
+    const result = await tool.execute(baseArgs);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toEqual({
+      code: 'EXECUTION_ERROR',
+      message: expectedMessage,
+    });
   });
 
   it('returns the friendly no-op result without requiring write authorization', async () => {

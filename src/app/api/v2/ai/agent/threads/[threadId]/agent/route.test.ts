@@ -91,9 +91,9 @@ const agentState = {
   ],
 };
 
-function makeRequest(body?: Record<string, unknown>): NextRequest {
+function makeRequest(body?: unknown): NextRequest {
   return {
-    json: jest.fn().mockResolvedValue(body || {}),
+    json: jest.fn().mockResolvedValue(body === undefined ? {} : body),
     headers: new Headers([['x-request-id', 'req-test']]),
     nextUrl: new URL('http://localhost/api/v2/ai/agent/threads/thread-1/agent'),
   } as unknown as NextRequest;
@@ -170,6 +170,30 @@ describe('/api/v2/ai/agent/threads/[threadId]/agent', () => {
       params: Promise.resolve({ threadId: 'thread-1' }),
     });
     expect(missingIdResponse.status).toBe(400);
+  });
+
+  it.each([
+    { label: 'a null body', body: null },
+    { label: 'an array body', body: [] },
+    { label: 'a scalar body', body: 'custom.sample-agent' },
+  ])('returns 400 for $label before switching agents', async ({ body }) => {
+    const response = await PATCH(makeRequest(body), {
+      params: Promise.resolve({ threadId: 'thread-1' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Request body must be an object');
+    expect(mockSwitchThreadAgent).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for malformed JSON before switching agents', async () => {
+    const request = makeRequest();
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PATCH(request, { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(400);
+    expect(mockSwitchThreadAgent).not.toHaveBeenCalled();
   });
 
   it('returns 409 for another user or unknown custom agent ids', async () => {

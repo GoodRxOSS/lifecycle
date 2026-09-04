@@ -107,6 +107,23 @@ describe('ConfigBuilder', () => {
         },
       });
     });
+
+    it('preserves native Helm defaults without inventing a post-renderer config', () => {
+      const config = new HelmConfigBuilder()
+        .mergeWithDefaults({
+          nativeHelm: {
+            enabled: true,
+            image: 'registry.example.com/helm-runner:1.0.0',
+          },
+        })
+        .build();
+
+      expect(config.nativeHelm).toEqual({
+        enabled: true,
+        image: 'registry.example.com/helm-runner:1.0.0',
+        postRenderer: undefined,
+      });
+    });
   });
 
   describe('BuildConfigBuilder', () => {
@@ -147,6 +164,32 @@ describe('ConfigBuilder', () => {
       const config = new BuildConfigBuilder().setEngine('ci').build();
 
       expect(config.engine).toBe('ci');
+    });
+
+    it('merges current nested build settings over defaults without mutating either input', () => {
+      const defaults = {
+        engine: 'buildkit' as const,
+        jobTimeout: 1800,
+        resources: {
+          requests: { cpu: '250m', memory: '512Mi' },
+          limits: { cpu: '1', memory: '1Gi' },
+        },
+      };
+      const current = new BuildConfigBuilder().setJobTimeout(3600).setBuildkitEndpoint('tcp://buildkit:1234');
+
+      const config = current.mergeWithDefaults(defaults).build();
+
+      expect(config).toEqual({
+        engine: 'buildkit',
+        jobTimeout: 3600,
+        resources: {
+          requests: { cpu: '250m', memory: '512Mi' },
+          limits: { cpu: '1', memory: '1Gi' },
+        },
+        buildkit: { endpoint: 'tcp://buildkit:1234' },
+      });
+      expect(defaults).not.toHaveProperty('buildkit');
+      expect(current.build()).toEqual({ jobTimeout: 3600, buildkit: { endpoint: 'tcp://buildkit:1234' } });
     });
   });
 

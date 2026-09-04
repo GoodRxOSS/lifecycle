@@ -84,6 +84,17 @@ it('creates a client as the authenticated administrator', async () => {
   expect(mockCreate).toHaveBeenCalledWith(body, 'admin-user', 'request-1');
 });
 
+it('rejects malformed JSON before creating a client', async () => {
+  const req = request('POST');
+  req.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+  const response = await POST(req);
+
+  expect(response.status).toBe(400);
+  expect((await response.json()).error.message).toContain('Invalid JSON');
+  expect(mockCreate).not.toHaveBeenCalled();
+});
+
 it('keeps list and create admin-only', async () => {
   mockGetUser.mockReturnValue({ sub: 'ordinary-user', realm_access: { roles: ['user'] } });
   expect((await GET(request('GET'))).status).toBe(403);

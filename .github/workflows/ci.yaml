@@ -27,7 +27,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       # - run: pnpm ts-check need fixes
-      - run: pnpm test
+      - run: pnpm test:coverage
       - run: pnpm build
         env:
           CI: true

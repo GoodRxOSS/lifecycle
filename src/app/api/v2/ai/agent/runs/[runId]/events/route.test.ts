@@ -187,6 +187,16 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
     expect(mockGetOwnedRun).not.toHaveBeenCalled();
   });
 
+  it.each(['0', '-1', '1.5', 'many'])('returns 400 for invalid limit %s', async (limit) => {
+    const response = await GET(makeRequest(`http://localhost/api/v2/ai/agent/runs/run-1/events?limit=${limit}`), {
+      params: Promise.resolve({ runId: 'run-1' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Expected a positive integer limit.');
+    expect(mockGetOwnedRun).not.toHaveBeenCalled();
+  });
+
   it('returns 404 when the run is not owned by the user', async () => {
     const missingRunError = new Error('Agent run not found');
     mockGetOwnedRun.mockRejectedValue(missingRunError);
@@ -199,5 +209,17 @@ describe('GET /api/v2/ai/agent/runs/[runId]/events', () => {
 
     expect(response.status).toBe(404);
     expect(body.error.message).toBe('Agent run not found');
+  });
+
+  it('maps an unexpected run lookup failure to 500', async () => {
+    mockGetOwnedRun.mockRejectedValue(new Error('run store unavailable'));
+    mockIsRunNotFoundError.mockReturnValue(false);
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/agent/runs/run-1/events'), {
+      params: Promise.resolve({ runId: 'run-1' }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(mockListRunEventsPageForRun).not.toHaveBeenCalled();
   });
 });

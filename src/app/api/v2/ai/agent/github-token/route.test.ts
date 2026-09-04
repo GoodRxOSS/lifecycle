@@ -160,4 +160,29 @@ describe('GET /api/v2/ai/agent/github-token', () => {
       rateLimitRemaining: '57',
     });
   });
+
+  it('leaves username matching unknown when GitHub does not return a login', async () => {
+    mockResolveRequestGitHubUserToken.mockResolvedValue({
+      githubUsername: 'sample-user',
+      githubToken: 'gho_secret_token',
+    });
+    mockFetchGitHubAuthenticatedUser.mockResolvedValue({
+      ok: false,
+      id: null,
+      login: null,
+      status: 401,
+      scopes: [],
+      rateLimitRemaining: null,
+    });
+
+    const response = await GET(makeRequest());
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).data).toMatchObject({
+      tokenFetched: true,
+      tokenUsable: false,
+      githubLogin: null,
+      matchesKeycloakUsername: null,
+    });
+  });
 });

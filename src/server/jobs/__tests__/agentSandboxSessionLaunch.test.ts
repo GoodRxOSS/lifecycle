@@ -129,6 +129,91 @@ describe('agentSandboxSessionLaunch', () => {
     } as any;
   }
 
+  it('reports progress and persists the created sandbox while preserving the original creation time', async () => {
+    await setSandboxLaunchState(mockRedis as any, {
+      launchId: 'launch-1',
+      userId: 'sample-user',
+      status: 'queued',
+      stage: 'queued',
+      message: 'Sandbox launch queued',
+      createdAt: '2026-05-09T15:59:00.000Z',
+      updatedAt: '2026-05-09T15:59:00.000Z',
+      baseBuildUuid: 'base-build-1',
+      error: null,
+      workspaceFailure: null,
+    });
+    mockLaunch.mockImplementation(async (options) => {
+      await options.onProgress('queued', 'Still queued');
+      await options.onProgress('resolving_base_build', 'Resolving base build');
+      return {
+        status: 'created',
+        service: 'sample-service',
+        services: ['sample-service'],
+        buildUuid: 'sandbox-build-1',
+        namespace: 'sample-namespace',
+        session: { uuid: 'session-1' },
+      };
+    });
+
+    await expect(processAgentSandboxSessionLaunch(buildJob())).resolves.toBeUndefined();
+
+    expect(mockLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'sample-user',
+        githubToken: 'decrypted:encrypted-token',
+        baseBuildUuid: 'base-build-1',
+        services: ['sample-service'],
+        onProgress: expect.any(Function),
+      })
+    );
+    await expect(getSandboxLaunchState(mockRedis as any, 'launch-1')).resolves.toEqual(
+      expect.objectContaining({
+        status: 'created',
+        stage: 'ready',
+        message: 'Sandbox session is ready',
+        createdAt: '2026-05-09T15:59:00.000Z',
+        service: 'sample-service',
+        buildUuid: 'sandbox-build-1',
+        namespace: 'sample-namespace',
+        sessionId: 'session-1',
+        focusUrl: '/environments/sandbox-build-1/agent-session/session-1?baseBuildUuid=base-build-1',
+        error: null,
+        workspaceFailure: null,
+      })
+    );
+  });
+
+  it('reconstructs a created state when the queued progress record is missing', async () => {
+    mockLaunch.mockResolvedValue({
+      status: 'created',
+      service: 'sample-service',
+      services: ['sample-service'],
+      buildUuid: 'sandbox-build-1',
+      namespace: 'sample-namespace',
+      session: { uuid: 'session-1' },
+    });
+
+    await processAgentSandboxSessionLaunch(buildJob({ encryptedGithubToken: null }));
+
+    expect(mockLaunch).toHaveBeenCalledWith(expect.objectContaining({ githubToken: null }));
+    const state = await getSandboxLaunchState(mockRedis as any, 'launch-1');
+    expect(state).toEqual(expect.objectContaining({ status: 'created', createdAt: expect.any(String) }));
+    expect(Number.isNaN(Date.parse(state!.createdAt))).toBe(false);
+  });
+
+  it('rejects a service-selection result because queued jobs must create a session', async () => {
+    mockLaunch.mockResolvedValue({
+      status: 'needs_service_selection',
+      services: [{ name: 'sample-service', type: 'docker', repo: 'goodrx/example', branch: 'main' }],
+    });
+
+    await expect(processAgentSandboxSessionLaunch(buildJob())).rejects.toThrow(
+      'Sandbox launch job completed without creating a session'
+    );
+
+    expect(mockRedis.setex).not.toHaveBeenCalled();
+  });
+
   it('links opening-session createSession failures to the persisted failed session', async () => {
     const failure = {
       stage: 'connect_runtime',

@@ -161,6 +161,38 @@ describe('POST /api/v2/ai/agent/pending-actions/[actionId]/respond', () => {
     });
   });
 
+  it('forwards an always-allow approval to both resolution contracts', async () => {
+    mockResolvePendingAction.mockResolvedValueOnce({
+      id: 'action-1',
+      status: 'approved',
+    });
+
+    const response = await POST(makeRequest({ approved: true, alwaysAllow: true }), {
+      params: Promise.resolve({ actionId: 'action-1' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockResolvePendingAction).toHaveBeenCalledWith(
+      'action-1',
+      'sample-user',
+      'approved',
+      {
+        approved: true,
+        reason: null,
+        source: 'endpoint',
+        alwaysAllow: true,
+      },
+      {
+        githubAuth: {
+          githubToken: 'sample-gh-token',
+          source: 'user',
+          githubUsername: 'octocat',
+        },
+        alwaysAllow: true,
+      }
+    );
+  });
+
   it('rejects malformed response bodies without resolving the action', async () => {
     const cases = [
       { body: {}, message: 'approved must be a boolean' },

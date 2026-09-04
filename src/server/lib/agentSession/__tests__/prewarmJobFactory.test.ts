@@ -14,7 +14,34 @@
  * limitations under the License.
  */
 
-import { buildAgentPrewarmJobSpec } from '../prewarmJobFactory';
+const mockCreateNamespacedJob = jest.fn();
+const mockLoadFromDefault = jest.fn();
+const mockMakeApiClient = jest.fn(() => ({ createNamespacedJob: mockCreateNamespacedJob }));
+const mockLoggerInfo = jest.fn();
+const mockWaitForCompletion = jest.fn();
+const mockJobMonitorConstructor = jest.fn();
+
+jest.mock('@kubernetes/client-node', () => ({
+  BatchV1Api: class MockBatchV1Api {},
+  KubeConfig: jest.fn().mockImplementation(() => ({
+    loadFromDefault: mockLoadFromDefault,
+    makeApiClient: mockMakeApiClient,
+  })),
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: () => ({ info: mockLoggerInfo }),
+}));
+
+jest.mock('server/lib/kubernetes/JobMonitor', () => ({
+  JobMonitor: jest.fn().mockImplementation((...args: unknown[]) => {
+    mockJobMonitorConstructor(...args);
+    return { waitForCompletion: mockWaitForCompletion };
+  }),
+}));
+
+import { BatchV1Api } from '@kubernetes/client-node';
+import { buildAgentPrewarmJobSpec, createAgentPrewarmJob, monitorAgentPrewarmJob } from '../prewarmJobFactory';
 
 describe('prewarmJobFactory', () => {
   const baseOpts = {
@@ -28,6 +55,10 @@ describe('prewarmJobFactory', () => {
     revision: 'abcdef1234567890',
     workspacePath: '/workspace/example-repo',
   };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
   it('keeps clone/bootstrap steps separate from runtime seeding', () => {
     const job = buildAgentPrewarmJobSpec(baseOpts);
@@ -66,5 +97,128 @@ describe('prewarmJobFactory', () => {
     expect(credentialHelperIndex).toBeGreaterThan(-1);
     expect(cloneIndex).toBeGreaterThan(-1);
     expect(credentialHelperIndex).toBeLessThan(cloneIndex);
+  });
+
+  it('applies optional scheduling, forwarding, skill, and timeout configuration to the job', () => {
+    const resources = { requests: { cpu: '250m' }, limits: { memory: '512Mi' } };
+    const job = buildAgentPrewarmJobSpec({
+      ...baseOpts,
+      workspaceGatewayImage: 'gateway-image:latest',
+      hasGitHubToken: true,
+      forwardedAgentEnv: { PUBLIC_VALUE: 'visible', SECRET_VALUE: 'hidden' },
+      forwardedAgentSecretRefs: [{ envKey: 'SECRET_VALUE', provider: 'vault', path: 'apps/secret' }],
+      forwardedAgentSecretServiceName: 'workspace-service',
+      skillPlan: {
+        version: 1,
+        skills: [
+          {
+            repo: 'example-org/skills',
+            repoUrl: 'https://github.com/example-org/skills.git',
+            branch: 'main',
+            path: 'skills/review',
+            source: 'environment',
+          },
+        ],
+      },
+      buildUuid: 'build-1',
+      nodeSelector: { pool: 'agent' },
+      serviceAccountName: 'agent-prewarm',
+      resources,
+      timeoutSeconds: 45,
+    });
+
+    const spec = job.spec!.template.spec!;
+    const initWorkspace = spec.initContainers!.find((container) => container.name === 'init-workspace')!;
+    const initSkills = spec.initContainers!.find((container) => container.name === 'init-skills')!;
+    const seedRuntime = spec.initContainers!.find((container) => container.name === 'seed-runtime-config')!;
+
+    expect(job.spec!.activeDeadlineSeconds).toBe(45);
+    expect(job.metadata!.labels).toEqual(expect.objectContaining({ lc_uuid: 'build-1' }));
+    expect(spec.nodeSelector).toEqual({ pool: 'agent' });
+    expect(spec.serviceAccountName).toBe('agent-prewarm');
+    expect(initSkills.image).toBe('gateway-image:latest');
+    const encodedSkillPlan = initSkills.command![2].match(/skills-bootstrap\.mjs" "([^"]+)"/)?.[1];
+    expect(encodedSkillPlan).toBeDefined();
+    expect(JSON.parse(Buffer.from(encodedSkillPlan!, 'base64').toString('utf8'))).toEqual(
+      expect.objectContaining({ skills: [expect.objectContaining({ repo: 'example-org/skills' })] })
+    );
+    expect(initWorkspace.resources).toBe(resources);
+    expect(initWorkspace.env).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'PUBLIC_VALUE',
+          valueFrom: { secretKeyRef: { name: 'agent-secret-sample', key: 'PUBLIC_VALUE' } },
+        }),
+        expect.objectContaining({ name: 'SECRET_VALUE' }),
+        expect.objectContaining({ name: 'GITHUB_TOKEN' }),
+        expect.objectContaining({ name: 'GH_TOKEN' }),
+      ])
+    );
+    expect(seedRuntime.env).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'SECRET_VALUE' })]));
+  });
+
+  it('uses the workspace image for skill bootstrapping when no gateway image is configured', () => {
+    const job = buildAgentPrewarmJobSpec({
+      ...baseOpts,
+      skillPlan: {
+        version: 1,
+        skills: [
+          {
+            repo: 'example-org/skills',
+            repoUrl: 'https://github.com/example-org/skills.git',
+            branch: 'main',
+            path: 'skills/review',
+            source: 'environment',
+          },
+        ],
+      },
+    });
+
+    expect(job.spec!.template.spec!.initContainers!.find((container) => container.name === 'init-skills')!.image).toBe(
+      baseOpts.image
+    );
+  });
+
+  it('creates the generated job through the default Kubernetes context and returns the API body', async () => {
+    const createdJob = { metadata: { name: baseOpts.jobName, namespace: baseOpts.namespace, uid: 'job-uid' } };
+    mockCreateNamespacedJob.mockResolvedValue({ body: createdJob });
+
+    await expect(createAgentPrewarmJob(baseOpts)).resolves.toBe(createdJob);
+
+    expect(mockLoadFromDefault).toHaveBeenCalledTimes(1);
+    expect(mockMakeApiClient).toHaveBeenCalledWith(BatchV1Api);
+    expect(mockCreateNamespacedJob).toHaveBeenCalledWith(
+      baseOpts.namespace,
+      expect.objectContaining({ metadata: expect.objectContaining({ name: baseOpts.jobName }) })
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      `Prewarm: job started jobName=${baseOpts.jobName} namespace=${baseOpts.namespace}`
+    );
+  });
+
+  it('propagates Kubernetes creation failures without logging a successful start', async () => {
+    const error = new Error('Kubernetes unavailable');
+    mockCreateNamespacedJob.mockRejectedValue(error);
+
+    await expect(createAgentPrewarmJob(baseOpts)).rejects.toBe(error);
+
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, 30 * 60],
+    [75, 75],
+  ])('monitors completion with timeout %p as %i seconds', async (timeoutSeconds, expectedTimeout) => {
+    const completion = { succeeded: true, logs: 'complete' };
+    mockWaitForCompletion.mockResolvedValue(completion);
+
+    await expect(monitorAgentPrewarmJob('prewarm-job', 'environment', timeoutSeconds)).resolves.toBe(completion);
+
+    expect(mockJobMonitorConstructor).toHaveBeenCalledWith('prewarm-job', 'environment');
+    expect(mockWaitForCompletion).toHaveBeenCalledWith({
+      timeoutSeconds: expectedTimeout,
+      containerFilters: ['complete'],
+      logPrefix: 'agent-prewarm',
+    });
   });
 });

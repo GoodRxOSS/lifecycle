@@ -14,9 +14,98 @@
  * limitations under the License.
  */
 
-import { createGitCloneContainer, createBuildJobManifest, createJob } from '../utils';
+const mockWaitForJobAndGetLogs = jest.fn();
+const mockGetGithubClientToken = jest.fn();
+
+jest.mock('server/lib/kubernetes/JobMonitor', () => ({
+  JobMonitor: {
+    waitForJobAndGetLogs: (...args: unknown[]) => mockWaitForJobAndGetLogs(...args),
+  },
+}));
+
+jest.mock('server/services/globalConfig', () => ({
+  __esModule: true,
+  default: {
+    getInstance: () => ({ getGithubClientToken: mockGetGithubClientToken }),
+  },
+}));
+
+import {
+  createBuildJobManifest,
+  createCloneScript,
+  createGitCloneContainer,
+  createJob,
+  createRepoSpecificGitCloneContainer,
+  DEFAULT_BUILD_RESOURCES,
+  GIT_USERNAME,
+  getBuildAnnotations,
+  getBuildLabels,
+  getGitHubToken,
+  MANIFEST_PATH,
+  waitForJobAndGetLogs,
+} from '../utils';
 
 describe('nativeBuild/utils', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('exposes the shared builder defaults and workspace constants', () => {
+    expect(DEFAULT_BUILD_RESOURCES).toMatchObject({
+      buildkit: { requests: { cpu: '500m', memory: '1Gi' } },
+      kaniko: { requests: { cpu: '300m', memory: '750Mi' } },
+    });
+    expect(GIT_USERNAME).toBe('x-access-token');
+    expect(MANIFEST_PATH).toBe('/tmp/manifests');
+  });
+
+  it('forwards job monitoring inputs and returns the collected result', async () => {
+    const result = { logs: 'build complete', success: true, status: 'Complete' };
+    mockWaitForJobAndGetLogs.mockResolvedValue(result);
+
+    await expect(waitForJobAndGetLogs('build-job', 'preview-1', 17)).resolves.toBe(result);
+    expect(mockWaitForJobAndGetLogs).toHaveBeenCalledWith('build-job', 'preview-1', 17);
+  });
+
+  it('builds stable labels and timestamped annotations', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-27T12:34:56.000Z'));
+    try {
+      expect(getBuildLabels('api', 'build-uuid', '42', 'abcdef0', 'main', 'buildkit')).toEqual({
+        'lc-service': 'api',
+        'lc-uuid': 'build-uuid',
+        'lc-build-id': '42',
+        'git-sha': 'abcdef0',
+        'git-branch': 'main',
+        'builder-engine': 'buildkit',
+        'build-method': 'native',
+      });
+      expect(getBuildAnnotations('Dockerfile.api', 'registry.example/api')).toEqual({
+        'lfc/dockerfile': 'Dockerfile.api',
+        'lfc/ecr-repo': 'registry.example/api',
+        'lfc/triggered-at': '2026-08-27T12:34:56.000Z',
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('returns the configured GitHub client token', async () => {
+    mockGetGithubClientToken.mockResolvedValue('ghs_app_token');
+
+    await expect(getGitHubToken()).resolves.toBe('ghs_app_token');
+    expect(mockGetGithubClientToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds shallow clone commands with an optional exact-SHA checkout', () => {
+    const branchOnly = createCloneScript('GoodRxOSS/lifecycle', 'main');
+    const exactSha = createCloneScript('GoodRxOSS/lifecycle', 'feature/test', 'abcdef123');
+
+    expect(branchOnly).toContain('git clone --depth 1 --single-branch --progress -b main');
+    expect(branchOnly).not.toContain('git fetch --depth 1 --progress origin');
+    expect(exactSha).toContain('git fetch --depth 1 --progress origin abcdef123');
+    expect(exactSha).toContain('git checkout abcdef123');
+  });
+
   describe('createGitCloneContainer', () => {
     it('creates a proper git clone container configuration', () => {
       const container = createGitCloneContainer('owner/repo', 'abc123def456', 'x-access-token', 'github-token-123');
@@ -34,6 +123,25 @@ describe('nativeBuild/utils', () => {
       ]);
 
       expect(container.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/workspace' }]);
+    });
+
+    it('targets a caller-selected repository directory', () => {
+      const container = createRepoSpecificGitCloneContainer(
+        'GoodRxOSS/lifecycle-ui',
+        'feature/test',
+        '/workspace/lifecycle-ui',
+        'x-access-token',
+        'github-token-123'
+      );
+
+      expect(container.args[0]).toContain('safe.directory /workspace/lifecycle-ui');
+      expect(container.args[0]).toContain('git init /workspace/lifecycle-ui');
+      expect(container.args[0]).toContain('GoodRxOSS/lifecycle-ui.git');
+      expect(container.args[0]).toContain('git fetch --depth 1 --progress origin feature/test');
+      expect(container.env).toEqual([
+        { name: 'GIT_USERNAME', value: 'x-access-token' },
+        { name: 'GIT_PASSWORD', value: 'github-token-123' },
+      ]);
     });
   });
 
@@ -112,6 +220,29 @@ describe('nativeBuild/utils', () => {
 
       const manifest = createBuildJobManifest(options);
       expect(manifest.spec.ttlSecondsAfterFinished).toBe(86400); // 24 hours for static builds
+    });
+
+    it('uses an empty init list and workspace volume when optional inputs are absent at runtime', () => {
+      const manifest = createBuildJobManifest({
+        jobName: 'test-job',
+        namespace: 'test-ns',
+        serviceAccount: 'test-sa',
+        serviceName: 'test-service',
+        deployUuid: 'test-uuid',
+        buildId: '123',
+        shortSha: 'abc123',
+        branch: 'main',
+        engine: 'kaniko',
+        dockerfilePath: 'Dockerfile',
+        ecrRepo: 'test-repo',
+        jobTimeout: 1800,
+        gitCloneContainer: null,
+        buildContainer: { name: 'kaniko' },
+        volumes: undefined,
+      } as any);
+
+      expect(manifest.spec.template.spec.initContainers).toBeUndefined();
+      expect(manifest.spec.template.spec.volumes).toEqual([{ name: 'workspace', emptyDir: {} }]);
     });
   });
 

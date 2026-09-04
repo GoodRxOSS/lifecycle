@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
+const mockListEffectiveMcpDefinitions = jest.fn();
+
 jest.mock('server/services/agentRuntime/mcp/config', () => ({
   McpConfigService: jest.fn().mockImplementation(() => ({
-    listEffectiveDefinitions: jest.fn().mockResolvedValue([]),
+    listEffectiveDefinitions: (...args: unknown[]) => mockListEffectiveMcpDefinitions(...args),
   })),
 }));
 
@@ -48,6 +50,20 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
 }));
 
 const mockSandboxResultSize = jest.fn();
+const mockUserMcpConnectionOrderBy = jest.fn();
+
+jest.mock('server/models/UserMcpConnection', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(() => {
+      const builder: Record<string, unknown> = {
+        orderBy: (...args: unknown[]) => mockUserMcpConnectionOrderBy(...args),
+      };
+      builder.where = jest.fn(() => builder);
+      return builder;
+    }),
+  },
+}));
 
 jest.mock('server/models/AgentSandbox', () => ({
   __esModule: true,
@@ -68,12 +84,37 @@ import AgentPolicyService from 'server/services/agent/PolicyService';
 import { DEFAULT_AGENT_APPROVAL_POLICY } from 'server/services/agent/types';
 import { decryptConfigSecret, encryptConfigSecret, isEncryptedConfigSecret } from 'server/lib/encryption';
 
+const mockRepoConfigFirst = jest.fn();
+const mockRepoConfigInsert = jest.fn();
+const mockRepoConfigMerge = jest.fn();
+const mockRepoConfigUpdate = jest.fn();
+const mockRepoConfigWhere = jest.fn();
+const mockRepoConfigWhereNull = jest.fn();
+const mockRepoConfigOnConflict = jest.fn();
+
 function makeService() {
-  const knex = Object.assign(jest.fn(), {
-    fn: {
-      now: jest.fn(() => 'now'),
-    },
+  const queryBuilder: Record<string, unknown> = {};
+  mockRepoConfigWhere.mockImplementation(() => queryBuilder);
+  mockRepoConfigWhereNull.mockImplementation(() => queryBuilder);
+  mockRepoConfigInsert.mockImplementation(() => queryBuilder);
+  mockRepoConfigOnConflict.mockImplementation(() => queryBuilder);
+  Object.assign(queryBuilder, {
+    where: (...args: unknown[]) => mockRepoConfigWhere(...args),
+    whereNull: (...args: unknown[]) => mockRepoConfigWhereNull(...args),
+    first: (...args: unknown[]) => mockRepoConfigFirst(...args),
+    insert: (...args: unknown[]) => mockRepoConfigInsert(...args),
+    onConflict: (...args: unknown[]) => mockRepoConfigOnConflict(...args),
+    merge: (...args: unknown[]) => mockRepoConfigMerge(...args),
+    update: (...args: unknown[]) => mockRepoConfigUpdate(...args),
   });
+  const knex = Object.assign(
+    jest.fn(() => queryBuilder),
+    {
+      fn: {
+        now: jest.fn(() => 'now'),
+      },
+    }
+  );
 
   return new AgentSessionConfigService({ knex } as any, {} as any, {} as any, {} as any);
 }
@@ -101,6 +142,11 @@ describe('AgentSessionConfigService', () => {
     mockAgentRuntimeGetRepoConfig.mockResolvedValue({});
     mockAgentRuntimeGetEffectiveConfig.mockResolvedValue({});
     mockSandboxResultSize.mockResolvedValue(0);
+    mockListEffectiveMcpDefinitions.mockResolvedValue([]);
+    mockUserMcpConnectionOrderBy.mockResolvedValue([]);
+    mockRepoConfigFirst.mockResolvedValue(undefined);
+    mockRepoConfigMerge.mockResolvedValue(undefined);
+    mockRepoConfigUpdate.mockResolvedValue(0);
   });
 
   it('lists admin-visible built-in tools in tool inventory', async () => {
@@ -660,6 +706,35 @@ describe('AgentSessionConfigService', () => {
     );
   });
 
+  it('inherits effective tool rules when repository scope has no stored override', async () => {
+    const service = makeService();
+    const getRepoConfig = jest.spyOn(service, 'getRepoConfig').mockResolvedValue(null);
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({
+      toolRules: [{ toolKey: 'mcp__workspace_core__read_file', mode: 'deny' }],
+    });
+    jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
+      systemPrompt: 'base',
+      appendSystemPrompt: 'append',
+      maxIterations: 8,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      autoProvisionWorkspace: true,
+      toolRules: [{ toolKey: 'mcp__workspace_core__read_file', mode: 'deny' }],
+    });
+    jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue(DEFAULT_AGENT_APPROVAL_POLICY);
+
+    const entries = await service.listToolInventory('Example-Org/Example-Repo');
+
+    expect(getRepoConfig).toHaveBeenCalledWith('example-org/example-repo');
+    expect(entries.find((entry) => entry.toolName === 'read_file')).toEqual(
+      expect.objectContaining({
+        scopeRuleMode: 'inherit',
+        effectiveRuleMode: 'deny',
+        availability: 'blocked_by_tool_rule',
+      })
+    );
+  });
+
   it('updates runtime settings without overwriting control-plane settings', async () => {
     const service = makeService();
 
@@ -1076,5 +1151,364 @@ describe('AgentSessionConfigService', () => {
     ).rejects.toThrow('Missing required runtime fields: workspaceImage, workspaceEditorImage.');
 
     expect(mockGlobalConfigSetConfig).not.toHaveBeenCalled();
+  });
+
+  it('normalizes persisted string control-plane values and discards malformed tool rules deterministically', async () => {
+    const service = makeService();
+
+    await expect(
+      service.setGlobalConfig({
+        systemPrompt: '  system prompt  ',
+        maxIterations: '12',
+        maxRunInputTokens: '500000',
+        workspaceToolDiscoveryTimeoutMs: '3000',
+        workspaceToolExecutionTimeoutMs: '15000',
+        autoProvisionWorkspace: 'false',
+        toolRules: [
+          null,
+          { toolKey: '', mode: 'allow' },
+          { toolKey: 'invalid-mode', mode: 'sometimes' },
+          { toolKey: 'mcp__zeta__write', mode: 'deny' },
+          { toolKey: 'mcp__alpha__read', mode: 'allow' },
+          { toolKey: 'mcp__zeta__write', mode: 'require_approval' },
+        ],
+      } as any)
+    ).resolves.toEqual({
+      systemPrompt: '  system prompt  ',
+      appendSystemPrompt: undefined,
+      maxIterations: 12,
+      maxRunInputTokens: 500000,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      autoProvisionWorkspace: false,
+      toolRules: [
+        { toolKey: 'mcp__alpha__read', mode: 'allow' },
+        { toolKey: 'mcp__zeta__write', mode: 'require_approval' },
+      ],
+    });
+  });
+
+  it('normalizes string runtime scalars and drops empty backend/resource blocks', async () => {
+    const service = makeService();
+
+    await expect(
+      service.setGlobalRuntimeConfig({
+        workspaceImage: ' workspace:v1 ',
+        workspaceEditorImage: ' editor:v1 ',
+        scheduling: {
+          keepAttachedServicesOnSessionNode: 'true',
+          nodeSelector: { ' pool ': ' agents ', empty: '', ignored: 3 },
+        },
+        readiness: { timeoutMs: '0', pollMs: '1500' },
+        resources: {
+          workspace: { requests: { cpu: ' ' }, limits: {} },
+        },
+        workspaceStorage: {
+          allowedSizes: [' 10Gi ', '10Gi', '', 3],
+          allowClientOverride: 'false',
+          accessMode: 'ReadWriteMany',
+        },
+        workspaceBackend: {
+          opensandbox: {},
+          e2b: {},
+          daytona: {},
+          modal: {},
+        },
+      } as any)
+    ).resolves.toEqual({
+      workspaceImage: ' workspace:v1 ',
+      workspaceEditorImage: ' editor:v1 ',
+      scheduling: {
+        nodeSelector: { pool: 'agents' },
+        keepAttachedServicesOnSessionNode: true,
+      },
+      readiness: { timeoutMs: 0, pollMs: 1500 },
+      workspaceStorage: {
+        allowedSizes: ['10Gi'],
+        allowClientOverride: false,
+        accessMode: 'ReadWriteMany',
+      },
+    });
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith(
+      'agentSessionDefaults',
+      expect.not.objectContaining({ workspaceBackend: expect.anything() })
+    );
+  });
+
+  it('preserves independently configured resource requests and limits', async () => {
+    const service = makeService();
+
+    const result = await service.setGlobalRuntimeConfig({
+      workspaceImage: 'workspace:v1',
+      workspaceEditorImage: 'editor:v1',
+      resources: {
+        workspace: { limits: { memory: '2Gi' } },
+        editor: { requests: { cpu: '250m' } },
+        workspaceGateway: { limits: { cpu: '500m' } },
+      },
+    });
+
+    expect(result.resources).toEqual({
+      workspace: { limits: { memory: '2Gi' } },
+      editor: { requests: { cpu: '250m' } },
+      workspaceGateway: { limits: { cpu: '500m' } },
+    });
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith(
+      'agentSessionDefaults',
+      expect.objectContaining({ resources: result.resources })
+    );
+  });
+
+  it('accepts both numeric and string Modal CPU values after positive-number normalization', async () => {
+    const service = makeService();
+    const base = {
+      workspaceImage: 'workspace:v1',
+      workspaceEditorImage: 'editor:v1',
+    };
+
+    const numeric = await service.setGlobalRuntimeConfig({
+      ...base,
+      workspaceBackend: { modal: { cpu: 1.25 } },
+    });
+    expect(numeric.workspaceBackend?.modal).toMatchObject({ cpu: 1.25 });
+
+    const stringValue = await service.setGlobalRuntimeConfig({
+      ...base,
+      workspaceBackend: { modal: { cpu: '2.5' } },
+    } as any);
+    expect(stringValue.workspaceBackend?.modal).toMatchObject({ cpu: 2.5 });
+  });
+
+  it('normalizes missing global control-plane and malformed runtime storage to safe defaults', async () => {
+    const service = makeService();
+    mockGlobalConfigGetConfig.mockResolvedValueOnce(undefined).mockResolvedValueOnce('malformed-storage');
+
+    await expect(service.getGlobalConfig()).resolves.toEqual({});
+    const runtime = await service.getGlobalRuntimeConfig();
+    expect(runtime.workspaceBackend?.provider).toBe('lifecycle_kubernetes');
+    expect(runtime).not.toHaveProperty('workspaceImage');
+  });
+
+  it('returns one lazily constructed service singleton', () => {
+    expect(AgentSessionConfigService.getInstance()).toBe(AgentSessionConfigService.getInstance());
+  });
+
+  it('updates only the stored E2B template id while preserving sibling defaults and ciphertext', async () => {
+    const service = makeService();
+    const ciphertext = encryptConfigSecret('stored-e2b-key');
+    mockGlobalConfigGetConfig.mockResolvedValueOnce({
+      controlPlane: { systemPrompt: 'keep me' },
+      workspaceBackend: {
+        provider: 'e2b',
+        e2b: { apiKey: ciphertext, templateId: 'old-template' },
+        daytona: { snapshot: 'keep-snapshot' },
+      },
+    });
+
+    await service.setStoredE2bTemplateId('new-template');
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith('agentSessionDefaults', {
+      controlPlane: { systemPrompt: 'keep me' },
+      workspaceBackend: {
+        provider: 'e2b',
+        e2b: { apiKey: ciphertext, templateId: 'new-template' },
+        daytona: { snapshot: 'keep-snapshot' },
+      },
+    });
+  });
+
+  it('initializes E2B template storage when no agent-session defaults exist yet', async () => {
+    const service = makeService();
+    mockGlobalConfigGetConfig.mockResolvedValueOnce(undefined);
+
+    await service.setStoredE2bTemplateId('first-template');
+
+    expect(mockGlobalConfigSetConfig).toHaveBeenCalledWith('agentSessionDefaults', {
+      workspaceBackend: {
+        e2b: { templateId: 'first-template' },
+      },
+    });
+  });
+
+  it('reads, upserts, and soft-deletes normalized repository control-plane configuration', async () => {
+    const service = makeService();
+    mockRepoConfigFirst
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        config: JSON.stringify({ maxIterations: '17', autoProvisionWorkspace: 'true' }),
+      })
+      .mockResolvedValueOnce({ config: { systemPrompt: 'object config' } });
+
+    await expect(service.getRepoConfig('Example-Org/Example-Repo')).resolves.toBeNull();
+    await expect(service.getRepoConfig('Example-Org/Example-Repo')).resolves.toEqual({
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
+      maxIterations: 17,
+      maxRunInputTokens: undefined,
+      workspaceToolDiscoveryTimeoutMs: undefined,
+      workspaceToolExecutionTimeoutMs: undefined,
+      autoProvisionWorkspace: true,
+      toolRules: [],
+    });
+    await expect(service.getRepoConfig('Example-Org/Example-Repo')).resolves.toEqual(
+      expect.objectContaining({ systemPrompt: 'object config' })
+    );
+    expect(mockRepoConfigWhere).toHaveBeenCalledWith({ repositoryFullName: 'example-org/example-repo' });
+    expect(mockRepoConfigWhereNull).toHaveBeenCalledWith('deletedAt');
+
+    await expect(
+      service.setRepoConfig('Example-Org/Example-Repo', {
+        systemPrompt: 'repo prompt',
+        autoProvisionWorkspace: false,
+        toolRules: [{ toolKey: 'mcp__workspace_core__exec', mode: 'deny' }],
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        systemPrompt: 'repo prompt',
+        autoProvisionWorkspace: false,
+        toolRules: [{ toolKey: 'mcp__workspace_core__exec', mode: 'deny' }],
+      })
+    );
+    expect(mockRepoConfigInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryFullName: 'example-org/example-repo',
+        config: expect.stringContaining('repo prompt'),
+      })
+    );
+    expect(mockRepoConfigOnConflict).toHaveBeenCalledWith('repositoryFullName');
+    expect(mockRepoConfigMerge).toHaveBeenCalledWith(expect.objectContaining({ deletedAt: null }));
+
+    await expect(
+      service.setRepoConfig('Example-Org/Example-Repo', { systemPrompt: ' ', toolRules: [null] } as any)
+    ).resolves.toEqual({});
+    expect(mockRepoConfigUpdate).toHaveBeenCalledWith({ deletedAt: 'now', updatedAt: 'now' });
+  });
+
+  it('merges global and repository tool rules by key with sorted repository precedence', async () => {
+    const service = makeService();
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({
+      toolRules: [
+        { toolKey: 'zeta', mode: 'deny' },
+        { toolKey: 'shared', mode: 'allow' },
+      ],
+    });
+    jest.spyOn(service, 'getRepoConfig').mockResolvedValue({
+      toolRules: [
+        { toolKey: 'shared', mode: 'require_approval' },
+        { toolKey: 'alpha', mode: 'allow' },
+      ],
+    });
+
+    const result = await service.getEffectiveConfig('Example-Org/Example-Repo');
+    expect(result.toolRules).toEqual([
+      { toolKey: 'alpha', mode: 'allow' },
+      { toolKey: 'shared', mode: 'require_approval' },
+      { toolKey: 'zeta', mode: 'deny' },
+    ]);
+  });
+
+  it('uses global control-plane settings directly when no repository scope is requested', async () => {
+    const service = makeService();
+    const getGlobalConfig = jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({
+      systemPrompt: 'global system prompt',
+      appendSystemPrompt: 'global append prompt',
+      maxIterations: 12,
+      maxRunInputTokens: 345_000,
+      workspaceToolDiscoveryTimeoutMs: 2_500,
+      workspaceToolExecutionTimeoutMs: 12_500,
+      autoProvisionWorkspace: false,
+      toolRules: [{ toolKey: 'mcp__workspace_core__exec', mode: 'deny' }],
+    });
+    const getRepoConfig = jest.spyOn(service, 'getRepoConfig');
+
+    await expect(service.getEffectiveConfig()).resolves.toEqual({
+      systemPrompt: 'global system prompt',
+      appendSystemPrompt: 'global append prompt',
+      maxIterations: 12,
+      maxRunInputTokens: 345_000,
+      workspaceToolDiscoveryTimeoutMs: 2_500,
+      workspaceToolExecutionTimeoutMs: 12_500,
+      autoProvisionWorkspace: false,
+      toolRules: [{ toolKey: 'mcp__workspace_core__exec', mode: 'deny' }],
+    });
+    expect(getGlobalConfig).toHaveBeenCalledTimes(1);
+    expect(getRepoConfig).not.toHaveBeenCalled();
+
+    getGlobalConfig.mockRestore();
+    getRepoConfig.mockRestore();
+  });
+
+  it('lists shared and user-connected MCP tools with deduplication, stable ordering, and capability grouping', async () => {
+    const service = makeService();
+    jest.spyOn(service, 'getGlobalConfig').mockResolvedValue({ toolRules: [] });
+    jest.spyOn(service, 'getEffectiveConfig').mockResolvedValue({
+      systemPrompt: 'base',
+      appendSystemPrompt: 'append',
+      maxIterations: 8,
+      maxRunInputTokens: 500000,
+      workspaceToolDiscoveryTimeoutMs: 3000,
+      workspaceToolExecutionTimeoutMs: 15000,
+      autoProvisionWorkspace: true,
+      toolRules: [],
+    });
+    jest.spyOn(AgentPolicyService, 'getEffectivePolicy').mockResolvedValue(DEFAULT_AGENT_APPROVAL_POLICY);
+    mockListEffectiveMcpDefinitions.mockResolvedValue([
+      {
+        name: 'Zeta MCP',
+        slug: 'zeta',
+        scope: 'global',
+        authConfig: { mode: 'none' },
+        sharedDiscoveredTools: [
+          { name: '', description: 'ignored' },
+          { name: 'write_remote', description: 'old description' },
+          { name: 'read_remote', description: 'read', annotations: { readOnlyHint: true } },
+          { name: 'write_remote', description: 'latest description' },
+        ],
+      },
+      {
+        name: 'Alpha MCP',
+        slug: 'alpha',
+        scope: 'global',
+        authConfig: { mode: 'oauth' },
+        sharedDiscoveredTools: [{ name: 'ignored_shared' }],
+      },
+    ] as any);
+    mockUserMcpConnectionOrderBy.mockResolvedValue([
+      {
+        discoveredTools: [
+          { name: 'zebra', description: '' },
+          { name: 'alpha', description: 'alpha tool', annotations: { readOnlyHint: true } },
+        ],
+      },
+      { discoveredTools: [{ name: 'alpha', description: 'new alpha', annotations: { readOnlyHint: true } }] },
+      { discoveredTools: null },
+    ]);
+
+    const inventory = await service.listToolInventory('global');
+    const external = inventory.filter((entry) => entry.sourceType === 'mcp');
+    expect(external.map((entry) => `${entry.serverName}:${entry.toolName}`)).toEqual([
+      'Alpha MCP:alpha',
+      'Alpha MCP:zebra',
+      'Zeta MCP:read_remote',
+      'Zeta MCP:write_remote',
+    ]);
+    expect(external.find((entry) => entry.toolName === 'write_remote')).toMatchObject({
+      description: 'latest description',
+      capabilityKey: 'external_mcp_write',
+    });
+    expect(external.find((entry) => entry.toolName === 'alpha')).toMatchObject({
+      description: 'new alpha',
+      capabilityKey: 'external_mcp_read',
+    });
+    expect(external.find((entry) => entry.toolName === 'zebra')?.description).toBe('MCP tool zebra from Alpha MCP');
+
+    mockAgentRuntimeGetGlobalConfig.mockResolvedValue({});
+    mockAgentRuntimeGetEffectiveConfig.mockResolvedValue({});
+    const capabilities = await service.listCapabilityInventory('global');
+    expect(
+      capabilities.find((entry) => entry.capabilityId === 'external_mcp_read')?.tools.map((tool) => tool.toolName)
+    ).toEqual(expect.arrayContaining(['alpha', 'read_remote']));
+    expect(
+      capabilities.find((entry) => entry.capabilityId === 'external_mcp_write')?.tools.map((tool) => tool.toolName)
+    ).toEqual(expect.arrayContaining(['zebra', 'write_remote']));
   });
 });

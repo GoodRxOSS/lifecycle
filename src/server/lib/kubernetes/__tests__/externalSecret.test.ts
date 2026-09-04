@@ -14,7 +14,33 @@
  * limitations under the License.
  */
 
+const mockMkdir = jest.fn();
+const mockWriteFile = jest.fn();
+const mockShellPromise = jest.fn();
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+
+jest.mock('fs', () => ({
+  __esModule: true,
+  default: {
+    promises: {
+      mkdir: (...args: unknown[]) => mockMkdir(...args),
+      writeFile: (...args: unknown[]) => mockWriteFile(...args),
+    },
+  },
+}));
+
+jest.mock('server/lib/shell', () => ({
+  shellPromise: (...args: unknown[]) => mockShellPromise(...args),
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: () => ({ info: mockLoggerInfo, warn: mockLoggerWarn }),
+}));
+
 import {
+  applyExternalSecret,
+  deleteExternalSecret,
   EXTERNAL_SECRET_FORCE_SYNC_ANNOTATION,
   generateExternalSecretManifest,
   generateSecretName,
@@ -24,6 +50,13 @@ import {
 import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 
 describe('externalSecret', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+    mockShellPromise.mockResolvedValue({ stdout: '', stderr: '' });
+  });
+
   describe('generateSecretName', () => {
     it('generates name with provider suffix', () => {
       expect(generateSecretName('api-server', 'aws')).toBe('api-server-aws-secrets');
@@ -194,6 +227,86 @@ describe('externalSecret', () => {
         [TARGET_SECRET_SYNC_TOKEN_ANNOTATION]: 'sync-123',
       });
       expect(manifest.spec.target.template?.metadata.labels).toEqual(manifest.metadata.labels);
+    });
+  });
+
+  describe('applyExternalSecret', () => {
+    const manifest = generateExternalSecretManifest({
+      name: 'api-server',
+      namespace: 'environment',
+      provider: 'aws',
+      secretRefs: [{ envKey: 'API_KEY', provider: 'aws', path: 'apps/api-key' }],
+      providerConfig: {
+        enabled: true,
+        clusterSecretStore: 'aws-secretsmanager',
+        refreshInterval: '1h',
+      },
+    });
+
+    it('writes the manifest and applies that exact file in the requested namespace', async () => {
+      await expect(applyExternalSecret(manifest, 'environment')).resolves.toBeUndefined();
+
+      expect(mockMkdir).toHaveBeenCalledWith('/tmp/lifecycle/manifests/externalsecrets', { recursive: true });
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        '/tmp/lifecycle/manifests/externalsecrets/api-server-aws-secrets.yaml',
+        expect.stringContaining('kind: ExternalSecret'),
+        'utf8'
+      );
+      expect(mockShellPromise).toHaveBeenCalledWith(
+        'kubectl apply -f /tmp/lifecycle/manifests/externalsecrets/api-server-aws-secrets.yaml --namespace environment',
+        { timeout: 90_000 }
+      );
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        'ExternalSecret: applying name=api-server-aws-secrets namespace=environment'
+      );
+    });
+
+    it('does not invoke kubectl when writing the manifest fails', async () => {
+      const error = new Error('filesystem unavailable');
+      mockWriteFile.mockRejectedValue(error);
+
+      await expect(applyExternalSecret(manifest, 'environment')).rejects.toBe(error);
+
+      expect(mockShellPromise).not.toHaveBeenCalled();
+      expect(mockLoggerInfo).not.toHaveBeenCalled();
+    });
+
+    it('propagates kubectl apply failures after recording the attempted resource', async () => {
+      const error = new Error('apply rejected');
+      mockShellPromise.mockRejectedValue(error);
+
+      await expect(applyExternalSecret(manifest, 'environment')).rejects.toBe(error);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        'ExternalSecret: applying name=api-server-aws-secrets namespace=environment'
+      );
+    });
+  });
+
+  describe('deleteExternalSecret', () => {
+    it('deletes with ignore-not-found semantics', async () => {
+      await expect(deleteExternalSecret('api-server-aws-secrets', 'environment')).resolves.toBeUndefined();
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        'ExternalSecret: deleting name=api-server-aws-secrets namespace=environment'
+      );
+      expect(mockShellPromise).toHaveBeenCalledWith(
+        'kubectl delete externalsecret api-server-aws-secrets --namespace environment --ignore-not-found',
+        { timeout: 90_000 }
+      );
+      expect(mockLoggerWarn).not.toHaveBeenCalled();
+    });
+
+    it('logs and absorbs deletion failures so cleanup can continue', async () => {
+      const error = new Error('delete rejected');
+      mockShellPromise.mockRejectedValue(error);
+
+      await expect(deleteExternalSecret('api-server-aws-secrets', 'environment')).resolves.toBeUndefined();
+
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        { error },
+        'ExternalSecret: delete failed name=api-server-aws-secrets'
+      );
     });
   });
 });

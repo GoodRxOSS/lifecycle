@@ -23,7 +23,9 @@ import {
   type RemoteWorkspaceRuntimeProvider,
 } from '../types';
 import {
+  createDaytonaRuntimeService,
   DaytonaRuntimeService,
+  listDaytonaWorkspaceSources,
   readDaytonaProviderState,
   testDaytonaConnection,
   type DaytonaRuntimeProviderState,
@@ -72,16 +74,27 @@ const plan = {
 const harness = setupFetchMock();
 const { routeFetch, callsMatching } = harness;
 
-function provisionRoutes(overrides: { create?: Response[]; mcp?: Response[]; bootstrapStatus?: Response[] } = {}) {
+function provisionRoutes(
+  overrides: {
+    create?: Response[];
+    mcp?: Response[];
+    bootstrapExec?: Response[];
+    bootstrapDelete?: Response[];
+    bootstrapLogs?: Response[];
+    bootstrapStatus?: Response[];
+    deleteSandbox?: Response[];
+    sandboxStatus?: Response[];
+  } = {}
+) {
   const routes: FetchRoute[] = [
     ['POST', '/files/bulk-upload', [res(200, { files: [] })]],
     ['POST', '/files/permissions', [res(200, {})]],
-    ['POST', '/process/session/lifecycle-bootstrap/exec', [res(202, { cmdId: 'cmd-boot' })]],
+    ['POST', '/process/session/lifecycle-bootstrap/exec', overrides.bootstrapExec ?? [res(202, { cmdId: 'cmd-boot' })]],
     ['POST', '/process/session/lifecycle-gateway/exec', [res(202, { cmdId: 'cmd-gw' })]],
     ['POST', '/process/session/lifecycle-editor/exec', [res(202, { cmdId: 'cmd-ed' })]],
-    ['GET', '/command/cmd-boot/logs', [res(200, 'bootstrap output')]],
+    ['GET', '/command/cmd-boot/logs', overrides.bootstrapLogs ?? [res(200, 'bootstrap output')]],
     ['GET', '/command/cmd-boot', overrides.bootstrapStatus ?? [res(200, { exitCode: 0 })]],
-    ['DELETE', '/process/session/lifecycle-bootstrap', [res(204)]],
+    ['DELETE', '/process/session/lifecycle-bootstrap', overrides.bootstrapDelete ?? [res(204)]],
     ['DELETE', '/process/session/lifecycle-gateway', [res(404, { message: 'not found' })]],
     ['DELETE', '/process/session/lifecycle-editor', [res(404, { message: 'not found' })]],
     ['POST', '/process/session', [res(201, '')]],
@@ -103,12 +116,15 @@ function provisionRoutes(overrides: { create?: Response[]; mcp?: Response[]; boo
       overrides.mcp ?? [res(401, { error: 'Unauthorized' }), res(200, {})],
     ],
     ['GET', '13337-dtn-1.proxy.daytona.work/healthz', [res(200, 'ok')]],
-    ['DELETE', '/sandbox/dtn-1', [res(200, {})]],
+    ['DELETE', '/sandbox/dtn-1', overrides.deleteSandbox ?? [res(200, {})]],
     ['POST', '/sandbox', overrides.create ?? [res(200, { id: 'dtn-1', state: 'creating' })]],
     [
       'GET',
       '/sandbox/dtn-1',
-      [res(200, { id: 'dtn-1', state: 'creating' }), res(200, { id: 'dtn-1', state: 'started' })],
+      overrides.sandboxStatus ?? [
+        res(200, { id: 'dtn-1', state: 'creating' }),
+        res(200, { id: 'dtn-1', state: 'started' }),
+      ],
     ],
   ];
   routeFetch(routes);
@@ -139,6 +155,35 @@ describe('readDaytonaProviderState', () => {
 });
 
 describe('provision', () => {
+  it('requires both backend credentials before making a provider request', async () => {
+    await expect(
+      new DaytonaRuntimeService({ ...baseConfig, apiKey: '' }).provision({ plan, readiness })
+    ).rejects.toThrow('Daytona workspace backend requires an API key.');
+    await expect(
+      new DaytonaRuntimeService({ ...baseConfig, snapshot: '' }).provision({ plan, readiness })
+    ).rejects.toThrow('Daytona workspace backend requires a snapshot.');
+
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a create response without a sandbox id', async () => {
+    provisionRoutes({ create: [res(200, { state: 'creating' })] });
+
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      'Daytona create failed: missing sandbox id'
+    );
+    expect(callsMatching('DELETE', '/sandbox')).toHaveLength(0);
+  });
+
+  it('propagates create failures that are not inactive-snapshot errors', async () => {
+    provisionRoutes({ create: [res(500, { message: 'provider unavailable' })] });
+
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      /provider unavailable/
+    );
+    expect(callsMatching('POST', '/snapshots/lifecycle-workspace-1.0/activate')).toHaveLength(0);
+  });
+
   it('creates the sandbox with lifecycle-owned intervals, bootstraps via sessions, and verifies gateway auth both ways', async () => {
     provisionRoutes();
     const service = new DaytonaRuntimeService(baseConfig);
@@ -214,6 +259,37 @@ describe('provision', () => {
     expect(callsMatching('POST', '/sandbox')).toHaveLength(2);
   });
 
+  it('passes the configured target and uploads the optional skill bootstrap script', async () => {
+    provisionRoutes();
+    const planWithSkills = {
+      ...plan,
+      skillPlan: {
+        version: 1,
+        skills: [
+          {
+            repo: 'example-org/sample-skills',
+            repoUrl: 'https://github.com/example-org/sample-skills.git',
+            branch: 'main',
+            path: 'skills/sample',
+            source: 'environment',
+          },
+        ],
+      },
+    } as unknown as WorkspaceRuntimePlan;
+
+    await new DaytonaRuntimeService({ ...baseConfig, target: 'us' }).provision({
+      plan: planWithSkills,
+      readiness,
+      gatewayToken: 'plain-token',
+    });
+
+    const [, createInit] = callsMatching('POST', '/sandbox')[0];
+    expect(JSON.parse(createInit?.body as string)).toMatchObject({ target: 'us' });
+    const [, uploadInit] = callsMatching('POST', '/files/bulk-upload')[0];
+    const uploadForm = uploadInit?.body as FormData;
+    expect(uploadForm.get('files[2].path')).toBe('/run/lifecycle/skills-bootstrap.sh');
+  });
+
   it('fails with the bootstrap output and deletes the sandbox when bootstrap exits non-zero', async () => {
     provisionRoutes({ bootstrapStatus: [res(200, { exitCode: 1 })] });
     const service = new DaytonaRuntimeService(baseConfig);
@@ -243,9 +319,131 @@ describe('provision', () => {
     );
     expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
   });
+
+  it('fails and deletes the sandbox when a session command has no command id', async () => {
+    provisionRoutes({ bootstrapExec: [res(202, {})] });
+
+    await expect(
+      new DaytonaRuntimeService(baseConfig).provision({ plan, readiness, gatewayToken: 'plain-token' })
+    ).rejects.toThrow('Daytona session exec failed: missing command id');
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
+
+  it('reports a nonzero bootstrap exit even when command logs cannot be loaded', async () => {
+    provisionRoutes({
+      bootstrapStatus: [res(200, { exitCode: 2 })],
+      bootstrapLogs: [res(500, { message: 'logs unavailable' })],
+    });
+
+    await expect(
+      new DaytonaRuntimeService(baseConfig).provision({ plan, readiness, gatewayToken: 'plain-token' })
+    ).rejects.toThrow('Daytona bootstrap failed (exit code 2)');
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
+
+  it('serializes structured bootstrap logs into the failure message', async () => {
+    provisionRoutes({
+      bootstrapStatus: [res(200, { exitCode: 3 })],
+      bootstrapLogs: [res(200, { stderr: 'bootstrap failed' })],
+    });
+
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      'Daytona bootstrap failed (exit code 3): {"stderr":"bootstrap failed"}'
+    );
+  });
+
+  it('preserves the provisioning failure when best-effort sandbox cleanup also fails', async () => {
+    provisionRoutes({
+      bootstrapStatus: [res(200, { exitCode: 1 })],
+      deleteSandbox: [res(500, { message: 'delete failed' })],
+    });
+
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      /Daytona bootstrap failed \(exit code 1\)/
+    );
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
+
+  it('continues provisioning when completed bootstrap-session cleanup fails', async () => {
+    provisionRoutes({ bootstrapDelete: [res(500, { message: 'session cleanup failed' })] });
+
+    await expect(
+      new DaytonaRuntimeService(baseConfig).provision({ plan, readiness, gatewayToken: 'plain-token' })
+    ).resolves.toMatchObject({ podNameAlias: 'dtn-1' });
+    expect(callsMatching('DELETE', '/process/session/lifecycle-bootstrap')).toHaveLength(1);
+  });
+
+  it('polls a still-running bootstrap command until it exits successfully', async () => {
+    const timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((callback: TimerHandler) => {
+      if (typeof callback === 'function') callback();
+      return 0 as unknown as NodeJS.Timeout;
+    });
+    provisionRoutes({ bootstrapStatus: [res(200, { exitCode: null }), res(200, { exitCode: 0 })] });
+
+    try {
+      await expect(
+        new DaytonaRuntimeService(baseConfig).provision({ plan, readiness, gatewayToken: 'plain-token' })
+      ).resolves.toMatchObject({ podNameAlias: 'dtn-1' });
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+
+    expect(callsMatching('GET', '/command/cmd-boot')).toHaveLength(2);
+  });
+
+  it('times out a bootstrap command that never reports an exit code', async () => {
+    jest.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    provisionRoutes({ bootstrapStatus: [res(200, { exitCode: null })] });
+    const promise = new DaytonaRuntimeService(baseConfig).provision({ plan, readiness, gatewayToken: 'plain-token' });
+    const expectation = expect(promise).rejects.toThrow('Daytona bootstrap did not complete in time');
+
+    try {
+      await jest.runAllTimersAsync();
+      await expectation;
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
+
+  it('reports failed and destroyed states observed while waiting for startup', async () => {
+    provisionRoutes({
+      sandboxStatus: [res(200, { id: 'dtn-1', state: 'build_failed', errorReason: 'snapshot build failed' })],
+    });
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      'Daytona sandbox dtn-1 entered build_failed while waiting for started: snapshot build failed'
+    );
+
+    provisionRoutes({ sandboxStatus: [res(200, { id: 'dtn-1', state: 'destroying' })] });
+    await expect(new DaytonaRuntimeService(baseConfig).provision({ plan, readiness })).rejects.toThrow(
+      'Daytona sandbox dtn-1 was destroyed'
+    );
+  });
+
+  it('reports the last sandbox state when startup exceeds the readiness deadline', async () => {
+    provisionRoutes({ sandboxStatus: [res(200, { id: 'dtn-1', state: 'creating', errorReason: 'still creating' })] });
+
+    await expect(
+      new DaytonaRuntimeService(baseConfig).provision({
+        plan,
+        readiness: { timeoutMs: 1, pollMs: 1 },
+      })
+    ).rejects.toThrow('Daytona sandbox dtn-1 did not become started; last state=creating: still creating');
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
 });
 
 describe('resume', () => {
+  it('rejects persisted state that lacks the required Daytona identity', async () => {
+    const service = new DaytonaRuntimeService(baseConfig);
+
+    await expect(service.resume({}, readiness)).rejects.toThrow('Daytona provider state is missing required fields');
+    await expect(service.suspend(null, { retainForMs: 1000 })).rejects.toThrow(
+      'Daytona provider state is missing required fields'
+    );
+  });
+
   it('starts a stopped sandbox, restarts the gateway session, and re-resolves rotated preview tokens', async () => {
     routeFetch([
       ['POST', '/process/session/lifecycle-gateway/exec', [res(202, { cmdId: 'cmd-gw' })]],
@@ -320,6 +518,139 @@ describe('resume', () => {
 });
 
 describe('reattach', () => {
+  it('returns null without provider calls for unparseable state', async () => {
+    const service = new DaytonaRuntimeService(baseConfig);
+
+    await expect(service.reattach({}, readiness)).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('propagates provider failures that do not mean the sandbox is gone', async () => {
+    routeFetch([['GET', '/sandbox/dtn-1', [res(500, { message: 'provider unavailable' })]]]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).rejects.toThrow(
+      /provider unavailable/
+    );
+  });
+
+  it('deletes failed sandboxes and returns null', async () => {
+    routeFetch([
+      ['DELETE', '/sandbox/dtn-1', [res(200, {})]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'error' })]],
+    ]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).resolves.toBeNull();
+    expect(callsMatching('DELETE', '/sandbox/dtn-1')).toHaveLength(1);
+  });
+
+  it('still treats a failed sandbox as gone when best-effort deletion fails', async () => {
+    routeFetch([
+      ['DELETE', '/sandbox/dtn-1', [res(500, { message: 'delete failed' })]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'error' })]],
+    ]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).resolves.toBeNull();
+  });
+
+  it('returns null when the sandbox disappears during restart', async () => {
+    routeFetch([
+      ['POST', '/sandbox/dtn-1/start', [res(404, { message: 'gone' })]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'stopped' })]],
+    ]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).resolves.toBeNull();
+  });
+
+  it('fails closed when persisted state requires enforcement but decrypts to no gateway token', async () => {
+    routeFetch([
+      [
+        'GET',
+        '/ports/13338/preview-url',
+        [res(200, { url: 'https://13338-dtn-1.proxy.daytona.work', token: 'pv-gw-3' })],
+      ],
+      ['GET', '13338-dtn-1.proxy.daytona.work/health', [res(200, 'ok')]],
+      ['POST', '13338-dtn-1.proxy.daytona.work/mcp', [res(401, { error: 'Unauthorized' })]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'started' })]],
+    ]);
+
+    await expect(
+      new DaytonaRuntimeService(baseConfig).reattach({ ...state, gatewayToken: 'enc:' }, readiness)
+    ).rejects.toBeInstanceOf(WorkspaceRuntimeSecurityError);
+  });
+
+  it('restarts an unavailable editor and publishes it only after readiness succeeds', async () => {
+    routeFetch([
+      ['POST', '/process/session/lifecycle-editor/exec', [res(202, { cmdId: 'cmd-ed' })]],
+      ['DELETE', '/process/session/lifecycle-editor', [res(404, { message: 'not found' })]],
+      ['POST', '/process/session', [res(201, '')]],
+      [
+        'GET',
+        '/ports/13338/preview-url',
+        [res(200, { url: 'https://13338-dtn-1.proxy.daytona.work', token: 'pv-gw-3' })],
+      ],
+      [
+        'GET',
+        '/ports/13337/preview-url',
+        [res(200, { url: 'https://13337-dtn-1.proxy.daytona.work', token: 'pv-ed-3' })],
+      ],
+      ['GET', '13338-dtn-1.proxy.daytona.work/health', [res(200, 'ok')]],
+      ['GET', '13337-dtn-1.proxy.daytona.work/healthz', [res(500, ''), res(200, 'ok')]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'started' })]],
+    ]);
+
+    const handle = await new DaytonaRuntimeService(baseConfig).reattach(state, readiness);
+
+    expect(callsMatching('POST', '/process/session/lifecycle-editor/exec')).toHaveLength(1);
+    expect(handle?.providerState).toMatchObject({
+      editorUrl: 'https://13337-dtn-1.proxy.daytona.work',
+      editorHeaders: { 'x-daytona-preview-token': 'pv-ed-3' },
+    });
+  });
+
+  it('supports provider preview URLs that do not require preview-token headers', async () => {
+    routeFetch([
+      ['GET', '/ports/13338/preview-url', [res(200, { url: 'https://13338-dtn-1.proxy.daytona.work' })]],
+      ['GET', '/ports/13337/preview-url', [res(404, { message: 'no preview' })]],
+      ['GET', '13338-dtn-1.proxy.daytona.work/health', [res(200, 'ok')]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'started' })]],
+    ]);
+
+    const handle = await new DaytonaRuntimeService(baseConfig).reattach(state, readiness);
+
+    expect(handle?.providerState).toMatchObject({ gatewayHeaders: {} });
+    expect(handle?.providerState).not.toHaveProperty('gatewayHeaders.x-daytona-preview-token');
+  });
+
+  it('uses the archived restore path before re-verifying runtime endpoints', async () => {
+    routeFetch([
+      ['POST', '/sandbox/dtn-1/start', [res(200, {})]],
+      ['GET', '/ports/13338/preview-url', [res(200, { url: 'https://13338-dtn-1.proxy.daytona.work' })]],
+      ['GET', '/ports/13337/preview-url', [res(404, { message: 'no preview' })]],
+      ['GET', '13338-dtn-1.proxy.daytona.work/health', [res(200, 'ok')]],
+      [
+        'GET',
+        '/sandbox/dtn-1',
+        [res(200, { id: 'dtn-1', state: 'archived' }), res(200, { id: 'dtn-1', state: 'started' })],
+      ],
+    ]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).resolves.toMatchObject({
+      podNameAlias: 'dtn-1',
+    });
+    expect(callsMatching('POST', '/sandbox/dtn-1/start')).toHaveLength(1);
+  });
+
+  it('rejects a preview response without a URL', async () => {
+    routeFetch([
+      ['GET', '/ports/13338/preview-url', [res(200, { token: 'pv-gw' })]],
+      ['GET', '/sandbox/dtn-1', [res(200, { id: 'dtn-1', state: 'started' })]],
+    ]);
+
+    await expect(new DaytonaRuntimeService(baseConfig).reattach(state, readiness)).rejects.toThrow(
+      'Daytona preview-url resolution failed for port 13338: missing url'
+    );
+  });
+
   it('returns null when the sandbox is gone or destroyed', async () => {
     routeFetch([['GET', '/sandbox/dtn-1', [res(404, { message: 'gone' })]]]);
     const service = new DaytonaRuntimeService(baseConfig);
@@ -375,6 +706,15 @@ describe('suspend and destroy', () => {
     await expect(service.suspend(state, { retainForMs: 120_000 })).rejects.toBeInstanceOf(WorkspaceRuntimeGoneError);
   });
 
+  it('propagates non-gone stop and delete failures', async () => {
+    routeFetch([['POST', '/sandbox/dtn-1/stop', [res(500, { message: 'stop unavailable' })]]]);
+    const service = new DaytonaRuntimeService(baseConfig);
+    await expect(service.suspend(state, { retainForMs: 120_000 })).rejects.toThrow(/stop unavailable/);
+
+    routeFetch([['DELETE', '/sandbox/dtn-1', [res(500, { message: 'delete unavailable' })]]]);
+    await expect(service.destroy(state)).rejects.toThrow(/delete unavailable/);
+  });
+
   it('tolerates 404 on destroy and has no renewLease', async () => {
     routeFetch([['DELETE', '/sandbox/dtn-1', [res(404, { message: 'gone' })]]]);
     const service = new DaytonaRuntimeService(baseConfig);
@@ -401,6 +741,86 @@ describe('endpoints', () => {
     });
     expect(service.resolveEditorEndpoint(state)).toBeNull();
   });
+
+  it('reports absent handles and resolves an editor endpoint with preview headers', () => {
+    const service = createDaytonaRuntimeService(baseConfig);
+    const editorState = {
+      ...state,
+      editorUrl: 'https://13337-dtn-1.proxy.daytona.work',
+      editorHeaders: { 'x-daytona-preview-token': 'pv-ed' },
+    };
+
+    expect(service.resolveGatewayEndpoint({})).toBeNull();
+    expect(service.resolveEditorEndpoint(editorState)).toEqual({
+      url: 'https://13337-dtn-1.proxy.daytona.work',
+      headers: { 'x-daytona-preview-token': 'pv-ed' },
+    });
+    expect(service.hasPersistedHandle(editorState)).toBe(true);
+    expect(service.hasPersistedHandle(null)).toBe(false);
+    expect(service.capabilities(editorState)).toMatchObject({ backend: 'daytona', editorAccess: true });
+    expect(service.capabilities()).toMatchObject({ backend: 'daytona', editorAccess: false });
+
+    expect(
+      service.resolveGatewayEndpoint({
+        sandboxId: 'dtn-1',
+        apiUrl: baseConfig.apiUrl,
+        gatewayUrl: state.gatewayUrl,
+      })
+    ).toEqual({ url: state.gatewayUrl });
+    expect(
+      service.resolveEditorEndpoint({
+        sandboxId: 'dtn-1',
+        apiUrl: baseConfig.apiUrl,
+        editorUrl: editorState.editorUrl,
+      })
+    ).toEqual({ url: editorState.editorUrl });
+  });
+});
+
+describe('listDaytonaWorkspaceSources', () => {
+  it('requires configured credentials before listing snapshots', async () => {
+    await expect(listDaytonaWorkspaceSources({} as any)).rejects.toThrow('Daytona API key is not configured.');
+    await expect(listDaytonaWorkspaceSources({ daytona: { ...baseConfig, apiKey: '' } } as any)).rejects.toThrow(
+      'Daytona API key is not configured.'
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('normalizes, filters, and readiness-sorts snapshot options', async () => {
+    routeFetch([
+      [
+        'GET',
+        '/snapshots',
+        [
+          res(200, {
+            items: [
+              { id: 'z-id', name: 'zeta', state: 'inactive' },
+              { id: 'b-id', name: 'beta', state: 'active' },
+              { id: 'a-id' },
+              { state: 'active' },
+              'invalid',
+            ],
+          }),
+        ],
+      ],
+    ]);
+
+    await expect(listDaytonaWorkspaceSources({ daytona: baseConfig } as any)).resolves.toEqual([
+      { id: 'a-id', label: 'a-id', detail: undefined, ready: true },
+      { id: 'beta', label: 'beta', detail: 'active', ready: true },
+      { id: 'zeta', label: 'zeta', detail: 'inactive', ready: false },
+    ]);
+  });
+
+  it('accepts a top-level snapshot array and safely handles malformed responses', async () => {
+    routeFetch([['GET', '/snapshots', [res(200, [{ id: 'raw-id', state: 'active' }])]]]);
+    await expect(listDaytonaWorkspaceSources({ daytona: baseConfig } as any)).resolves.toEqual([
+      { id: 'raw-id', label: 'raw-id', detail: 'active', ready: true },
+    ]);
+
+    routeFetch([['GET', '/snapshots', [res(200, { unexpected: true })]]]);
+    await expect(listDaytonaWorkspaceSources({ daytona: baseConfig } as any)).resolves.toEqual([]);
+  });
 });
 
 describe('testDaytonaConnection', () => {
@@ -408,6 +828,22 @@ describe('testDaytonaConnection', () => {
     provider: 'lifecycle_kubernetes',
     daytona: baseConfig,
   } as unknown as Parameters<typeof testDaytonaConnection>[0];
+
+  it('reports missing API-key and snapshot configuration without provider calls', async () => {
+    await expect(testDaytonaConnection({} as any)).resolves.toEqual({
+      ok: false,
+      message: 'Daytona API key is not configured.',
+    });
+    await expect(testDaytonaConnection({ daytona: { ...baseConfig, apiKey: '' } } as any)).resolves.toEqual({
+      ok: false,
+      message: 'Daytona API key is not configured.',
+    });
+    await expect(testDaytonaConnection({ daytona: { ...baseConfig, snapshot: '' } } as any)).resolves.toEqual({
+      ok: false,
+      message: 'Daytona snapshot is not configured.',
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
 
   it('verifies scopes and the configured snapshot', async () => {
     routeFetch([
@@ -431,6 +867,16 @@ describe('testDaytonaConnection', () => {
     });
   });
 
+  it('treats a missing permissions array as no granted scopes', async () => {
+    routeFetch([['GET', '/api-keys/current', [res(200, {})]]]);
+
+    await expect(testDaytonaConnection(config)).resolves.toEqual({
+      ok: false,
+      message: 'Daytona API key is missing required scopes: write:sandboxes, delete:sandboxes.',
+      details: { permissions: [] },
+    });
+  });
+
   it('reports a missing snapshot', async () => {
     routeFetch([
       ['GET', '/api-keys/current', [res(200, { permissions: ['write:sandboxes', 'delete:sandboxes'] })]],
@@ -440,6 +886,48 @@ describe('testDaytonaConnection', () => {
     await expect(testDaytonaConnection(config)).resolves.toMatchObject({
       ok: false,
       message: expect.stringContaining('was not found'),
+    });
+  });
+
+  it('reports an inactive snapshot with the permissions that were verified', async () => {
+    routeFetch([
+      ['GET', '/api-keys/current', [res(200, { permissions: ['write:sandboxes', 'delete:sandboxes'] })]],
+      ['GET', '/snapshots', [res(200, { items: [{ name: 'lifecycle-workspace-1.0', state: 'inactive' }] })]],
+    ]);
+
+    await expect(testDaytonaConnection(config)).resolves.toEqual({
+      ok: false,
+      message:
+        'Daytona snapshot "lifecycle-workspace-1.0" is not active (state: inactive); provisioning will attempt activation automatically.',
+      details: {
+        permissions: ['write:sandboxes', 'delete:sandboxes'],
+        snapshotState: 'inactive',
+      },
+    });
+  });
+
+  it('accepts a top-level snapshot array matched by id and defaults its state to active', async () => {
+    routeFetch([
+      ['GET', '/api-keys/current', [res(200, { permissions: ['write:sandboxes', 'delete:sandboxes'] })]],
+      ['GET', '/snapshots', [res(200, [{ id: 'lifecycle-workspace-1.0' }])]],
+    ]);
+
+    await expect(testDaytonaConnection(config)).resolves.toEqual({
+      ok: true,
+      message: 'Daytona connection verified.',
+      details: {
+        permissions: ['write:sandboxes', 'delete:sandboxes'],
+        snapshotState: 'active',
+      },
+    });
+  });
+
+  it('normalizes non-Error transport rejections', async () => {
+    (global.fetch as jest.Mock).mockRejectedValue('transport exploded');
+
+    await expect(testDaytonaConnection(config)).resolves.toEqual({
+      ok: false,
+      message: 'transport exploded',
     });
   });
 

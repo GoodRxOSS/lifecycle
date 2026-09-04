@@ -153,4 +153,16 @@ describe('GET /api/v2/ai/admin/agent/threads/[threadId]/conversation', () => {
       error: { message },
     });
   });
+
+  it('maps an unexpected conversation lookup failure to 500', async () => {
+    mockGetThreadConversation.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await GET(makeRequest(), { params: Promise.resolve({ threadId: 'thread-1' }) });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'database unavailable' },
+    });
+    expect(mockGetThreadConversation).toHaveBeenCalledWith('thread-1');
+  });
 });

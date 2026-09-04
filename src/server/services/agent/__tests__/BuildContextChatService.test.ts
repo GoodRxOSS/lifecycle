@@ -493,6 +493,44 @@ describe('BuildContextChatService', () => {
     );
   });
 
+  it('uses the build revision when an API build has no pull request or base build', async () => {
+    const buildSha = 'fedcba9876543210fedcba9876543210fedcba98';
+    const arranged = arrangeCreatePath({
+      build: sampleBuild({
+        pullRequest: null,
+        baseBuild: undefined,
+        sha: buildSha,
+      }),
+    });
+
+    const result = await BuildContextChatService.launchBuildContextChat({
+      buildUuid: 'build-uuid-1',
+      userId: 'sample-user',
+    });
+
+    expect(result.buildContext).toMatchObject({
+      buildUuid: 'build-uuid-1',
+      revision: buildSha,
+      pullRequest: null,
+      baseBuildUuid: null,
+      selectedDeployUuid: null,
+      selectedDeploy: null,
+    });
+    expect(result.session.workspaceRepos).toEqual([]);
+    expect(mockResolveSelection).toHaveBeenCalledWith({
+      repoFullName: undefined,
+      requestedProvider: undefined,
+      requestedModelId: undefined,
+    });
+    expect(mockGetRequiredProviderApiKey).toHaveBeenCalledWith(expect.objectContaining({ repoFullName: undefined }));
+    expect(arranged.sourceInsertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ revision: buildSha, pullRequest: null, baseBuildUuid: null }),
+      })
+    );
+    expect(mockDeployQuery).not.toHaveBeenCalled();
+  });
+
   it('throws a typed not-found error for an invalid or unknown buildUuid', async () => {
     mockBuildLookup(null);
 
@@ -587,6 +625,54 @@ describe('BuildContextChatService', () => {
     );
   });
 
+  it.each([
+    ['preserves configured', ['values.yaml', 'environments/test.yaml'], ['values.yaml', 'environments/test.yaml']],
+    ['defaults absent', undefined, []],
+  ])('%s Helm chart value files in the selected deploy context', async (_label, valueFiles, expectedValueFiles) => {
+    const build = sampleBuild();
+    const deploy = sampleDeploy({
+      deployable: {
+        name: 'sample-helm-service',
+        type: 'helm',
+        source: 'yaml',
+        helm: {
+          chart: {
+            name: 'sample-chart',
+            repoUrl: 'oci://registry.example.test/charts',
+            ...(valueFiles ? { valueFiles } : {}),
+          },
+        },
+      },
+    });
+    const arranged = arrangeCreatePath({ build });
+    mockDeployLookup(deploy);
+
+    const result = await BuildContextChatService.launchBuildContextChat({
+      buildUuid: 'build-uuid-1',
+      selectedDeployUuid: 'deploy-uuid-1',
+      userId: 'sample-user',
+    });
+
+    expect(result.buildContext.selectedDeploy?.helm).toEqual({
+      chartName: 'sample-chart',
+      chartRepoUrl: 'oci://registry.example.test/charts',
+      valueFiles: expectedValueFiles,
+    });
+    expect(arranged.sourceInsertAndFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          selectedDeploy: expect.objectContaining({
+            helm: {
+              chartName: 'sample-chart',
+              chartRepoUrl: 'oci://registry.example.test/charts',
+              valueFiles: expectedValueFiles,
+            },
+          }),
+        }),
+      })
+    );
+  });
+
   it('rejects selected deploys that do not belong to the build', async () => {
     mockBuildLookup(sampleBuild());
     mockDeployLookup(sampleDeploy({ buildId: 99 }));
@@ -650,6 +736,47 @@ describe('BuildContextChatService', () => {
       created: false,
       reused: true,
     });
+  });
+
+  it('propagates an ordinary chat-creation failure without a race re-read', async () => {
+    const arranged = arrangeCreatePath({ build: sampleBuild() });
+    const failure = new Error('chat session storage unavailable');
+    mockAgentSessionTransaction.mockRejectedValueOnce(failure);
+
+    await expect(
+      BuildContextChatService.launchBuildContextChat({
+        buildUuid: 'build-uuid-1',
+        userId: 'sample-user',
+      })
+    ).rejects.toBe(failure);
+
+    expect(arranged.reuseQuery.first).toHaveBeenCalledTimes(1);
+    expect(mockAgentSessionQuery).toHaveBeenCalledTimes(1);
+    expect(mockAgentThreadQuery).not.toHaveBeenCalled();
+    expect(mockAgentSourceQuery).not.toHaveBeenCalled();
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
+  });
+
+  it('propagates a unique-constraint failure when the winning session cannot be found', async () => {
+    const arranged = arrangeCreatePath({ build: sampleBuild() });
+    const failure = {
+      code: '23505',
+      constraint: 'agent_sessions_active_build_context_chat_unique',
+    };
+    mockAgentSessionTransaction.mockRejectedValueOnce(failure);
+
+    await expect(
+      BuildContextChatService.launchBuildContextChat({
+        buildUuid: 'build-uuid-1',
+        userId: 'sample-user',
+      })
+    ).rejects.toBe(failure);
+
+    expect(arranged.reuseQuery.first).toHaveBeenCalledTimes(1);
+    expect(mockAgentSessionQuery).toHaveBeenCalledTimes(2);
+    expect(mockAgentThreadQuery).not.toHaveBeenCalled();
+    expect(mockAgentSourceQuery).not.toHaveBeenCalled();
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
   });
 
   it('reuses the latest active same user build-context chat and active default thread', async () => {

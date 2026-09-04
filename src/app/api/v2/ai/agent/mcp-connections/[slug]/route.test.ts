@@ -125,6 +125,97 @@ describe('MCP user connection route', () => {
     });
   });
 
+  it.each([
+    ['PUT', PUT],
+    ['DELETE', DELETE],
+  ])('rejects unauthenticated %s requests before reading connection state', async (_method, handler) => {
+    mockGetRequestUserIdentity.mockReturnValue(undefined);
+
+    const response = await handler(makeRequest({ values: { apiToken: 'sample-token' } }), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(mockGetBySlugAndScope).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+    expect(mockDeleteConnection).not.toHaveBeenCalled();
+  });
+
+  it('maps malformed JSON to an error without reading or changing the connection', async () => {
+    const request = makeRequest(undefined);
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request, {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(mockGetBySlugAndScope).not.toHaveBeenCalled();
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['disabled', { ...connectorConfig, enabled: false }],
+  ])('404s when the shared MCP definition is %s', async (_label, config) => {
+    mockGetBySlugAndScope.mockResolvedValue(config);
+
+    const response = await PUT(
+      makeRequest(
+        { values: { apiToken: 'sample-token' } },
+        'http://localhost/api/v2/ai/agent/mcp-connections/sample-connector?scope=owner%2Frepo'
+      ),
+      { params: Promise.resolve({ slug: 'sample-connector' }) }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(404);
+    expect(body).toMatchObject({
+      request_id: 'req-test',
+      data: null,
+      error: { message: "Enabled MCP connection 'sample-connector' not found in scope 'owner/repo'" },
+    });
+    expect(mockGetBySlugAndScope).toHaveBeenCalledWith('sample-connector', 'owner/repo');
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'OAuth',
+      { mode: 'oauth', provider: 'generic-oauth2.1' },
+      "MCP connection 'sample-connector' uses OAuth. Start the OAuth flow instead of saving raw values.",
+    ],
+    [
+      'no per-user authentication',
+      { mode: 'none' },
+      "MCP connection 'sample-connector' does not accept per-user field configuration",
+    ],
+  ] as const)('rejects raw values when the shared definition uses %s', async (_label, authConfig, message) => {
+    mockGetBySlugAndScope.mockResolvedValue({ ...connectorConfig, authConfig });
+
+    const response = await PUT(makeRequest({ values: { apiToken: 'sample-token' } }), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe(message);
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
+  it('rejects a null body when the shared field schema requires a value', async () => {
+    const response = await PUT(makeRequest(null), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe("Missing required MCP connection field 'API token'");
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).not.toHaveBeenCalled();
+  });
+
   it('stores a per-user connection with the current definition fingerprint and discovered tools', async () => {
     const response = await PUT(makeRequest({ values: { apiToken: 'sample-token' } }), {
       params: Promise.resolve({ slug: 'sample-connector' }),
@@ -187,6 +278,60 @@ describe('MCP user connection route', () => {
     expect(body.error.message).not.toContain('invalid-token');
   });
 
+  it('stores a validation error when discovery returns no tools', async () => {
+    mockDiscoverTools.mockResolvedValue([]);
+
+    const response = await PUT(makeRequest({ values: { apiToken: 'sample-token' } }), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error.message).toBe('MCP validation failed for sample-connector: server returned 0 tools');
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: { type: 'fields', values: { apiToken: 'sample-token' } },
+        discoveredTools: [],
+        validationError: 'MCP validation failed for sample-connector: server returned 0 tools',
+      })
+    );
+    expect(mockGetMaskedState).not.toHaveBeenCalled();
+  });
+
+  it('uses an empty shared configuration when the definition omits one', async () => {
+    mockGetBySlugAndScope.mockResolvedValue({ ...connectorConfig, sharedConfig: undefined });
+
+    const response = await PUT(
+      makeRequest(
+        { values: { apiToken: 'sample-token' } },
+        'http://localhost/api/v2/ai/agent/mcp-connections/sample-connector'
+      ),
+      { params: Promise.resolve({ slug: 'sample-connector' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockGetBySlugAndScope).toHaveBeenCalledWith('sample-connector', 'global');
+    expect(mockDiscoverTools).toHaveBeenCalledWith(
+      {
+        type: 'http',
+        url: 'https://mcp.example.com/v1/mcp',
+        headers: { Authorization: 'Bearer sample-token' },
+      },
+      30000
+    );
+  });
+
+  it('maps a masked-state lookup failure after saving the validated connection', async () => {
+    mockGetMaskedState.mockRejectedValue(new Error('state unavailable'));
+
+    const response = await PUT(makeRequest({ values: { apiToken: 'sample-token' } }), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(mockUpsertConnection).toHaveBeenCalledWith(expect.objectContaining({ validationError: null }));
+  });
+
   it('deletes the current user connection and returns the empty state', async () => {
     mockGetMaskedState.mockResolvedValueOnce({
       slug: 'sample-connector',
@@ -214,5 +359,49 @@ describe('MCP user connection route', () => {
         discoveredTools: [],
       })
     );
+  });
+
+  it('defaults delete scope to global and returns none auth state when the shared definition is absent', async () => {
+    mockGetBySlugAndScope.mockResolvedValue(undefined);
+    mockGetMaskedState.mockResolvedValue({
+      slug: 'sample-connector',
+      scope: 'global',
+      authMode: 'none',
+      configured: false,
+      stale: false,
+      configuredFieldKeys: [],
+      validatedAt: null,
+      validationError: null,
+      discoveredTools: [],
+      updatedAt: null,
+    });
+
+    const response = await DELETE(
+      makeRequest(undefined, 'http://localhost/api/v2/ai/agent/mcp-connections/sample-connector'),
+      { params: Promise.resolve({ slug: 'sample-connector' }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockGetBySlugAndScope).toHaveBeenCalledWith('sample-connector', 'global');
+    expect(mockDeleteConnection).toHaveBeenCalledWith('sample-user', 'global', 'sample-connector', 'sample-user');
+    expect(mockGetMaskedState).toHaveBeenCalledWith(
+      'sample-user',
+      'global',
+      'sample-connector',
+      'sample-user',
+      undefined,
+      'none'
+    );
+  });
+
+  it('does not read masked state when deleting the connection fails', async () => {
+    mockDeleteConnection.mockRejectedValue(new Error('delete unavailable'));
+
+    const response = await DELETE(makeRequest(undefined), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(mockGetMaskedState).not.toHaveBeenCalled();
   });
 });

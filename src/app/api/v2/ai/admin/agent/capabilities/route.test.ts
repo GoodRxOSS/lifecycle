@@ -142,6 +142,15 @@ describe('/api/v2/ai/admin/agent/capabilities', () => {
     expect(mockListCapabilityInventory).not.toHaveBeenCalled();
   });
 
+  it('rejects unauthenticated requests before loading inventory', async () => {
+    mockGetUser.mockReturnValue(undefined);
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities'));
+
+    expect(response.status).toBe(401);
+    expect(mockListCapabilityInventory).not.toHaveBeenCalled();
+  });
+
   it('returns global capability inventory and effective policy', async () => {
     const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities'));
     const body = await response.json();
@@ -215,6 +224,42 @@ describe('/api/v2/ai/admin/agent/capabilities', () => {
     );
   });
 
+  it('defaults missing global and effective policy blocks to empty objects', async () => {
+    mockGetGlobalConfig.mockResolvedValue({});
+    mockGetEffectiveConfig.mockResolvedValue({});
+
+    const response = await GET(makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities?scope=%20%20'));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toMatchObject({
+      scope: 'global',
+      scopeType: 'global',
+      capabilityPolicy: {},
+      effectiveCapabilityPolicy: {},
+    });
+    expect(mockGetRepoConfig).not.toHaveBeenCalled();
+  });
+
+  it('defaults absent repo and inherited policy blocks to empty objects', async () => {
+    mockGetGlobalConfig.mockResolvedValue({});
+    mockGetRepoConfig.mockResolvedValue(null);
+    mockGetEffectiveConfig.mockResolvedValue({});
+
+    const response = await GET(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities?scope=example-org/example-repo')
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toMatchObject({
+      scope: 'example-org/example-repo',
+      capabilityPolicy: {},
+      inheritedCapabilityPolicy: {},
+      effectiveCapabilityPolicy: {},
+    });
+  });
+
   it('updates global capability policy and returns refreshed inventory', async () => {
     const body = {
       capabilityPolicy: {
@@ -260,6 +305,48 @@ describe('/api/v2/ai/admin/agent/capabilities', () => {
     expect(mockListCapabilityInventory).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed repo scope on update before reading JSON', async () => {
+    const request = makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities?scope=repo', {
+      capabilityPolicy: {},
+    });
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect(request.json).not.toHaveBeenCalled();
+    expect(mockUpdateGlobalCapabilityPolicy).not.toHaveBeenCalled();
+    expect(mockUpdateRepoCapabilityPolicy).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed JSON before updating policy', async () => {
+    const request = makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities');
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockUpdateGlobalCapabilityPolicy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'null body', body: null, message: 'Request body must be an object.' },
+    { label: 'an array body', body: [], message: 'Request body must be an object.' },
+    { label: 'missing capabilityPolicy', body: {}, message: 'Request body must include capabilityPolicy.' },
+    {
+      label: 'null capabilityPolicy',
+      body: { capabilityPolicy: null },
+      message: 'Request body must include capabilityPolicy.',
+    },
+  ])('rejects a $label', async ({ body, message }) => {
+    const response = await PUT(makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities', body));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe(message);
+    expect(mockUpdateGlobalCapabilityPolicy).not.toHaveBeenCalled();
+    expect(mockUpdateRepoCapabilityPolicy).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid capability ids from service validation', async () => {
     mockUpdateGlobalCapabilityPolicy.mockRejectedValueOnce(
       new AgentRuntimeConfigValidationError('Unknown capability id "sample_unknown".')
@@ -298,6 +385,19 @@ describe('/api/v2/ai/admin/agent/capabilities', () => {
 
     expect(response.status).toBe(400);
     expect(body.error.message).toBe('Capability "workspace_shell" has invalid availability "sometimes".');
+  });
+
+  it('maps an unexpected update failure to 500', async () => {
+    mockUpdateGlobalCapabilityPolicy.mockRejectedValue(new Error('configuration store unavailable'));
+
+    const response = await PUT(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/capabilities', {
+        capabilityPolicy: { availability: {} },
+      })
+    );
+
+    expect(response.status).toBe(500);
+    expect(mockListCapabilityInventory).not.toHaveBeenCalled();
   });
 
   it.each([

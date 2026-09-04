@@ -29,6 +29,14 @@ describe('public hrefs', () => {
       expect(resolvePublicScheme({ http: '127.0.0.1.nip.io' })).toBe('http');
     });
 
+    test('falls back to HTTPS when the candidate host is explicitly absent', () => {
+      expect(resolvePublicScheme({ http: '127.0.0.1.nip.io' }, null)).toBe('https');
+    });
+
+    test('falls back to HTTPS when the candidate host cannot be parsed', () => {
+      expect(resolvePublicScheme({ http: '127.0.0.1.nip.io' }, '[')).toBe('https');
+    });
+
     test.each([
       undefined,
       null,

@@ -14,6 +14,13 @@
  * limitations under the License.
  */
 
+const mockLogger = {
+  info: jest.fn(),
+  warn: jest.fn(),
+  debug: jest.fn(),
+  error: jest.fn(),
+};
+
 jest.mock('server/lib/queueManager', () => {
   const mockState = {
     queue: {
@@ -50,12 +57,7 @@ jest.mock('server/lib/redisClient', () => {
 });
 
 jest.mock('server/lib/logger', () => ({
-  getLogger: jest.fn(() => ({
-    info: jest.fn(),
-    warn: jest.fn(),
-    debug: jest.fn(),
-    error: jest.fn(),
-  })),
+  getLogger: jest.fn(() => mockLogger),
   extractContextForQueue: jest.fn(() => ({ correlationId: 'corr-1' })),
 }));
 
@@ -79,6 +81,7 @@ import EnvironmentWatchService, {
   buildEnvironmentWatchHeadline,
   classifyEnvironmentWatchOutcome,
   environmentWatchDedupeKey,
+  scheduleEnvironmentWatch,
   type AgentEnvironmentWatchJob,
 } from '../EnvironmentWatchService';
 
@@ -163,9 +166,23 @@ describe('scheduleEnvironmentWatch', () => {
     redis.del.mockResolvedValue(1);
   });
 
-  it('schedules a delayed watch job with a deterministic dedupe marker', async () => {
+  it('rejects a blank build UUID without consulting persistence or queue boundaries', async () => {
     const result = await EnvironmentWatchService.scheduleEnvironmentWatch({
+      buildUuid: '   ',
+      threadUuid: 'thread-1',
+      reason: 'repair_commit',
+    });
+
+    expect(result).toEqual({ scheduled: false, reason: 'missing_build' });
+    expect(AgentSession.query).not.toHaveBeenCalled();
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it('schedules a delayed watch job with a deterministic dedupe marker', async () => {
+    const result = await scheduleEnvironmentWatch({
       buildUuid: 'build-1',
+      buildId: 17,
       threadUuid: 'thread-1',
       sessionUuid: 'sess-1',
       reason: 'repair_commit',
@@ -179,6 +196,7 @@ describe('scheduleEnvironmentWatch', () => {
     expect(jobName).toBe('environment-watch');
     expect(payload).toMatchObject({
       buildUuid: 'build-1',
+      buildId: 17,
       threadUuid: 'thread-1',
       sessionUuid: 'sess-1',
       reason: 'repair_commit',
@@ -260,6 +278,31 @@ describe('scheduleEnvironmentWatch', () => {
     expect(mockQueueAdd).not.toHaveBeenCalled();
   });
 
+  it('returns unscheduled when a session has neither a default nor fallback thread', async () => {
+    const fallbackThreadQuery = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(undefined),
+    };
+    (AgentSession.query as jest.Mock).mockReturnValue({
+      where: jest.fn().mockReturnThis(),
+      whereNot: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 7, uuid: 'sess-7', defaultThreadId: null }),
+    });
+    (AgentThread.query as jest.Mock).mockReturnValue(fallbackThreadQuery);
+
+    const result = await EnvironmentWatchService.scheduleEnvironmentWatch({
+      buildUuid: 'build-1',
+      reason: 'trigger_redeploy',
+    });
+
+    expect(result).toEqual({ scheduled: false, reason: 'thread_unresolved' });
+    expect(fallbackThreadQuery.where).toHaveBeenCalledWith({ sessionId: 7 });
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
   it('never throws when redis is unavailable', async () => {
     redis.set.mockRejectedValue(new Error('redis down'));
 
@@ -285,6 +328,22 @@ describe('processWatchJob', () => {
       findById: jest.fn().mockResolvedValue({ id: 9, uuid: 'sess-1', namespace: 'env-1', buildUuid: 'build-1' }),
     });
     mockPostStateEvent.mockResolvedValue(undefined);
+  });
+
+  it('releases an explicit marker for an invalid durable-queue payload', async () => {
+    await EnvironmentWatchService.processWatchJob({
+      id: 'environment-watch-invalid',
+      data: {
+        buildUuid: 'build-1',
+        threadUuid: 'thread-1',
+        markerKey: 'env-watch:custom-marker',
+      },
+    } as any);
+
+    expect(redis.del).toHaveBeenCalledWith('env-watch:custom-marker');
+    expect(Build.query).not.toHaveBeenCalled();
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockPostStateEvent).not.toHaveBeenCalled();
   });
 
   it('stops silently and releases the marker when the build was deleted', async () => {
@@ -333,6 +392,31 @@ describe('processWatchJob', () => {
 
     expect(mockPostStateEvent).not.toHaveBeenCalled();
     expect(mockQueueAdd.mock.calls[0][1]).toMatchObject({ pollCount: 1, sawActivity: false });
+  });
+
+  it('detects rebuild activity when the build fingerprint changes without a status change', async () => {
+    mockBuildLoad({ status: BuildStatus.ERROR, statusMessage: 'new failure', updatedAt: 't2', deploys: [] });
+
+    await EnvironmentWatchService.processWatchJob(
+      watchJob({
+        baselineStatus: BuildStatus.ERROR,
+        baselineFingerprint: JSON.stringify({
+          status: BuildStatus.ERROR,
+          statusMessage: 'old failure',
+          updatedAt: 't1',
+        }),
+      })
+    );
+
+    expect(mockPostStateEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        uuidSeed: 'watch-1:final',
+        headline: 'Rebuild after the repair commit finished with a failure.',
+        includeTriage: true,
+      })
+    );
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(redis.del).toHaveBeenCalled();
   });
 
   it('posts a success state event and releases the marker once deployed', async () => {
@@ -410,6 +494,20 @@ describe('processWatchJob', () => {
     expect(redis.del).toHaveBeenCalled();
   });
 
+  it('tolerates a session deleted after its thread was loaded', async () => {
+    mockBuildLoad({ status: BuildStatus.DEPLOYED, statusMessage: null, updatedAt: 't2', deploys: [] });
+    (AgentSession.query as jest.Mock).mockReturnValue({
+      findById: jest.fn().mockResolvedValue(undefined),
+    });
+
+    await EnvironmentWatchService.processWatchJob(watchJob({ sawActivity: true }));
+
+    expect(mockPostStateEvent).not.toHaveBeenCalled();
+    expect(redis.del).toHaveBeenCalledWith(environmentWatchDedupeKey('build-1', 'thread-1'));
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith('EnvWatch: session missing threadUuid=thread-1 buildUuid=build-1');
+  });
+
   it('re-enqueues after a transient polling error within budget', async () => {
     (Build.query as jest.Mock).mockImplementation(() => {
       throw new Error('db down');
@@ -422,6 +520,25 @@ describe('processWatchJob', () => {
     expect(redis.del).not.toHaveBeenCalled();
   });
 
+  it('contains a re-enqueue failure after a transient polling error', async () => {
+    const pollError = new Error('db down');
+    const enqueueError = new Error('queue down');
+    (Build.query as jest.Mock).mockImplementation(() => {
+      throw pollError;
+    });
+    mockQueueAdd.mockRejectedValueOnce(enqueueError);
+
+    await expect(EnvironmentWatchService.processWatchJob(watchJob({ pollCount: 2 }))).resolves.toBeUndefined();
+
+    expect(mockQueueAdd).toHaveBeenCalledTimes(1);
+    expect(mockQueueAdd.mock.calls[0][1]).toMatchObject({ pollCount: 3 });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: enqueueError },
+      'EnvWatch: re-enqueue failed buildUuid=build-1'
+    );
+    expect(redis.del).not.toHaveBeenCalled();
+  });
+
   it('gives up and releases the marker when an error occurs past the deadline', async () => {
     (Build.query as jest.Mock).mockImplementation(() => {
       throw new Error('db down');
@@ -431,5 +548,20 @@ describe('processWatchJob', () => {
 
     expect(mockQueueAdd).not.toHaveBeenCalled();
     expect(redis.del).toHaveBeenCalled();
+  });
+
+  it('contains a marker release failure when a watched build was deleted', async () => {
+    const releaseError = new Error('redis down');
+    mockBuildLoad(null);
+    redis.del.mockRejectedValueOnce(releaseError);
+
+    await expect(EnvironmentWatchService.processWatchJob(watchJob())).resolves.toBeUndefined();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: releaseError },
+      'EnvWatch: marker release failed buildUuid=build-1'
+    );
+    expect(mockQueueAdd).not.toHaveBeenCalled();
+    expect(mockPostStateEvent).not.toHaveBeenCalled();
   });
 });

@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
+const mockWarn = jest.fn();
+
 jest.mock('server/lib/logger', () => ({
   getLogger: jest.fn(() => ({
-    warn: jest.fn(),
+    warn: mockWarn,
     info: jest.fn(),
     debug: jest.fn(),
     error: jest.fn(),
@@ -37,7 +39,10 @@ import {
   type RemoteWorkspaceRuntimeProvider,
 } from '../types';
 import {
+  MODAL_DECLARED_CAPABILITIES,
+  MODAL_PROVIDER,
   ModalRuntimeService,
+  createModalRuntimeService,
   readModalProviderState,
   testModalConnection,
   type ModalRuntimeProviderState,
@@ -130,6 +135,20 @@ describe('readModalProviderState', () => {
     });
 
     expect(parsed).toEqual({ appName: 'lifecycle-workspaces', snapshotImageId: 'im-snap' });
+  });
+});
+
+describe('provider metadata', () => {
+  it('exposes the Modal backend identity and immutable capability contract through the factory', () => {
+    const service = createModalRuntimeService(baseConfig);
+
+    expect(service).toBeInstanceOf(ModalRuntimeService);
+    expect(service.backendId).toBe(MODAL_PROVIDER);
+    expect(service.capabilities()).toEqual({
+      ...MODAL_DECLARED_CAPABILITIES,
+      backend: 'modal',
+      editorAccess: false,
+    });
   });
 });
 
@@ -252,6 +271,87 @@ describe('provision', () => {
     expect(modalMocks.secretsFromName).toHaveBeenCalledWith('lifecycle-registry');
     expect(modalMocks.imagesFromRegistry).toHaveBeenCalledWith('lifecycleoss/workspace:1.2.3', { secretId: 'sc-1' });
   });
+
+  it.each([
+    ['token credentials', { tokenSecret: '' }, 'Modal workspace backend requires token credentials.'],
+    ['workspace image', { image: '' }, 'Modal workspace backend requires an image.'],
+  ])('rejects an empty %s before opening a Modal client', async (_label, override, expectedMessage) => {
+    const service = new ModalRuntimeService({ ...baseConfig, ...override });
+
+    await expect(service.provision({ plan, readiness, gatewayToken: 'plain-token' })).rejects.toThrow(expectedMessage);
+
+    expect(modalMocks.clientCtor).not.toHaveBeenCalled();
+    expect(modalMocks.appsFromName).not.toHaveBeenCalled();
+    expect(modalMocks.sandboxesCreate).not.toHaveBeenCalled();
+  });
+
+  it('passes optional resource, environment, GitHub, and skill settings without requiring gateway auth', async () => {
+    modalMocks.appsFromName.mockResolvedValue({ appId: 'ap-1' });
+    modalMocks.imagesFromRegistry.mockReturnValue({ imageId: 'im-base' });
+    const sb = fakeSandbox('sb-options');
+    modalMocks.sandboxesCreate.mockResolvedValue(sb);
+    routeFetch([['GET', 'sb-options.modal.host/health', [res(200, 'ok')]]]);
+    const planWithOptions = {
+      ...plan,
+      credentials: { hasGitHubToken: true, githubToken: 'github-token' },
+      skillPlan: {
+        version: 1,
+        skills: [
+          {
+            repo: 'example/skills',
+            repoUrl: 'https://github.com/example/skills.git',
+            branch: 'main',
+            path: 'skills/sample',
+            source: 'environment',
+          },
+        ],
+      },
+    } as WorkspaceRuntimePlan;
+    const service = new ModalRuntimeService({
+      ...baseConfig,
+      environment: 'staging',
+      cpu: 2,
+      memoryMiB: 4096,
+      inboundCidrAllowlist: ['10.0.0.0/8'],
+    });
+
+    await service.provision({ plan: planWithOptions, readiness });
+
+    expect(modalMocks.clientCtor).toHaveBeenCalledWith({
+      tokenId: 'ak-test-token-id',
+      tokenSecret: 'as-test-token-secret',
+      environment: 'staging',
+    });
+    const [, , params] = modalMocks.sandboxesCreate.mock.calls[0];
+    expect(params).toMatchObject({
+      cpu: 2,
+      memoryMiB: 4096,
+      inboundCidrAllowlist: ['10.0.0.0/8'],
+    });
+    expect(params).not.toHaveProperty('name');
+    expect(params.env).toMatchObject({ GITHUB_TOKEN: 'github-token', GH_TOKEN: 'github-token' });
+    expect(params.env).not.toHaveProperty('LIFECYCLE_GATEWAY_TOKEN');
+    expect(params.command[2]).toContain('/opt/lifecycle/skills-bootstrap.sh');
+    expect(callsMatching('POST', 'sb-options.modal.host/mcp')).toHaveLength(0);
+  });
+
+  it('terminates best-effort and preserves the missing-tunnel failure', async () => {
+    modalMocks.appsFromName.mockResolvedValue({ appId: 'ap-1' });
+    modalMocks.imagesFromRegistry.mockReturnValue({ imageId: 'im-base' });
+    const sb = fakeSandbox('sb-no-tunnel', {
+      tunnels: jest.fn().mockResolvedValue({}),
+      terminate: jest.fn().mockRejectedValue(new Error('cleanup failed')),
+    });
+    modalMocks.sandboxesCreate.mockResolvedValue(sb);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.provision({ plan, readiness, gatewayToken: 'plain-token' })).rejects.toThrow(
+      'Modal sandbox sb-no-tunnel did not expose a tunnel on port 13338'
+    );
+
+    expect(sb.terminate).toHaveBeenCalledTimes(1);
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('suspend and checkpoint', () => {
@@ -324,6 +424,85 @@ describe('suspend and checkpoint', () => {
 
     await expect(service.suspend(runningState, { retainForMs: 120_000 })).rejects.toBeInstanceOf(
       WorkspaceRuntimeGoneError
+    );
+  });
+
+  it('rejects missing or non-running provider state before opening a Modal client', async () => {
+    const service = new ModalRuntimeService(baseConfig);
+    const suspendedState = { appName: 'lifecycle-workspaces', snapshotImageId: 'im-old' };
+
+    await expect(service.checkpoint(null)).rejects.toThrow('Modal provider state is missing required fields');
+    await expect(service.suspend(suspendedState, { retainForMs: 120_000 })).rejects.toThrow(
+      'Modal sandbox is not running'
+    );
+    await expect(service.checkpoint(suspendedState)).rejects.toThrow('Modal sandbox is not running');
+
+    expect(modalMocks.clientCtor).not.toHaveBeenCalled();
+    expect(modalMocks.sandboxesFromId).not.toHaveBeenCalled();
+  });
+
+  it('propagates an unexpected sandbox lookup failure from suspend without snapshotting', async () => {
+    const transportError = new Error('Modal transport failed');
+    modalMocks.sandboxesFromId.mockRejectedValue(transportError);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.suspend(runningState, { retainForMs: 120_000 })).rejects.toBe(transportError);
+
+    expect(modalMocks.imagesDelete).not.toHaveBeenCalled();
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a missing sandbox during checkpoint and preserves other lookup failures', async () => {
+    const transportError = new Error('Modal transport failed');
+    modalMocks.sandboxesFromId.mockRejectedValueOnce(new NotFoundError('gone')).mockRejectedValueOnce(transportError);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.checkpoint(runningState)).rejects.toBeInstanceOf(WorkspaceRuntimeGoneError);
+    await expect(service.checkpoint(runningState)).rejects.toBe(transportError);
+
+    expect(modalMocks.imagesDelete).not.toHaveBeenCalled();
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(2);
+  });
+
+  it('records an initial suspend with no prior snapshot and does not attempt snapshot GC', async () => {
+    const sb = fakeSandbox('sb-first', {
+      snapshotFilesystem: jest.fn().mockResolvedValue({ imageId: 'im-first' }),
+    });
+    modalMocks.sandboxesFromId.mockResolvedValue(sb);
+    const service = new ModalRuntimeService(baseConfig);
+
+    const handle = await service.suspend(
+      { appName: 'lifecycle-workspaces', sandboxId: 'sb-first', gatewayUrl: 'https://old.modal.host' },
+      { retainForMs: 120_000 }
+    );
+
+    expect(handle.providerState).toMatchObject({
+      sandboxId: null,
+      gatewayUrl: null,
+      snapshotImageId: 'im-first',
+      previousSnapshotImageId: null,
+    });
+    expect(modalMocks.imagesDelete).not.toHaveBeenCalled();
+  });
+
+  it('keeps a successful checkpoint when prior-snapshot GC fails and reports the cleanup failure', async () => {
+    const sb = fakeSandbox('sb-1', {
+      snapshotFilesystem: jest.fn().mockResolvedValue({ imageId: 'im-new' }),
+    });
+    modalMocks.sandboxesFromId.mockResolvedValue(sb);
+    modalMocks.imagesDelete.mockRejectedValue(new Error('gc failed'));
+    const service = new ModalRuntimeService(baseConfig);
+
+    const handle = await service.checkpoint({ ...runningState, previousSnapshotImageId: 'im-older' });
+
+    expect(handle.providerState).toMatchObject({
+      snapshotImageId: 'im-new',
+      previousSnapshotImageId: 'im-old',
+    });
+    expect(modalMocks.imagesDelete).toHaveBeenCalledWith('im-older');
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.any(Error), imageId: 'im-older' }),
+      'Modal: snapshot GC failed'
     );
   });
 });
@@ -400,7 +579,9 @@ describe('resume', () => {
   it('fails closed when the recreated gateway does not enforce the fresh token', async () => {
     modalMocks.appsFromName.mockResolvedValue({ appId: 'ap-1' });
     modalMocks.imagesFromId.mockResolvedValue({ imageId: 'im-old' });
-    const sb = fakeSandbox('sb-2');
+    const sb = fakeSandbox('sb-2', {
+      terminate: jest.fn().mockRejectedValue(new Error('cleanup failed')),
+    });
     modalMocks.sandboxesCreate.mockResolvedValue(sb);
     routeFetch([
       ['GET', 'sb-2.modal.host/health', [res(200, 'ok')]],
@@ -499,6 +680,55 @@ describe('reattach', () => {
     modalMocks.imagesFromId.mockRejectedValue(new NotFoundError('image gone'));
     await expect(service.reattach(runningState, readiness)).resolves.toBeNull();
   });
+
+  it('returns null for unparseable state without opening a Modal client', async () => {
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.reattach({ sandboxId: 'sb-orphaned' }, readiness)).resolves.toBeNull();
+
+    expect(modalMocks.clientCtor).not.toHaveBeenCalled();
+    expect(modalMocks.sandboxesFromId).not.toHaveBeenCalled();
+  });
+
+  it('re-verifies a legacy running handle without gateway-token probes', async () => {
+    const sb = fakeSandbox('sb-legacy');
+    modalMocks.sandboxesFromId.mockResolvedValue(sb);
+    routeFetch([['GET', 'sb-legacy.modal.host/health', [res(200, 'ok')]]]);
+    const service = new ModalRuntimeService(baseConfig);
+
+    const handle = await service.reattach({ appName: 'lifecycle-workspaces', sandboxId: 'sb-legacy' }, readiness);
+
+    expect(handle?.providerState).toMatchObject({
+      sandboxId: 'sb-legacy',
+      gatewayUrl: 'https://sb-legacy.modal.host',
+    });
+    expect(callsMatching('POST', 'sb-legacy.modal.host/mcp')).toHaveLength(0);
+  });
+
+  it('preserves an unexpected running-sandbox lookup failure and does not attempt a snapshot', async () => {
+    const transportError = new Error('Modal transport failed');
+    modalMocks.sandboxesFromId.mockRejectedValue(transportError);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.reattach(runningState, readiness)).rejects.toBe(transportError);
+
+    expect(modalMocks.imagesFromId).not.toHaveBeenCalled();
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves an unexpected snapshot lookup failure instead of treating the workspace as gone', async () => {
+    const transportError = new Error('Modal image service unavailable');
+    modalMocks.imagesFromId.mockRejectedValue(transportError);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(
+      service.reattach({ appName: 'lifecycle-workspaces', snapshotImageId: 'im-old' }, readiness)
+    ).rejects.toBe(transportError);
+
+    expect(modalMocks.appsFromName).not.toHaveBeenCalled();
+    expect(modalMocks.sandboxesCreate).not.toHaveBeenCalled();
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('destroy and endpoints', () => {
@@ -521,6 +751,47 @@ describe('destroy and endpoints', () => {
     await expect(service.destroy(runningState)).resolves.toBeUndefined();
   });
 
+  it('propagates an unexpected sandbox failure and does not delete snapshots afterward', async () => {
+    const transportError = new Error('Modal terminate lookup failed');
+    modalMocks.sandboxesFromId.mockRejectedValue(transportError);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(service.destroy(runningState)).rejects.toBe(transportError);
+
+    expect(modalMocks.imagesDelete).not.toHaveBeenCalled();
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('best-effort deletes both distinct current and prior snapshots', async () => {
+    modalMocks.imagesDelete.mockRejectedValue(new Error('gc failed'));
+    const service = new ModalRuntimeService(baseConfig);
+
+    await expect(
+      service.destroy({
+        appName: 'lifecycle-workspaces',
+        snapshotImageId: 'im-current',
+        previousSnapshotImageId: 'im-prior',
+      })
+    ).resolves.toBeUndefined();
+
+    expect(modalMocks.imagesDelete).toHaveBeenNthCalledWith(1, 'im-current');
+    expect(modalMocks.imagesDelete).toHaveBeenNthCalledWith(2, 'im-prior');
+  });
+
+  it('does not issue a duplicate delete when current and prior snapshot ids match', async () => {
+    modalMocks.imagesDelete.mockResolvedValue(undefined);
+    const service = new ModalRuntimeService(baseConfig);
+
+    await service.destroy({
+      appName: 'lifecycle-workspaces',
+      snapshotImageId: 'im-same',
+      previousSnapshotImageId: 'im-same',
+    });
+
+    expect(modalMocks.imagesDelete).toHaveBeenCalledTimes(1);
+    expect(modalMocks.imagesDelete).toHaveBeenCalledWith('im-same');
+  });
+
   it('returns without throwing when provider state was never populated', async () => {
     const service = new ModalRuntimeService(baseConfig);
 
@@ -533,7 +804,12 @@ describe('destroy and endpoints', () => {
     const service = new ModalRuntimeService(baseConfig);
 
     expect(service.resolveGatewayEndpoint(runningState)).toEqual({ url: 'https://old.modal.host' });
+    expect(service.resolveGatewayEndpoint({ appName: 'lifecycle-workspaces', snapshotImageId: 'im-old' })).toBeNull();
+    expect(service.resolveGatewayEndpoint({ gatewayUrl: 'https://orphaned.modal.host' })).toBeNull();
     expect(service.resolveEditorEndpoint(runningState)).toBeNull();
+    expect(service.hasPersistedHandle(runningState)).toBe(true);
+    expect(service.hasPersistedHandle({ appName: 'lifecycle-workspaces', snapshotImageId: 'im-old' })).toBe(true);
+    expect(service.hasPersistedHandle({ sandboxId: 'sb-orphaned' })).toBe(false);
     expect((service as RemoteWorkspaceRuntimeProvider).renewLease).toBeUndefined();
   });
 });
@@ -562,6 +838,7 @@ describe('testModalConnection', () => {
       ok: false,
       message: 'Modal rejected the configured token credentials.',
     });
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
   });
 
   it('scrubs both token secrets from error messages', async () => {
@@ -581,5 +858,49 @@ describe('testModalConnection', () => {
       >[0])
     ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('token credentials') });
     expect(modalMocks.clientCtor).not.toHaveBeenCalled();
+  });
+
+  it('fails fast without a workspace image', async () => {
+    await expect(
+      testModalConnection({ modal: { ...baseConfig, image: '' } } as unknown as Parameters<
+        typeof testModalConnection
+      >[0])
+    ).resolves.toEqual({ ok: false, message: 'Modal workspace image is not configured.' });
+
+    expect(modalMocks.clientCtor).not.toHaveBeenCalled();
+    expect(modalMocks.appsFromName).not.toHaveBeenCalled();
+  });
+
+  it('passes a configured environment to the client and returns it in successful diagnostics', async () => {
+    modalMocks.appsFromName.mockResolvedValue({ appId: 'ap-1' });
+    const environmentConfig = {
+      ...config,
+      modal: { ...baseConfig, environment: 'staging' },
+    } as Parameters<typeof testModalConnection>[0];
+
+    await expect(testModalConnection(environmentConfig)).resolves.toEqual({
+      ok: true,
+      message: 'Modal connection verified.',
+      details: {
+        appName: 'lifecycle-workspaces',
+        image: 'lifecycleoss/workspace:1.2.3',
+        environment: 'staging',
+      },
+    });
+    expect(modalMocks.clientCtor).toHaveBeenCalledWith({
+      tokenId: 'ak-test-token-id',
+      tokenSecret: 'as-test-token-secret',
+      environment: 'staging',
+    });
+  });
+
+  it('normalizes and scrubs a non-Error SDK rejection', async () => {
+    modalMocks.appsFromName.mockRejectedValue('boom ak-test-token-id and as-test-token-secret leaked');
+
+    await expect(testModalConnection(config)).resolves.toEqual({
+      ok: false,
+      message: 'boom [redacted] and [redacted] leaked',
+    });
+    expect(modalMocks.clientClose).toHaveBeenCalledTimes(1);
   });
 });

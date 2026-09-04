@@ -15,6 +15,7 @@
  */
 
 import { NextRequest } from 'next/server';
+import { AgentSessionConfigValidationError } from 'server/lib/validation/agentSessionConfigValidator';
 
 const mockGetUser = jest.fn();
 const mockGetGlobalRuntimeConfig = jest.fn();
@@ -94,6 +95,17 @@ describe('PUT /api/v2/ai/config/agent-session/runtime (admin-gated org-wide writ
     expect(mockSetGlobalRuntimeConfig).not.toHaveBeenCalled();
   });
 
+  it('rejects malformed JSON before writing runtime config', async () => {
+    const request = makeRequest();
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockSetGlobalRuntimeConfig).not.toHaveBeenCalled();
+  });
+
   it('writes the global runtime config for an admin', async () => {
     const runtimeConfig = {
       workspaceBackend: {
@@ -140,6 +152,17 @@ describe('PUT /api/v2/ai/config/agent-session/runtime (admin-gated org-wide writ
 
     expect(response.status).toBe(409);
     expect(body.error.code).toBe('workspace_backend_in_use');
+  });
+
+  it('maps service-level runtime validation failures to 400', async () => {
+    mockSetGlobalRuntimeConfig.mockRejectedValue(
+      new AgentSessionConfigValidationError('workspaceBackend.opensandbox.poolRef must be non-empty.')
+    );
+
+    const response = await PUT(makeRequest({ workspaceBackend: {} }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('workspaceBackend.opensandbox.poolRef must be non-empty.');
   });
 
   it('returns persisted workspace backend settings', async () => {

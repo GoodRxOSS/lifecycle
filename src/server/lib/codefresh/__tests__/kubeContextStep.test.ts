@@ -121,4 +121,26 @@ describe('kubeContextStep', () => {
       expect(result.type).toBe('test-org/kube-context:0.0.2');
     });
   });
+
+  it('uses staging AWS credentials in a staging environment', async () => {
+    jest.resetModules();
+    const getAllConfigs = jest.fn().mockResolvedValue({ app_setup: { org: 'test-org' } });
+    jest.doMock('shared/config', () => ({ ENVIRONMENT: 'staging' }));
+    jest.doMock('server/services/globalConfig', () => ({
+      __esModule: true,
+      default: { getInstance: () => ({ getAllConfigs }) },
+    }));
+    const { kubeContextStep: stagingKubeContextStep } = await import('server/lib/codefresh');
+
+    await expect(stagingKubeContextStep({ context: 'test-context', cluster: 'test-cluster' })).resolves.toEqual({
+      title: 'Set kube context',
+      type: 'test-org/kube-context:0.0.2',
+      arguments: {
+        app: 'test-context',
+        cluster: 'test-cluster',
+        aws_access_key_id: '${{STG_AWS_ACCESS_KEY_ID}}',
+        aws_secret_access_key: '${{STG_AWS_SECRET_ACCESS_KEY}}',
+      },
+    });
+  });
 });

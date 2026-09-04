@@ -35,8 +35,12 @@ import type { ResolvedAgentSessionE2bBackendConfig } from 'server/lib/agentSessi
 import type { WorkspaceRuntimePlan } from 'server/lib/agentSession/workspaceRuntimePlan';
 import { WorkspaceRuntimeGoneError, WorkspaceRuntimeSecurityError } from '../types';
 import {
+  E2B_DECLARED_CAPABILITIES,
+  E2B_PROVIDER,
+  E2B_TRAFFIC_TOKEN_HEADER,
   E2bApiError,
   E2bRuntimeService,
+  createE2bRuntimeService,
   readE2bProviderState,
   listE2bWorkspaceSources,
   testE2bConnection,
@@ -105,6 +109,44 @@ function provisionRoutes(mcpResponses: Response[]) {
   ]);
 }
 
+describe('provider identity and state contracts', () => {
+  it('exposes the E2B backend identity, declared capabilities, and factory', () => {
+    const service = createE2bRuntimeService(baseConfig);
+
+    expect(E2B_PROVIDER).toBe('e2b');
+    expect(E2B_TRAFFIC_TOKEN_HEADER).toBe('e2b-traffic-access-token');
+    expect(E2B_DECLARED_CAPABILITIES).toMatchObject({
+      newChatWorkspaces: { supported: true },
+      sandboxSessions: { supported: true },
+      editor: { supported: true },
+      hibernateResume: { supported: true },
+      developWorkspaces: { supported: false },
+    });
+    expect(service).toBeInstanceOf(E2bRuntimeService);
+    expect(service.backendId).toBe('e2b');
+    expect(service.capabilities()).toMatchObject({ backend: 'e2b', editorAccess: false });
+  });
+
+  it('validates persisted handles without making remote calls', () => {
+    const service = new E2bRuntimeService(baseConfig);
+
+    expect(service.hasPersistedHandle(state)).toBe(true);
+    expect(service.hasPersistedHandle({ sandboxId: 'missing-domain' })).toBe(false);
+    expect(service.hasPersistedHandle(null)).toBe(false);
+    expect(harness.fetch()).not.toHaveBeenCalled();
+  });
+
+  it('rejects state-required operations before making remote calls', async () => {
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.resume({}, readiness)).rejects.toThrow('E2B provider state is missing required fields');
+    await expect(service.suspend(null, { retainForMs: 120_000 })).rejects.toThrow(
+      'E2B provider state is missing required fields'
+    );
+    expect(harness.fetch()).not.toHaveBeenCalled();
+  });
+});
+
 describe('readE2bProviderState', () => {
   it('round-trips a fully populated state', () => {
     const value = {
@@ -131,6 +173,24 @@ describe('readE2bProviderState', () => {
 });
 
 describe('provision', () => {
+  it.each([
+    ['API key', { ...baseConfig, apiKey: undefined }, 'E2B workspace backend requires an API key.'],
+    ['template', { ...baseConfig, templateId: undefined }, 'E2B workspace backend requires a template.'],
+  ])('fails before creation when the %s is not configured', async (_name, config, message) => {
+    const service = new E2bRuntimeService(config);
+
+    await expect(service.provision({ plan, readiness })).rejects.toThrow(message);
+    expect(harness.fetch()).not.toHaveBeenCalled();
+  });
+
+  it('rejects a create response without a sandbox id before attempting cleanup', async () => {
+    routeFetch([['POST', '/sandboxes', [res(200, { domain: 'e2b.app' })]]]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.provision({ plan, readiness })).rejects.toThrow('E2B create failed: missing sandbox id');
+    expect(callsMatching('DELETE', '/sandboxes')).toHaveLength(0);
+  });
+
   it('creates a locked-down sandbox, delivers instance.env last, and verifies gateway auth both ways', async () => {
     provisionRoutes([res(401, { error: 'Unauthorized' }), res(200, {})]);
     const service = new E2bRuntimeService(baseConfig);
@@ -212,6 +272,76 @@ describe('provision', () => {
     );
     expect(callsMatching('DELETE', '/sandboxes/sb-new')).toHaveLength(1);
   });
+
+  it('uses provider defaults, uploads requested skills, and supports a tokenless custom domain', async () => {
+    const skillPlan = {
+      version: 1 as const,
+      skills: [
+        {
+          repo: 'example-org/agent-skills',
+          repoUrl: 'https://github.com/example-org/agent-skills.git',
+          branch: 'main',
+          path: 'skills/review',
+          source: 'environment' as const,
+        },
+      ],
+    };
+    const planWithSkills = { ...plan, skillPlan } as WorkspaceRuntimePlan;
+    routeFetch([
+      ['POST', '49983-sb-new.custom.e2b.dev/files', [res(200, [])]],
+      ['GET', '49983-sb-new.custom.e2b.dev/health', [res(204)]],
+      ['GET', '13338-sb-new.custom.e2b.dev/health', [res(200, 'ok')]],
+      ['GET', '13337-sb-new.custom.e2b.dev/healthz', [res(200, 'ok')]],
+      [
+        'POST',
+        '/sandboxes',
+        [
+          res(200, {
+            sandboxID: 'sb-new',
+            domain: 'custom.e2b.dev',
+          }),
+        ],
+      ],
+    ]);
+    const service = new E2bRuntimeService({ ...baseConfig, timeoutSeconds: null });
+
+    const handle = await service.provision({ plan: planWithSkills, readiness });
+
+    const [, createInit] = callsMatching('POST', '/sandboxes')[0];
+    expect(JSON.parse(createInit?.body as string)).toMatchObject({ timeout: 3600 });
+    const uploads = callsMatching('POST', '49983-sb-new.custom.e2b.dev/files');
+    const uploadPaths = uploads.map(([url]) => new URL(String(url)).searchParams.get('path'));
+    expect(uploadPaths).toContain('/tmp/lifecycle/skills-bootstrap.sh');
+    for (const [, init] of uploads) {
+      expect(init?.headers).not.toHaveProperty('X-Access-Token');
+    }
+    expect(callsMatching('POST', '13338-sb-new.custom.e2b.dev/mcp')).toHaveLength(0);
+    expect(handle.providerState).toMatchObject({
+      sandboxId: 'sb-new',
+      domain: 'custom.e2b.dev',
+      editorUrl: 'https://13337-sb-new.custom.e2b.dev',
+    });
+    expect(handle.providerState).not.toHaveProperty('envdAccessToken');
+    expect(handle.providerState).not.toHaveProperty('trafficAccessToken');
+    expect(handle.providerState).not.toHaveProperty('expiresAt');
+  });
+
+  it('preserves the upload failure when best-effort sandbox cleanup also fails', async () => {
+    routeFetch([
+      ['POST', '49983-sb-new.e2b.app/files', [res(500, { message: 'upload unavailable' })]],
+      ['GET', '49983-sb-new.e2b.app/health', [res(204)]],
+      ['DELETE', '/sandboxes/sb-new', [res(500, { message: 'cleanup unavailable' })]],
+      ['POST', '/sandboxes', [res(200, { sandboxID: 'sb-new' })]],
+    ]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.provision({ plan, readiness })).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 500,
+      message: expect.stringContaining('E2B file upload failed: upload unavailable'),
+    });
+    expect(callsMatching('DELETE', '/sandboxes/sb-new')).toHaveLength(1);
+  });
 });
 
 describe('resume', () => {
@@ -227,7 +357,7 @@ describe('resume', () => {
       ['POST', '13338-sb-1.e2b.app/mcp', [res(401, { error: 'Unauthorized' }), res(200, {})]],
       ['GET', '13337-sb-1.e2b.app/healthz', [res(404, '')]],
     ]);
-    const service = new E2bRuntimeService(baseConfig);
+    const service = new E2bRuntimeService({ ...baseConfig, timeoutSeconds: null });
 
     const handle = await service.resume({ ...state, gatewayToken: 'enc:ciphertext' }, readiness);
 
@@ -261,6 +391,50 @@ describe('resume', () => {
     expect(error.cause).toBeInstanceOf(E2bApiError);
   });
 
+  it('propagates a non-gone connect failure unchanged', async () => {
+    routeFetch([['POST', '/sandboxes/sb-1/connect', [res(500, { message: 'connect unavailable' })]]]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.resume(state, readiness)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 500,
+      message: expect.stringContaining('connect unavailable'),
+    });
+  });
+
+  it('updates the connected domain and expiry and waits for an existing editor to return', async () => {
+    routeFetch([
+      [
+        'POST',
+        '/sandboxes/sb-1/connect',
+        [
+          res(200, {
+            sandboxID: 'sb-1',
+            domain: 'custom.e2b.dev',
+            envdAccessToken: 'envd-rotated',
+            trafficAccessToken: 'traffic-rotated',
+            endAt: '2026-06-10T13:00:00.000Z',
+          }),
+        ],
+      ],
+      ['GET', '49983-sb-1.custom.e2b.dev/health', [res(204)]],
+      ['GET', '13338-sb-1.custom.e2b.dev/health', [res(200, 'ok')]],
+      ['GET', '13337-sb-1.custom.e2b.dev/healthz', [res(404, ''), res(200, 'ok')]],
+    ]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    const handle = await service.resume({ ...state, editorUrl: 'https://13337-sb-1.e2b.app' }, readiness);
+
+    expect(handle.providerState).toMatchObject({
+      domain: 'custom.e2b.dev',
+      envdAccessToken: 'envd-rotated',
+      trafficAccessToken: 'traffic-rotated',
+      expiresAt: '2026-06-10T13:00:00.000Z',
+      editorUrl: 'https://13337-sb-1.custom.e2b.dev',
+    });
+    expect(callsMatching('GET', '13337-sb-1.custom.e2b.dev/healthz')).toHaveLength(2);
+  });
+
   it('emits null (not delete) editor keys when the editor is absent so the shallow merge cannot revive a stale editor', async () => {
     routeFetch([
       ['POST', '/sandboxes/sb-1/connect', [res(201, { sandboxID: 'sb-1', trafficAccessToken: 'traffic-rotated' })]],
@@ -285,6 +459,18 @@ describe('reattach', () => {
     const service = new E2bRuntimeService(baseConfig);
 
     await expect(service.reattach(state, readiness)).resolves.toBeNull();
+  });
+
+  it('propagates a non-gone sandbox lookup failure without connecting', async () => {
+    routeFetch([['GET', '/sandboxes/sb-1', [res(500, { message: 'lookup unavailable' })]]]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.reattach(state, readiness)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 500,
+      message: expect.stringContaining('lookup unavailable'),
+    });
+    expect(callsMatching('POST', '/connect')).toHaveLength(0);
   });
 
   it('returns null for unparsable state without touching the API', async () => {
@@ -312,6 +498,30 @@ describe('reattach', () => {
     });
     expect(callsMatching('POST', '/mcp')).toHaveLength(0);
   });
+
+  it('returns null when the sandbox expires between lookup and connect', async () => {
+    routeFetch([
+      ['POST', '/sandboxes/sb-1/connect', [res(404, { message: 'gone during connect' })]],
+      ['GET', '/sandboxes/sb-1', [res(200, { sandboxID: 'sb-1', state: 'paused' })]],
+    ]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.reattach(state, readiness)).resolves.toBeNull();
+  });
+
+  it('propagates a non-gone failure when reconnecting the existing sandbox', async () => {
+    routeFetch([
+      ['POST', '/sandboxes/sb-1/connect', [res(500, { message: 'connect unavailable' })]],
+      ['GET', '/sandboxes/sb-1', [res(200, { sandboxID: 'sb-1', state: 'paused' })]],
+    ]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.reattach(state, readiness)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 500,
+      message: expect.stringContaining('connect unavailable'),
+    });
+  });
 });
 
 describe('suspend', () => {
@@ -330,6 +540,20 @@ describe('suspend', () => {
     const service = new E2bRuntimeService(baseConfig);
 
     await expect(service.suspend(state, { retainForMs: 120_000 })).resolves.toBeUndefined();
+  });
+
+  it('preserves the pause conflict when reconciliation says the sandbox is still running', async () => {
+    routeFetch([
+      ['POST', '/sandboxes/sb-1/pause', [res(409, { message: 'pause conflict' })]],
+      ['GET', '/sandboxes/sb-1', [res(200, { sandboxID: 'sb-1', state: 'running' })]],
+    ]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.suspend(state, { retainForMs: 120_000 })).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 409,
+      message: expect.stringContaining('pause conflict'),
+    });
   });
 
   it('throws WorkspaceRuntimeGoneError on 404', async () => {
@@ -359,6 +583,15 @@ describe('renewLease', () => {
     expect(harness.fetch()).not.toHaveBeenCalled();
   });
 
+  it('is a no-op when there is no persisted sandbox handle', async () => {
+    const service = new E2bRuntimeService(baseConfig);
+
+    await service.renewLease({ sandboxId: 'missing-domain' });
+
+    expect(harness.fetch()).not.toHaveBeenCalled();
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
   it('swallows API failures and logs a warning', async () => {
     routeFetch([['POST', '/sandboxes/sb-1/timeout', [res(500, { message: 'api down' })]]]);
     const service = new E2bRuntimeService(baseConfig);
@@ -374,6 +607,30 @@ describe('destroy and endpoints', () => {
     const service = new E2bRuntimeService(baseConfig);
 
     await expect(service.destroy(state)).resolves.toBeUndefined();
+  });
+
+  it('propagates a non-gone destroy failure', async () => {
+    routeFetch([['DELETE', '/sandboxes/sb-1', [res(500, { message: 'delete unavailable' })]]]);
+    const service = new E2bRuntimeService(baseConfig);
+
+    await expect(service.destroy(state)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 500,
+      message: expect.stringContaining('delete unavailable'),
+    });
+  });
+
+  it('surfaces cleanup rejection after credentials have been removed', async () => {
+    routeFetch([['DELETE', '/sandboxes/sb-1', [res(401, { message: 'missing API key' })]]]);
+    const service = new E2bRuntimeService({ ...baseConfig, apiKey: undefined });
+
+    await expect(service.destroy(state)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 401,
+      message: expect.stringContaining('missing API key'),
+    });
+    const [, deleteInit] = callsMatching('DELETE', '/sandboxes/sb-1')[0];
+    expect(deleteInit?.headers).toEqual(expect.objectContaining({ 'X-API-Key': '' }));
   });
 
   it('returns without throwing when provider state was never populated', async () => {
@@ -396,6 +653,52 @@ describe('destroy and endpoints', () => {
       headers: { 'e2b-traffic-access-token': 'traffic-tok' },
     });
   });
+
+  it('returns null for invalid endpoints and omits empty gateway headers', () => {
+    const service = new E2bRuntimeService(baseConfig);
+
+    expect(service.resolveGatewayEndpoint({})).toBeNull();
+    expect(service.resolveGatewayEndpoint({ sandboxId: 'sb-1', domain: 'e2b.app' })).toEqual({
+      url: 'https://13338-sb-1.e2b.app',
+    });
+    expect(service.resolveEditorEndpoint({})).toBeNull();
+  });
+
+  it('merges editor-specific headers with the traffic token', () => {
+    const service = new E2bRuntimeService(baseConfig);
+
+    expect(
+      service.resolveEditorEndpoint({
+        ...state,
+        editorUrl: 'https://editor.example.test',
+        editorHeaders: { 'x-editor-session': 'editor-token' },
+      })
+    ).toEqual({
+      url: 'https://editor.example.test',
+      headers: {
+        'e2b-traffic-access-token': 'traffic-tok',
+        'x-editor-session': 'editor-token',
+      },
+    });
+    expect(
+      service.resolveEditorEndpoint({
+        sandboxId: 'sb-1',
+        domain: 'e2b.app',
+        editorUrl: 'https://editor.example.test',
+        editorHeaders: { 'x-editor-session': 'editor-token' },
+      })
+    ).toEqual({
+      url: 'https://editor.example.test',
+      headers: { 'x-editor-session': 'editor-token' },
+    });
+    expect(
+      service.resolveEditorEndpoint({
+        sandboxId: 'sb-1',
+        domain: 'e2b.app',
+        editorUrl: 'https://editor.example.test',
+      })
+    ).toEqual({ url: 'https://editor.example.test' });
+  });
 });
 
 describe('listE2bWorkspaceSources', () => {
@@ -411,6 +714,7 @@ describe('listE2bWorkspaceSources', () => {
         '/templates',
         [
           res(200, [
+            { names: ['missing-template-id'] },
             { templateID: 'tpl-2', names: ['zeta'], buildStatus: 'building' },
             {
               templateID: 'tpl-1',
@@ -437,6 +741,16 @@ describe('listE2bWorkspaceSources', () => {
       typeof listE2bWorkspaceSources
     >[0];
     await expect(listE2bWorkspaceSources(keyless)).rejects.toThrow('E2B API key is not configured.');
+  });
+
+  it('propagates template-list API failures', async () => {
+    routeFetch([['GET', '/templates', [res(503, { message: 'templates unavailable' })]]]);
+
+    await expect(listE2bWorkspaceSources(config)).rejects.toMatchObject({
+      name: 'ProviderApiError',
+      status: 503,
+      message: expect.stringContaining('templates unavailable'),
+    });
   });
 });
 
@@ -467,6 +781,22 @@ describe('testE2bConnection', () => {
     });
   });
 
+  it.each([
+    ['template id', { templateID: 'lifecycle-workspace' }],
+    ['durable alias', { templateID: 'tpl-1', aliases: ['lifecycle-workspace'] }],
+  ])('accepts a configured template selected by %s', async (_selector, template) => {
+    routeFetch([
+      ['GET', '/v2/sandboxes', [res(200, [])]],
+      ['GET', '/templates', [res(200, [template])]],
+    ]);
+
+    await expect(testE2bConnection(config)).resolves.toEqual({
+      ok: true,
+      message: 'E2B connection verified.',
+      details: { templateId: 'lifecycle-workspace' },
+    });
+  });
+
   it('reports a rejected API key', async () => {
     routeFetch([['GET', '/v2/sandboxes', [res(401, { message: 'invalid api key' })]]]);
 
@@ -488,6 +818,22 @@ describe('testE2bConnection', () => {
     });
   });
 
+  it('reports a template whose build is not ready', async () => {
+    routeFetch([
+      ['GET', '/v2/sandboxes', [res(200, [])]],
+      [
+        'GET',
+        '/templates',
+        [res(200, [{ templateID: 'tpl-1', names: ['lifecycle-workspace'], buildStatus: 'building' }])],
+      ],
+    ]);
+
+    await expect(testE2bConnection(config)).resolves.toEqual({
+      ok: false,
+      message: 'E2B template "lifecycle-workspace" is not ready (buildStatus: building).',
+    });
+  });
+
   it('scrubs the API key from error messages', async () => {
     routeFetch([['GET', '/v2/sandboxes', [res(500, { message: 'boom token e2b-test-key leaked' })]]]);
 
@@ -503,6 +849,15 @@ describe('testE2bConnection', () => {
         typeof testE2bConnection
       >[0])
     ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('API key') });
+    expect(harness.fetch()).not.toHaveBeenCalled();
+  });
+
+  it('fails fast without a configured template', async () => {
+    await expect(
+      testE2bConnection({ e2b: { ...baseConfig, templateId: undefined } } as unknown as Parameters<
+        typeof testE2bConnection
+      >[0])
+    ).resolves.toEqual({ ok: false, message: 'E2B template is not configured.' });
     expect(harness.fetch()).not.toHaveBeenCalled();
   });
 });

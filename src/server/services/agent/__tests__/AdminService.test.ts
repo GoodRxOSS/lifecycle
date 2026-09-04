@@ -28,6 +28,7 @@ const mockSerializeRun = jest.fn();
 const mockSerializeRunEvent = jest.fn();
 const mockSerializeThread = jest.fn();
 const mockSerializeCanonicalMessage = jest.fn();
+const mockListMaskedUsersForServer = jest.fn();
 
 const canonicalStartupFailure = {
   stage: 'connect_runtime',
@@ -105,6 +106,13 @@ jest.mock('server/models/UserMcpConnection', () => ({
   __esModule: true,
   default: {
     query: (...args: unknown[]) => mockUserMcpConnectionQuery(...args),
+  },
+}));
+
+jest.mock('server/services/userMcpConnection', () => ({
+  __esModule: true,
+  default: {
+    listMaskedUsersForServer: (...args: unknown[]) => mockListMaskedUsersForServer(...args),
   },
 }));
 
@@ -208,10 +216,7 @@ describe('AgentAdminService.listSessions', () => {
     ]);
 
     const threadWhereIn = jest.fn().mockReturnThis();
-    const threadSelect = jest.fn().mockResolvedValue([
-      { sessionId: 101, lastRunAt: '2026-04-05T18:00:00.000Z' },
-      { sessionId: 202, lastRunAt: '2026-04-05T19:00:00.000Z' },
-    ]);
+    const threadSelect = jest.fn().mockResolvedValue([{ sessionId: 101, lastRunAt: '2026-04-05T18:00:00.000Z' }]);
     mockThreadQuery.mockReturnValue({
       whereIn: threadWhereIn,
       select: threadSelect,
@@ -219,7 +224,7 @@ describe('AgentAdminService.listSessions', () => {
 
     const pendingWhereIn = jest.fn().mockReturnThis();
     const pendingWhere = jest.fn().mockReturnThis();
-    const pendingSelect = jest.fn().mockResolvedValue([{ sessionId: 202 }]);
+    const pendingSelect = jest.fn().mockResolvedValue([{ sessionId: 101 }]);
     mockPendingActionQuery.mockReturnValue({
       alias: jest.fn().mockReturnThis(),
       joinRelated: jest.fn().mockReturnThis(),
@@ -236,17 +241,185 @@ describe('AgentAdminService.listSessions', () => {
       expect.objectContaining({
         id: 'eda50b6f-f421-42c4-8d7e-7b38d1c7c362',
         threadCount: 1,
-        pendingActionsCount: 0,
+        pendingActionsCount: 1,
         lastRunAt: '2026-04-05T18:00:00.000Z',
         startupFailure: canonicalStartupFailure,
       }),
       expect.objectContaining({
         id: '3e81553b-b8d4-4d2b-88d0-8d5775bcffde',
-        threadCount: 1,
-        pendingActionsCount: 1,
-        lastRunAt: '2026-04-05T19:00:00.000Z',
+        threadCount: 0,
+        pendingActionsCount: 0,
+        lastRunAt: null,
       }),
     ]);
+  });
+
+  it('applies database and enriched repository filters before loading aggregate counts', async () => {
+    const rawSessions = [
+      {
+        id: 101,
+        uuid: 'session-payments',
+        status: 'active',
+        buildUuid: 'build-payments',
+        userId: 'sample-user',
+        ownerGithubUsername: 'Sample-GitHub',
+        podName: null,
+        namespace: null,
+        workspaceRepos: [],
+        selectedServices: [],
+      },
+      {
+        id: 202,
+        uuid: 'session-catalog',
+        status: 'active',
+        buildUuid: 'build-catalog',
+        userId: 'other-user',
+        ownerGithubUsername: 'other-github',
+        podName: null,
+        namespace: null,
+        workspaceRepos: [],
+        selectedServices: [],
+      },
+    ];
+    const userSearchBuilder = {
+      whereRaw: jest.fn().mockReturnThis(),
+      orWhereRaw: jest.fn().mockReturnThis(),
+    };
+    const sessionQueryBuilder = {
+      where: jest.fn((clause: unknown) => {
+        if (typeof clause === 'function') {
+          clause(userSearchBuilder);
+        }
+        return sessionQueryBuilder;
+      }),
+      orderBy: jest
+        .fn()
+        .mockImplementationOnce(() => sessionQueryBuilder)
+        .mockImplementationOnce(() => Promise.resolve(rawSessions)),
+    };
+    mockSessionQuery.mockReturnValue(sessionQueryBuilder);
+    mockEnrichSessions.mockResolvedValue([
+      {
+        ...rawSessions[0],
+        repo: 'example-org/api',
+        primaryRepo: 'example-org/api',
+        services: ['payments-worker'],
+        startupFailure: null,
+      },
+      {
+        ...rawSessions[1],
+        repo: 'example-org/catalog',
+        primaryRepo: 'example-org/catalog',
+        services: ['catalog-worker'],
+        startupFailure: null,
+      },
+    ]);
+
+    const threadWhereIn = jest.fn().mockReturnThis();
+    mockThreadQuery.mockReturnValue({
+      whereIn: threadWhereIn,
+      select: jest.fn().mockResolvedValue([
+        { sessionId: 101, lastRunAt: null },
+        { sessionId: 101, lastRunAt: '2026-04-05T18:00:00.000Z' },
+        { sessionId: 101, lastRunAt: '2026-04-05T20:00:00.000Z' },
+        { sessionId: 101, lastRunAt: '2026-04-05T19:00:00.000Z' },
+      ]),
+    });
+    const pendingWhereIn = jest.fn().mockReturnThis();
+    mockPendingActionQuery.mockReturnValue({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      whereIn: pendingWhereIn,
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([{ sessionId: 101 }, { sessionId: 101 }]),
+    });
+
+    const result = await AgentAdminService.listSessions({
+      status: 'active',
+      buildUuid: 'build-payments',
+      user: ' SAMPLE ',
+      repo: ' PAYMENTS ',
+      page: 1,
+      limit: 10,
+    });
+
+    expect(sessionQueryBuilder.where).toHaveBeenCalledWith({ status: 'active' });
+    expect(sessionQueryBuilder.where).toHaveBeenCalledWith({ buildUuid: 'build-payments' });
+    expect(userSearchBuilder.whereRaw).toHaveBeenCalledWith('LOWER("userId") like ?', ['%sample%']);
+    expect(userSearchBuilder.orWhereRaw).toHaveBeenCalledWith('LOWER(COALESCE("ownerGithubUsername", \'\')) like ?', [
+      '%sample%',
+    ]);
+    expect(threadWhereIn).toHaveBeenCalledWith('sessionId', [101]);
+    expect(pendingWhereIn).toHaveBeenCalledWith('thread.sessionId', [101]);
+    expect(result).toEqual({
+      data: [
+        expect.objectContaining({
+          id: 'session-payments',
+          threadCount: 4,
+          pendingActionsCount: 2,
+          lastRunAt: '2026-04-05T20:00:00.000Z',
+          editorUrl: null,
+        }),
+      ],
+      metadata: {
+        pagination: {
+          current: 1,
+          total: 1,
+          items: 1,
+          limit: 10,
+        },
+      },
+    });
+  });
+
+  it('returns normalized empty pagination without issuing aggregate queries when repository filtering removes every session', async () => {
+    const rawSession = {
+      id: 101,
+      uuid: 'session-1',
+      status: 'active',
+      workspaceRepos: [],
+      selectedServices: [],
+    };
+    const sessionQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest
+        .fn()
+        .mockImplementationOnce(() => sessionQueryBuilder)
+        .mockImplementationOnce(() => Promise.resolve([rawSession])),
+    };
+    mockSessionQuery.mockReturnValue(sessionQueryBuilder);
+    mockEnrichSessions.mockResolvedValue([
+      {
+        ...rawSession,
+        repo: 'example-org/catalog',
+        primaryRepo: 'example-org/catalog',
+        services: [],
+        startupFailure: null,
+      },
+    ]);
+
+    const result = await AgentAdminService.listSessions({
+      status: 'all',
+      user: '   ',
+      repo: 'payments',
+      page: 0,
+      limit: -2,
+    });
+
+    expect(sessionQueryBuilder.where).not.toHaveBeenCalled();
+    expect(mockThreadQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      data: [],
+      metadata: {
+        pagination: {
+          current: 1,
+          total: 1,
+          items: 0,
+          limit: 25,
+        },
+      },
+    });
   });
 });
 
@@ -272,6 +445,74 @@ describe('AgentAdminService.getSession', () => {
           }
         : null,
     }));
+  });
+
+  it('fails fast when the requested session does not exist', async () => {
+    const findOne = jest.fn().mockResolvedValue(null);
+    mockSessionQuery.mockReturnValueOnce({ findOne });
+
+    await expect(AgentAdminService.getSession('missing-session')).rejects.toThrow('Agent session not found');
+
+    expect(findOne).toHaveBeenCalledWith({ uuid: 'missing-session' });
+    expect(mockEnrichSessions).not.toHaveBeenCalled();
+    expect(mockThreadQuery).not.toHaveBeenCalled();
+    expect(mockMessageQuery).not.toHaveBeenCalled();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty summary without aggregate queries when a session has no active threads', async () => {
+    const rawSession = {
+      id: 17,
+      uuid: 'session-empty',
+      status: 'active',
+      sessionKind: 'environment',
+      buildUuid: null,
+      buildKind: 'environment',
+      userId: 'sample-user',
+      ownerGithubUsername: null,
+      podName: null,
+      namespace: null,
+      workspaceRepos: [],
+      selectedServices: [],
+      createdAt: '2026-05-01T00:00:00.000Z',
+      updatedAt: '2026-05-02T00:00:00.000Z',
+    };
+    mockSessionQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue(rawSession),
+    });
+    mockEnrichSessions.mockResolvedValueOnce([
+      {
+        ...rawSession,
+        repo: null,
+        primaryRepo: null,
+        services: [],
+        startupFailure: null,
+      },
+    ]);
+    mockThreadQuery.mockReturnValueOnce({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+
+    const result = await AgentAdminService.getSession('session-empty');
+
+    expect(result.threads).toEqual([]);
+    expect(result.session).toEqual(
+      expect.objectContaining({
+        id: 'session-empty',
+        threadCount: 0,
+        pendingActionsCount: 0,
+        lastRunAt: null,
+        editorUrl: null,
+      })
+    );
+    expect(mockMessageQuery).not.toHaveBeenCalled();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(mockSerializeThread).not.toHaveBeenCalled();
+    expect(mockSerializeRun).not.toHaveBeenCalled();
   });
 
   it('summarizes each non-archived thread with independent counts and latest run context', async () => {
@@ -313,6 +554,12 @@ describe('AgentAdminService.getSession', () => {
           uuid: 'thread-fresh-debug',
           title: 'Fresh Debug diagnosis',
           lastRunAt: '2026-05-09T18:00:00.000Z',
+        },
+        {
+          id: 11,
+          uuid: 'thread-no-runs',
+          title: 'New conversation',
+          lastRunAt: null,
         },
       ]),
     };
@@ -384,11 +631,18 @@ describe('AgentAdminService.getSession', () => {
           runPlan: { debug: { intent: 'diagnose' } },
         }),
       }),
+      expect.objectContaining({
+        id: 'thread-no-runs',
+        messageCount: 0,
+        runCount: 0,
+        pendingActionsCount: 0,
+        latestRun: null,
+      }),
     ]);
     expect(result.session).toEqual(
       expect.objectContaining({
         id: 'session-1',
-        threadCount: 2,
+        threadCount: 3,
         pendingActionsCount: 1,
         lastRunAt: '2026-05-09T18:00:00.000Z',
       })
@@ -437,7 +691,13 @@ describe('AgentAdminService.listMcpServerCoverage', () => {
           authConfig: { mode: 'none' },
           enabled: true,
           timeout: 5000,
-          sharedDiscoveredTools: [],
+          sharedDiscoveredTools: [
+            {
+              name: 'readSample',
+              inputSchema: {},
+              annotations: { readOnlyHint: true },
+            },
+          ],
           createdAt: '2026-04-20T00:00:00.000Z',
           updatedAt: '2026-04-21T00:00:00.000Z',
         },
@@ -503,6 +763,14 @@ describe('AgentAdminService.listMcpServerCoverage', () => {
         },
         userConnectionCount: 1,
         latestUserValidatedAt: '2026-04-22T00:00:00.000Z',
+        connectionRequired: false,
+        sharedDiscoveredTools: [
+          {
+            name: 'readSample',
+            inputSchema: {},
+            annotations: { readOnlyHint: true },
+          },
+        ],
       }),
       expect.objectContaining({
         slug: 'sample-cli',
@@ -520,10 +788,194 @@ describe('AgentAdminService.listMcpServerCoverage', () => {
       }),
     ]);
   });
+
+  it('returns early without loading user connections when no MCP configs exist in the scope', async () => {
+    const configQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    };
+    mockMcpServerConfigQuery.mockReturnValue(configQueryBuilder);
+
+    const result = await AgentAdminService.listMcpServerCoverage('team-sample');
+
+    expect(result).toEqual([]);
+    expect(configQueryBuilder.where).toHaveBeenCalledWith({ scope: 'team-sample' });
+    expect(mockUserMcpConnectionQuery).not.toHaveBeenCalled();
+  });
+
+  it('hides shared tools for connection-required MCPs and groups scoped user coverage', async () => {
+    const configQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        {
+          slug: 'private-sample',
+          name: 'Private Sample',
+          description: 'Requires credentials from each user.',
+          scope: 'team-sample',
+          preset: 'custom',
+          transport: {
+            type: 'http',
+            url: 'https://mcp.example.test',
+          },
+          sharedConfig: {},
+          authConfig: {
+            mode: 'user-fields',
+            schema: {
+              fields: [{ key: 'token', label: 'Token', required: true, inputType: 'password' }],
+              bindings: [{ target: 'header', key: 'Authorization', fieldKey: 'token', format: 'bearer' }],
+            },
+          },
+          enabled: true,
+          timeout: 5000,
+          sharedDiscoveredTools: [
+            {
+              name: 'readPrivateSample',
+              inputSchema: {},
+              annotations: { readOnlyHint: true },
+            },
+          ],
+          createdAt: '2026-04-20T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+        },
+      ]),
+    };
+    mockMcpServerConfigQuery.mockReturnValue(configQueryBuilder);
+    const connectionQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([
+        { slug: 'private-sample', validatedAt: '2026-04-23T00:00:00.000Z' },
+        { slug: 'private-sample', validatedAt: '2026-04-22T00:00:00.000Z' },
+      ]),
+    };
+    mockUserMcpConnectionQuery.mockReturnValue(connectionQueryBuilder);
+
+    const result = await AgentAdminService.listMcpServerCoverage('team-sample');
+
+    expect(connectionQueryBuilder.where).toHaveBeenCalledWith({ scope: 'team-sample' });
+    expect(result).toEqual([
+      expect.objectContaining({
+        slug: 'private-sample',
+        scope: 'team-sample',
+        connectionRequired: true,
+        sharedDiscoveredTools: [],
+        userConnectionCount: 2,
+        latestUserValidatedAt: '2026-04-23T00:00:00.000Z',
+        authConfig: expect.objectContaining({ mode: 'user-fields' }),
+      }),
+    ]);
+  });
+});
+
+describe('AgentAdminService.listMcpServerUsers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('fails without loading user connection state when the scoped MCP config does not exist', async () => {
+    const configQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    mockMcpServerConfigQuery.mockReturnValue(configQueryBuilder);
+
+    await expect(AgentAdminService.listMcpServerUsers('missing-server', 'team-sample')).rejects.toThrow(
+      'MCP server config not found'
+    );
+
+    expect(configQueryBuilder.where).toHaveBeenCalledWith({ slug: 'missing-server', scope: 'team-sample' });
+    expect(configQueryBuilder.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(mockListMaskedUsersForServer).not.toHaveBeenCalled();
+  });
+
+  it('loads masked users with the current definition fingerprint and normalizes nullable timestamps', async () => {
+    const config = {
+      slug: 'private-sample',
+      scope: 'team-sample',
+      preset: 'custom',
+      transport: {
+        type: 'http',
+        url: 'https://mcp.example.test',
+      },
+      sharedConfig: {
+        headers: { 'X-Tenant': 'sample' },
+      },
+      authConfig: {
+        mode: 'oauth',
+        provider: 'generic-oauth2.1',
+        clientName: 'Sample Client',
+      },
+    };
+    const configQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(config),
+    };
+    mockMcpServerConfigQuery.mockReturnValue(configQueryBuilder);
+    mockListMaskedUsersForServer.mockResolvedValue([
+      {
+        userId: 'user-1',
+        ownerGithubUsername: 'octocat',
+        authMode: 'oauth',
+        stale: false,
+        configuredFieldKeys: [],
+        discoveredToolCount: 3,
+        validationError: null,
+        validatedAt: '2026-04-23T00:00:00.000Z',
+        updatedAt: '2026-04-24T00:00:00.000Z',
+      },
+      {
+        userId: 'user-2',
+        ownerGithubUsername: null,
+        authMode: 'none',
+        stale: true,
+        configuredFieldKeys: ['token'],
+        discoveredToolCount: 0,
+        validationError: 'Connection needs refresh',
+        validatedAt: null,
+        updatedAt: null,
+      },
+    ]);
+
+    const result = await AgentAdminService.listMcpServerUsers('private-sample', 'team-sample');
+
+    expect(mockListMaskedUsersForServer).toHaveBeenCalledWith(
+      'team-sample',
+      'private-sample',
+      expect.stringMatching(/^[a-f0-9]{40}$/)
+    );
+    expect(result).toEqual([
+      {
+        userId: 'user-1',
+        githubUsername: 'octocat',
+        authMode: 'oauth',
+        stale: false,
+        configuredFieldKeys: [],
+        discoveredToolCount: 3,
+        validationError: null,
+        validatedAt: '2026-04-23T00:00:00.000Z',
+        updatedAt: '2026-04-24T00:00:00.000Z',
+      },
+      {
+        userId: 'user-2',
+        githubUsername: null,
+        authMode: 'none',
+        stale: true,
+        configuredFieldKeys: ['token'],
+        discoveredToolCount: 0,
+        validationError: 'Connection needs refresh',
+        validatedAt: null,
+        updatedAt: null,
+      },
+    ]);
+  });
 });
 
 describe('AgentAdminService.getThreadConversation', () => {
   beforeEach(() => {
+    jest.restoreAllMocks();
     jest.clearAllMocks();
     mockSerializeThread.mockImplementation((thread, sessionId) => ({
       id: thread.uuid,
@@ -547,15 +999,119 @@ describe('AgentAdminService.getThreadConversation', () => {
       version: 1,
       payload: event.payload,
     }));
-    mockSerializeCanonicalMessage.mockImplementation((message, threadUuid, runUuid) => ({
-      id: message.uuid,
-      clientMessageId: message.clientMessageId || null,
-      threadId: threadUuid,
-      runId: runUuid,
-      role: message.role,
-      parts: message.parts,
-      createdAt: message.createdAt || null,
-    }));
+    mockSerializeCanonicalMessage.mockImplementation((message, threadUuid, runUuid) => {
+      if (message.uuid === 'message-invalid') {
+        throw new Error('Malformed canonical message');
+      }
+      return {
+        id: message.uuid,
+        clientMessageId: message.clientMessageId || null,
+        threadId: threadUuid,
+        runId: runUuid,
+        role: message.role,
+        parts: message.parts,
+        createdAt: message.createdAt || null,
+      };
+    });
+  });
+
+  it('fails fast when the requested thread does not exist', async () => {
+    const findOne = jest.fn().mockResolvedValue(null);
+    mockThreadQuery.mockReturnValueOnce({ findOne });
+
+    await expect(AgentAdminService.getThreadConversation('missing-thread')).rejects.toThrow('Agent thread not found');
+
+    expect(findOne).toHaveBeenCalledWith({ uuid: 'missing-thread' });
+    expect(mockSessionQuery).not.toHaveBeenCalled();
+    expect(mockMessageQuery).not.toHaveBeenCalled();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(mockToolExecutionQuery).not.toHaveBeenCalled();
+    expect(mockRunEventQuery).not.toHaveBeenCalled();
+  });
+
+  it('fails before loading conversation records when the owning session does not exist', async () => {
+    mockThreadQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue({
+        id: 7,
+        uuid: 'thread-1',
+        sessionId: 17,
+      }),
+    });
+    const findById = jest.fn().mockResolvedValue(null);
+    mockSessionQuery.mockReturnValueOnce({ findById });
+    const getSessionSpy = jest.spyOn(AgentAdminService, 'getSession');
+
+    await expect(AgentAdminService.getThreadConversation('thread-1')).rejects.toThrow('Agent session not found');
+
+    expect(findById).toHaveBeenCalledWith(17);
+    expect(getSessionSpy).not.toHaveBeenCalled();
+    expect(mockMessageQuery).not.toHaveBeenCalled();
+    expect(mockRunQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(mockToolExecutionQuery).not.toHaveBeenCalled();
+    expect(mockRunEventQuery).not.toHaveBeenCalled();
+  });
+
+  it('rejects archived threads that are absent from the active session summary', async () => {
+    mockThreadQuery.mockReturnValueOnce({
+      findOne: jest.fn().mockResolvedValue({
+        id: 7,
+        uuid: 'thread-archived',
+        sessionId: 17,
+      }),
+    });
+    mockSessionQuery.mockReturnValueOnce({
+      findById: jest.fn().mockResolvedValue({
+        id: 17,
+        uuid: 'session-1',
+      }),
+    });
+    jest.spyOn(AgentAdminService, 'getSession').mockResolvedValueOnce({
+      session: { id: 'session-1' },
+      threads: [],
+    } as any);
+    mockMessageQuery.mockReturnValueOnce({
+      alias: jest.fn().mockReturnThis(),
+      leftJoinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+    mockRunQuery.mockReturnValueOnce({
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+    mockPendingActionQuery.mockReturnValueOnce({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+    mockToolExecutionQuery.mockReturnValueOnce({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      leftJoinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockResolvedValue([]),
+    });
+    const eventQuery = {
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      orderBy: jest.fn(),
+    };
+    eventQuery.orderBy.mockImplementationOnce(() => eventQuery).mockResolvedValueOnce([]);
+    mockRunEventQuery.mockReturnValueOnce(eventQuery);
+
+    await expect(AgentAdminService.getThreadConversation('thread-archived')).rejects.toThrow('Agent thread not found');
+
+    expect(mockSerializeCanonicalMessage).not.toHaveBeenCalled();
+    expect(mockSerializeRun).not.toHaveBeenCalled();
+    expect(mockSerializeRunEvent).not.toHaveBeenCalled();
   });
 
   it('returns canonical messages, runs, events, pending actions, and tool executions for admin replay', async () => {
@@ -616,6 +1172,20 @@ describe('AgentAdminService.getThreadConversation', () => {
           ],
           runUuid: 'run-1',
           createdAt: '2026-04-11T00:02:00.000Z',
+        },
+        {
+          uuid: 'message-3',
+          clientMessageId: null,
+          role: 'system',
+          parts: [{ type: 'text', text: 'System note' }],
+          createdAt: '2026-04-11T00:03:00.000Z',
+        },
+        {
+          uuid: 'message-invalid',
+          clientMessageId: null,
+          role: 'assistant',
+          parts: [{ type: 'unsupported' }],
+          createdAt: '2026-04-11T00:04:00.000Z',
         },
       ]),
     });
@@ -685,6 +1255,26 @@ describe('AgentAdminService.getThreadConversation', () => {
           runUuid: 'run-1',
           pendingActionUuid: 'action-1',
         },
+        {
+          uuid: 'tool-2',
+          source: 'mcp',
+          serverSlug: null,
+          toolName: 'read_context',
+          toolCallId: null,
+          args: {},
+          result: { content: 'ok' },
+          status: 'completed',
+          safetyLevel: null,
+          approved: null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          createdAt: '2026-04-11T00:03:00.000Z',
+          updatedAt: '2026-04-11T00:03:00.000Z',
+          threadUuid: 'thread-1',
+          runUuid: 'run-1',
+          pendingActionUuid: null,
+        },
       ]),
     });
     const eventQuery: any = {
@@ -741,7 +1331,21 @@ describe('AgentAdminService.getThreadConversation', () => {
         ],
         createdAt: '2026-04-11T00:02:00.000Z',
       },
+      {
+        id: 'message-3',
+        clientMessageId: null,
+        threadId: 'thread-1',
+        runId: null,
+        role: 'system',
+        parts: [{ type: 'text', text: 'System note' }],
+        createdAt: '2026-04-11T00:03:00.000Z',
+      },
     ]);
+    expect(mockSerializeCanonicalMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ uuid: 'message-invalid' }),
+      'thread-1',
+      null
+    );
     expect(String((result.messages[1].parts[0] as { text?: string }).text)).toContain(
       'Lifecycle picked up the repair commit'
     );
@@ -784,6 +1388,15 @@ describe('AgentAdminService.getThreadConversation', () => {
         runId: 'run-1',
         pendingActionId: 'action-1',
         toolCallId: 'tool-call-1',
+      }),
+      expect.objectContaining({
+        id: 'tool-2',
+        threadId: 'thread-1',
+        runId: 'run-1',
+        pendingActionId: null,
+        toolCallId: null,
+        args: {},
+        result: { content: 'ok' },
       }),
     ]);
     expect(result.messages[0]).not.toHaveProperty('metadata');

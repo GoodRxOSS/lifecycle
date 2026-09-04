@@ -34,6 +34,10 @@ describe('deduplicateConsecutiveLines', () => {
   it('collapses runs of identical lines with a count', () => {
     expect(deduplicateConsecutiveLines(['a', 'a', 'a', 'b'])).toEqual(['[repeated 3x] a', 'b']);
   });
+
+  it('preserves distinct lines and collapses a repeated final run', () => {
+    expect(deduplicateConsecutiveLines(['a', 'b', 'b'])).toEqual(['a', '[repeated 2x] b']);
+  });
 });
 
 describe('searchLogLines', () => {
@@ -90,9 +94,32 @@ describe('searchLogLines', () => {
     expect(view.rendered.length).toBeLessThan(5000);
   });
 
+  it('omits only the giant-line window markers that are unnecessary at each boundary', () => {
+    const atStart = searchLogLines([`NEEDLE${'a'.repeat(5000)}`], 'NEEDLE');
+    const atEnd = searchLogLines([`${'a'.repeat(5000)}NEEDLE`], 'NEEDLE');
+
+    expect(atStart.rendered).toContain('[chars 1–1000 of 5006] NEEDLE');
+    expect(atStart.rendered).toContain('…');
+    expect(atEnd.rendered).toContain('NEEDLE');
+    expect(atEnd.rendered.endsWith('…')).toBe(false);
+  });
+
   it('throws on an invalid or oversized pattern', () => {
     expect(() => searchLogLines(['a'], '([')).toThrow();
     expect(() => searchLogLines(['a'], 'x'.repeat(300))).toThrow('too long');
+  });
+
+  it('reports a time-boxed regex scan before reading the first line', () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValueOnce(100).mockReturnValue(102);
+    try {
+      expect(searchLogLines(['error'], 'error', { timeBoxMs: 1 })).toMatchObject({
+        timedOut: true,
+        scannedLines: 0,
+        totalMatches: 0,
+      });
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 
@@ -133,6 +160,29 @@ describe('searchLogLinesLiteral', () => {
   it('enforces the literal query bound', () => {
     expect(() => searchLogLinesLiteral(['a'], '')).toThrow('required');
     expect(() => searchLogLinesLiteral(['a'], 'x'.repeat(257))).toThrow('too long');
+  });
+
+  it('reports a time-boxed literal scan before reading the first line', () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValueOnce(100).mockReturnValue(102);
+    try {
+      expect(searchLogLinesLiteral(['error'], 'error', { timeBoxMs: 1 })).toMatchObject({
+        timedOut: true,
+        scannedLines: 0,
+        scannedChars: 0,
+        totalMatches: 0,
+      });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('stops before the next line once the literal scan budget is exhausted exactly', () => {
+    expect(searchLogLinesLiteral(['a', 'needle'], 'needle', { maxScanChars: 1 })).toMatchObject({
+      scanCapped: true,
+      scannedLines: 1,
+      scannedChars: 1,
+      totalMatches: 0,
+    });
   });
 });
 

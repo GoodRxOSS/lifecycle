@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
-import { buildkitBuild, NativeBuildOptions, generateSecretArgsScript } from '../engines';
+import { buildkitBuild, buildWithEngine, NativeBuildOptions, generateSecretArgsScript } from '../engines';
 import { shellPromise } from '../../shell';
+import { getLogger } from '../../logger';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
 import GlobalConfigService from '../../../services/globalConfig';
+import { getLogArchivalService } from '../../../services/logArchival';
 import { createNativeBuildRegistryAuthSecret, deleteNativeBuildRegistryAuthSecret } from '../registryAuth';
+
+const mockArchiveLogs = jest.fn();
 
 // Mock dependencies
 jest.mock('../../shell');
@@ -36,6 +40,9 @@ jest.mock('../utils', () => {
   };
 });
 jest.mock('../../../services/globalConfig');
+jest.mock('../../../services/logArchival', () => ({
+  getLogArchivalService: jest.fn(),
+}));
 jest.mock('../registryAuth', () => {
   const actual = jest.requireActual('../registryAuth');
   return {
@@ -68,6 +75,11 @@ jest.mock('../../logger', () => {
   return {
     getLogger: jest.fn(() => mockLogger),
   };
+});
+
+beforeEach(() => {
+  mockArchiveLogs.mockReset().mockResolvedValue(undefined);
+  (getLogArchivalService as jest.Mock).mockReset().mockReturnValue({ archiveLogs: mockArchiveLogs });
 });
 
 describe('buildkitBuild', () => {
@@ -371,6 +383,252 @@ describe('buildkitBuild', () => {
     // Check annotations
     expect(fullCommand).toContain('lfc/dockerfile: "Dockerfile"');
     expect(fullCommand).toContain('lfc/ecr-repo: "test-repo"');
+  });
+
+  it('generates a static build job from boundary inputs through the public orchestrator', async () => {
+    const staticDeploy = {
+      deployable: { name: 'test-service' },
+      $fetchGraph: jest.fn(),
+      build: { isStatic: true },
+    } as any;
+
+    const result = await buildWithEngine(
+      staticDeploy,
+      {
+        ...mockOptions,
+        dockerfilePath: '',
+        repo: 'repo-only',
+        secretRefs: ['runtime-secrets', 'shared-secrets'],
+      },
+      'buildkit'
+    );
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+
+    expect(result.success).toBe(true);
+    expect(staticDeploy.$fetchGraph).toHaveBeenCalledWith('build');
+    expect(fullCommand).toContain('git init /workspace/repo-repo-only');
+    expect(fullCommand).toContain('filename=Dockerfile');
+    expect(fullCommand).toContain('lfc/dockerfile: "Dockerfile"');
+    expect(fullCommand).toContain('ttlSecondsAfterFinished: 86400');
+    expect(fullCommand).toContain('name: "runtime-secrets"');
+    expect(fullCommand).toContain('name: "shared-secrets"');
+    expect(fullCommand.match(/optional: false/g)).toHaveLength(2);
+  });
+
+  it('omits static-build retention when the fetched build relation is absent', async () => {
+    const deployWithoutBuild = {
+      deployable: { name: 'test-service' },
+      $fetchGraph: jest.fn(),
+    } as any;
+
+    await buildWithEngine(deployWithoutBuild, mockOptions, 'buildkit');
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    expect(deployWithoutBuild.$fetchGraph).toHaveBeenCalledWith('build');
+    expect(applyCall[0]).not.toContain('ttlSecondsAfterFinished');
+  });
+
+  it.each([
+    {
+      source: 'global configuration',
+      globalConfig: { buildDefaults: { jobTimeout: 975 } },
+      expectedTimeout: 975,
+    },
+    {
+      source: 'the built-in default',
+      globalConfig: {},
+      expectedTimeout: 2100,
+    },
+  ])('uses the job timeout from $source when an option is absent', async ({ globalConfig, expectedTimeout }) => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue(globalConfig),
+    });
+
+    await buildkitBuild(mockDeploy, { ...mockOptions, jobTimeout: undefined });
+
+    expect(waitForJobAndGetLogs).toHaveBeenCalledWith(
+      expect.stringMatching(/^test-service-abc123-build-/),
+      'env-test-123',
+      expectedTimeout
+    );
+  });
+
+  it.each([
+    {
+      source: 'the environment',
+      environmentEndpoint: 'tcp://buildkit-from-environment.example:1234',
+      expectedEndpoint: 'tcp://buildkit-from-environment.example:1234',
+    },
+    {
+      source: 'the built-in default',
+      environmentEndpoint: undefined,
+      expectedEndpoint: 'tcp://lifecycle-buildkit.lifecycle-app.svc.cluster.local:1234',
+    },
+  ])(
+    'uses the BuildKit endpoint from $source when database configuration is absent',
+    async ({ environmentEndpoint, expectedEndpoint }) => {
+      const previousEndpoint = process.env.BUILDKIT_HOST;
+      if (environmentEndpoint === undefined) {
+        delete process.env.BUILDKIT_HOST;
+      } else {
+        process.env.BUILDKIT_HOST = environmentEndpoint;
+      }
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: jest.fn().mockResolvedValue({}),
+      });
+
+      try {
+        await buildkitBuild(mockDeploy, mockOptions);
+      } finally {
+        if (previousEndpoint === undefined) {
+          delete process.env.BUILDKIT_HOST;
+        } else {
+          process.env.BUILDKIT_HOST = previousEndpoint;
+        }
+      }
+
+      const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+      expect(applyCall[0]).toContain(`value: "${expectedEndpoint}"`);
+    }
+  );
+
+  it('uses the default AWS region when the process environment does not provide one', async () => {
+    const previousRegion = process.env.AWS_REGION;
+    delete process.env.AWS_REGION;
+
+    try {
+      await buildkitBuild(mockDeploy, mockOptions);
+    } finally {
+      if (previousRegion === undefined) {
+        delete process.env.AWS_REGION;
+      } else {
+        process.env.AWS_REGION = previousRegion;
+      }
+    }
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    expect(applyCall[0].match(/name: "AWS_REGION"\n\s+value: "us-west-2"/g)).toHaveLength(1);
+  });
+
+  it.each([
+    { success: true, expectedStatus: 'Complete' },
+    { success: false, expectedStatus: 'Failed' },
+  ])('archives completed job logs with status $expectedStatus', async ({ success, expectedStatus }) => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        ...mockGlobalConfig,
+        logArchival: { enabled: true },
+      }),
+    });
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'captured build output',
+      success,
+      startedAt: '2026-08-27T08:00:00.000Z',
+      completedAt: '2026-08-27T08:01:30.000Z',
+      duration: 90,
+    });
+
+    const result = await buildkitBuild(mockDeploy, mockOptions);
+
+    expect(result).toEqual({
+      success,
+      logs: 'captured build output',
+      jobName: expect.stringMatching(/^test-service-abc123-build-/),
+    });
+    expect(getLogArchivalService).toHaveBeenCalledTimes(1);
+    expect(mockArchiveLogs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobName: result.jobName,
+        jobType: 'build',
+        serviceName: 'test-service',
+        namespace: 'env-test-123',
+        status: expectedStatus,
+        sha: 'abc123def456789',
+        deployUuid: 'test-service-abc123',
+        buildUuid: '456',
+        engine: 'buildkit',
+        startedAt: '2026-08-27T08:00:00.000Z',
+        completedAt: '2026-08-27T08:01:30.000Z',
+        duration: 90,
+        archivedAt: expect.any(String),
+      }),
+      'captured build output'
+    );
+  });
+
+  it('returns the successful build result when log archival fails', async () => {
+    const archivalError = new Error('archive store unavailable');
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        ...mockGlobalConfig,
+        logArchival: { enabled: true },
+      }),
+    });
+    mockArchiveLogs.mockRejectedValue(archivalError);
+
+    const result = await buildkitBuild(mockDeploy, mockOptions);
+
+    expect(result.success).toBe(true);
+    const logger = (getLogger as jest.Mock)();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { error: archivalError },
+      expect.stringContaining('failed to archive build logs')
+    );
+  });
+
+  it('archives a build failure when log retrieval and status inspection both fail', async () => {
+    const logError = new Error('log stream unavailable');
+    const statusError = new Error('Kubernetes API unavailable');
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        ...mockGlobalConfig,
+        logArchival: { enabled: true },
+      }),
+    });
+    (waitForJobAndGetLogs as jest.Mock).mockRejectedValue(logError);
+    (shellPromise as jest.Mock).mockResolvedValueOnce('').mockRejectedValueOnce(statusError);
+
+    const result = await buildkitBuild(mockDeploy, mockOptions);
+
+    expect(result).toEqual({
+      success: false,
+      logs: 'Build failed: log stream unavailable',
+      jobName: expect.stringMatching(/^test-service-abc123-build-/),
+    });
+    expect(mockArchiveLogs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobName: result.jobName,
+        status: 'Failed',
+        archivedAt: expect.any(String),
+      }),
+      'Build failed: log stream unavailable'
+    );
+    const logger = (getLogger as jest.Mock)();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('status check failed'));
+  });
+
+  it('returns the build failure when archiving its error log also fails', async () => {
+    const archivalError = new Error('archive store unavailable');
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        ...mockGlobalConfig,
+        logArchival: { enabled: true },
+      }),
+    });
+    (waitForJobAndGetLogs as jest.Mock).mockRejectedValue(new Error('build logs unavailable'));
+    mockArchiveLogs.mockRejectedValue(archivalError);
+
+    const result = await buildkitBuild(mockDeploy, mockOptions);
+
+    expect(result.success).toBe(false);
+    expect(result.logs).toBe('Build failed: build logs unavailable');
+    const logger = (getLogger as jest.Mock)();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { error: archivalError },
+      expect.stringContaining('failed to archive build error logs')
+    );
   });
 });
 

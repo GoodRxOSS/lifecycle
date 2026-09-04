@@ -14,6 +14,27 @@
  * limitations under the License.
  */
 
+const mockRecordAuthAuditEvent = jest.fn();
+const mockLoggerError = jest.fn();
+const mockLoggerWarn = jest.fn();
+
+jest.mock('server/services/authAudit', () => ({
+  recordAuthAuditEvent: (...args: unknown[]) => mockRecordAuthAuditEvent(...args),
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: () => ({ error: mockLoggerError, warn: mockLoggerWarn }),
+}));
+
+jest.mock('server/lib/metrics', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    increment: jest.fn(),
+    timing: jest.fn(),
+    gauge: jest.fn(),
+  })),
+}));
+
 import type {
   McpCapabilityId,
   McpRuntimePolicy,
@@ -21,6 +42,7 @@ import type {
   McpToolDefinition,
   McpToolInvocationContext,
 } from '../contracts';
+import { McpExecutionError } from '../errors';
 import { buildMcpAdminCatalog, McpToolRegistry } from '../registry';
 import { successObjectSchema } from '../schemaValidator';
 
@@ -80,7 +102,17 @@ const context: McpToolInvocationContext = {
   signal: new AbortController().signal,
 };
 
+beforeEach(() => {
+  jest.clearAllMocks();
+});
+
 function setup() {
+  const metrics = {
+    increment: jest.fn(),
+    timing: jest.fn(),
+    gauge: jest.fn(),
+  };
+  const audit = { record: jest.fn() };
   const registry = new McpToolRegistry(
     [
       definition('get_environment', 'understand-environments', 'read'),
@@ -88,14 +120,10 @@ function setup() {
       definition('deploy_environment', 'manage-environments', 'change'),
       definition('get_site', 'view-hosted-sites', 'read'),
     ],
-    {
-      increment: jest.fn(),
-      timing: jest.fn(),
-      gauge: jest.fn(),
-    },
-    { record: jest.fn() }
+    metrics,
+    audit
   );
-  return { registry };
+  return { registry, metrics, audit };
 }
 
 it('uses the registered definitions as the admin capability catalog', () => {
@@ -121,7 +149,7 @@ it('uses the registered definitions as the admin capability catalog', () => {
 });
 
 it('returns an empty catalog and rejects calls while MCP is disabled', async () => {
-  const { registry } = setup();
+  const { registry, metrics, audit } = setup();
   const policy = { ...enabled, enabled: false };
   expect(registry.listTools(policy).tools).toEqual([]);
   const result = await registry.callTool('get_environment', {}, context, policy);
@@ -130,6 +158,8 @@ it('returns an empty catalog and rejects calls while MCP is disabled', async () 
       error: expect.objectContaining({ code: 'toolset_disabled' }),
     })
   );
+  expect(metrics.increment).not.toHaveBeenCalled();
+  expect(audit.record).not.toHaveBeenCalled();
 });
 
 it('omits and rejects change tools when allowChanges is false', async () => {
@@ -166,6 +196,264 @@ it('runs the handler only after coarse admission and OAuth role validation', asy
   const result = await registry.callTool('get_environment', {}, context, enabled);
   expect(handler).toHaveBeenCalledTimes(1);
   expect(result.structuredContent).toEqual({ value: 'ok', requestId: 'request-1' });
+});
+
+it('rejects unknown tool names with a bounded printable diagnostic', async () => {
+  const { registry } = setup();
+  const untrustedName = `unknown\nπ${'x'.repeat(200)}`;
+
+  await expect(registry.callTool(untrustedName, {}, context, enabled)).rejects.toMatchObject({
+    code: -32602,
+    message: `MCP error -32602: Unknown tool: unknown??${'x'.repeat(119)}`,
+  });
+});
+
+it('returns a validation error before authorization or handler execution', async () => {
+  const handler = jest.fn(async () => ({ value: 'ok' }));
+  const metrics = { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() };
+  const audit = { record: jest.fn() };
+  const registry = new McpToolRegistry(
+    [definition('deploy_environment', 'manage-environments', 'change', handler)],
+    metrics,
+    audit
+  );
+
+  const result = await registry.callTool('deploy_environment', { unexpected: true }, context, enabled);
+
+  expect(parseFirstText(result)).toEqual(
+    expect.objectContaining({ error: expect.objectContaining({ code: 'invalid_body', nextAction: 'fix_input' }) })
+  );
+  expect(handler).not.toHaveBeenCalled();
+  expect(audit.record).toHaveBeenCalledWith(
+    expect.objectContaining({ outcome: 'invalid_body', stage: 'validation', fields: {} })
+  );
+  expect(metrics.increment).toHaveBeenCalledWith('tool.errors', {
+    tool: 'deploy_environment',
+    code: 'invalid_body',
+  });
+});
+
+it.each([
+  ['API-key principal', { ...context.principal, kind: 'personal_key', authMethod: 'api_key', roles: [] }],
+  ['non-OAuth user', { ...context.principal, authMethod: 'session' }],
+  ['OAuth user without an allowed role', { ...context.principal, roles: [] }],
+] as const)('rejects a %s before handler execution', async (_label, principal) => {
+  const handler = jest.fn(async () => ({ value: 'ok' }));
+  const audit = { record: jest.fn() };
+  const registry = new McpToolRegistry(
+    [definition('deploy_environment', 'manage-environments', 'change', handler)],
+    { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() },
+    audit
+  );
+
+  const result = await registry.callTool('deploy_environment', {}, { ...context, principal }, enabled);
+
+  expect(parseFirstText(result)).toEqual(
+    expect.objectContaining({ error: expect.objectContaining({ code: 'forbidden_role' }) })
+  );
+  expect(handler).not.toHaveBeenCalled();
+  expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'forbidden_role', stage: 'policy' }));
+});
+
+it('audits successful change tools with bounded initial and handler-annotated identifiers', async () => {
+  const handler = jest.fn(async (_input, invocationContext) => {
+    invocationContext.audit.annotate({
+      uuid: 'handler_uuid',
+      environmentId: 42,
+      deployId: 'deploy_1',
+      siteId: 'siteid1234',
+      idempotencyKeyFingerprint: 'a'.repeat(64),
+      operation: 'execute',
+    });
+    return { value: 'ok' };
+  });
+  const tool = definition('deploy_environment', 'manage-environments', 'change', handler);
+  tool.inputSchema = {
+    type: 'object',
+    properties: {
+      uuid: { type: 'string' },
+      environmentId: { type: 'integer' },
+      siteId: { type: 'string' },
+      idempotencyKey: { type: 'string' },
+      confirmation: {
+        type: 'object',
+        properties: { phase: { type: 'string', enum: ['preview', 'execute'] } },
+        required: ['phase'],
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  };
+  const audit = { record: jest.fn() };
+  const registry = new McpToolRegistry([tool], { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() }, audit);
+
+  await expect(
+    registry.callTool(
+      'deploy_environment',
+      {
+        uuid: 'input_uuid',
+        environmentId: 7,
+        siteId: 'inputsite1',
+        idempotencyKey: 'private-key',
+        confirmation: { phase: 'preview' },
+      },
+      context,
+      enabled
+    )
+  ).resolves.toEqual(expect.objectContaining({ structuredContent: { value: 'ok', requestId: 'request-1' } }));
+
+  expect(audit.record).toHaveBeenCalledWith({
+    principal: context.principal,
+    requestId: 'request-1',
+    tool: 'deploy_environment',
+    outcome: 'succeeded',
+    stage: 'success',
+    fields: {
+      uuid: 'handler_uuid',
+      environmentId: 42,
+      deployId: 'deploy_1',
+      siteId: 'siteid1234',
+      idempotencyKeyFingerprint: 'a'.repeat(64),
+      operation: 'execute',
+    },
+  });
+  expect(JSON.stringify(audit.record.mock.calls[0][0])).not.toContain('private-key');
+});
+
+it('drops malformed audit identifiers rather than persisting untrusted values', async () => {
+  const tool = definition('deploy_environment', 'manage-environments', 'change', async (_input, invocationContext) => {
+    invocationContext.audit.annotate({
+      uuid: 'contains spaces',
+      environmentId: -1,
+      deployId: 'also invalid!',
+      siteId: 'short',
+      idempotencyKeyFingerprint: 'not-a-hash',
+      operation: 'unknown' as 'execute',
+    });
+    return { value: 'ok' };
+  });
+  tool.inputSchema = {
+    type: 'object',
+    properties: {
+      uuid: { type: 'string' },
+      environmentId: { type: 'integer' },
+      siteId: { type: 'string' },
+      confirmation: {},
+    },
+    additionalProperties: false,
+  };
+  const audit = { record: jest.fn() };
+  const registry = new McpToolRegistry([tool], { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() }, audit);
+
+  await registry.callTool(
+    'deploy_environment',
+    { uuid: 'contains spaces', environmentId: 0, siteId: 'short', confirmation: [] },
+    context,
+    enabled
+  );
+
+  expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ fields: {} }));
+});
+
+it('preserves domain errors and records their domain-stage audit outcome', async () => {
+  const audit = { record: jest.fn() };
+  const handlerError = new McpExecutionError('env_not_found', 'Environment was not found.');
+  const registry = new McpToolRegistry(
+    [
+      definition('deploy_environment', 'manage-environments', 'change', async () => {
+        throw handlerError;
+      }),
+    ],
+    { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() },
+    audit
+  );
+
+  const result = await registry.callTool('deploy_environment', {}, context, enabled);
+
+  expect(parseFirstText(result)).toEqual(
+    expect.objectContaining({ error: expect.objectContaining({ code: 'env_not_found' }) })
+  );
+  expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'env_not_found', stage: 'domain' }));
+});
+
+it('fails closed, logs, and audits when a handler throws an unexpected error', async () => {
+  const audit = { record: jest.fn() };
+  const error = new Error('secret upstream detail');
+  const registry = new McpToolRegistry(
+    [
+      definition('deploy_environment', 'manage-environments', 'change', async () => {
+        throw error;
+      }),
+    ],
+    { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() },
+    audit
+  );
+
+  const result = await registry.callTool('deploy_environment', {}, context, enabled);
+
+  expect(parseFirstText(result)).toEqual(
+    expect.objectContaining({
+      error: expect.objectContaining({ code: 'internal_error', message: expect.not.stringContaining('secret') }),
+    })
+  );
+  expect(mockLoggerError).toHaveBeenCalledWith(
+    { error, tool: 'deploy_environment', requestId: 'request-1' },
+    'MCP tool execution failed closed'
+  );
+  expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'internal_error', stage: 'domain' }));
+});
+
+it('keeps tool execution successful when metrics and audit emission fail', async () => {
+  const metricError = new Error('metrics unavailable');
+  const auditError = new Error('audit unavailable');
+  const metrics = {
+    increment: jest.fn(() => {
+      throw metricError;
+    }),
+    timing: jest.fn(() => {
+      throw metricError;
+    }),
+    gauge: jest.fn(() => {
+      throw metricError;
+    }),
+  };
+  const audit = { record: jest.fn(async () => Promise.reject(auditError)) };
+  const registry = new McpToolRegistry(
+    [definition('deploy_environment', 'manage-environments', 'change')],
+    metrics,
+    audit
+  );
+
+  await expect(registry.callTool('deploy_environment', {}, context, enabled)).resolves.toEqual(
+    expect.objectContaining({ structuredContent: { value: 'ok', requestId: 'request-1' } })
+  );
+  expect(mockLoggerWarn).toHaveBeenCalledWith({ error: metricError }, 'MCP metric emission failed');
+  expect(mockLoggerWarn).toHaveBeenCalledWith(
+    { error: auditError, tool: 'deploy_environment' },
+    'MCP tool-call audit emission failed'
+  );
+});
+
+it('uses the default audit sink for successful change tools', async () => {
+  const registry = new McpToolRegistry([definition('deploy_environment', 'manage-environments', 'change')]);
+
+  await registry.callTool('deploy_environment', {}, context, enabled);
+
+  expect(mockRecordAuthAuditEvent).toHaveBeenCalledWith({
+    event: 'mcp.tool_call',
+    principalKind: 'user',
+    principalId: 'user-1',
+    actorId: 'user-1',
+    tokenId: null,
+    requestId: 'request-1',
+    route: 'MCP deploy_environment',
+    outcome: 'succeeded',
+    meta: {
+      tool: 'deploy_environment',
+      stage: 'success',
+      credentialKind: 'user',
+    },
+  });
 });
 
 it('serializes structured content unchanged for text-only MCP clients', async () => {
@@ -255,6 +543,16 @@ it('rejects input and output schemas that exceed their byte budgets', () => {
         { record: jest.fn() }
       )
   ).toThrow('oversized_output.outputSchema exceeds 8192 UTF-8 bytes');
+});
+
+it.each(['title', 'description'] as const)('rejects a %s that exceeds its UTF-8 byte budget', (field) => {
+  const tool = definition('oversized_descriptor', 'understand-environments', 'read');
+  tool[field] = 'é'.repeat(1025);
+
+  expect(
+    () =>
+      new McpToolRegistry([tool], { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() }, { record: jest.fn() })
+  ).toThrow(`oversized_descriptor.${field} exceeds 2048 UTF-8 bytes`);
 });
 
 it('rejects a full wire catalog that exceeds 64 KiB', () => {

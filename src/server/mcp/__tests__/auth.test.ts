@@ -47,6 +47,7 @@ async function signToken(
     issuer?: string;
     audience?: string;
     expires?: boolean;
+    issuedAt?: number;
     signingKey?: CryptoKey;
     algorithm?: 'RS256' | 'ES256';
   } = {}
@@ -54,8 +55,8 @@ async function signToken(
   let token = new SignJWT(tokenClaims)
     .setProtectedHeader({ alg: options.algorithm ?? 'RS256', kid: 'test-key' })
     .setIssuer(options.issuer ?? ISSUER)
-    .setAudience(options.audience ?? RESOURCE_URL)
-    .setIssuedAt();
+    .setAudience(options.audience ?? RESOURCE_URL);
+  token = options.issuedAt === undefined ? token.setIssuedAt() : token.setIssuedAt(options.issuedAt);
   if (options.expires !== false) token = token.setExpirationTime('5m');
   return token.sign(options.signingKey ?? privateKey);
 }
@@ -146,6 +147,23 @@ describe('authenticateMcpRequest', () => {
     expect(result.status).toBe(401);
   });
 
+  it('rejects a token whose issued-at claim is implausibly far in the future', async () => {
+    const token = await signToken(claims(), {
+      issuedAt: Math.floor(Date.now() / 1000) + 31,
+    });
+
+    const result = (await authenticateMcpRequest(fakeRequest(`Bearer ${token}`))) as McpAuthFailure;
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        ok: false,
+        status: 401,
+        message: 'Invalid or expired bearer token.',
+      })
+    );
+    expect(result.wwwAuthenticate).toContain('error="invalid_token"');
+  });
+
   it.each([
     ['finite expiry', claims(), { expires: false }],
     ['stable subject', claims({ sub: undefined }), {}],
@@ -178,6 +196,28 @@ describe('authenticateMcpRequest', () => {
     process.env.ENABLE_AUTH = 'false';
     const result = (await authenticateMcpRequest(fakeRequest('Bearer anything'))) as McpAuthFailure;
     expect(result).toEqual(expect.objectContaining({ ok: false, status: 503 }));
+  });
+
+  it('returns a retryable unavailable response when OAuth verification configuration disappears', async () => {
+    const configuredIssuer = process.env.KEYCLOAK_ISSUER;
+    delete process.env.KEYCLOAK_ISSUER;
+
+    try {
+      const result = (await authenticateMcpRequest(fakeRequest('Bearer anything'))) as McpAuthFailure;
+
+      expect(result).toEqual({
+        ok: false,
+        status: 503,
+        message: 'OAuth verification is temporarily unavailable.',
+        retryAfterSeconds: 30,
+      });
+    } finally {
+      if (configuredIssuer === undefined) {
+        delete process.env.KEYCLOAK_ISSUER;
+      } else {
+        process.env.KEYCLOAK_ISSUER = configuredIssuer;
+      }
+    }
   });
 
   it('treats API-key-shaped bearer values as invalid OAuth credentials', async () => {

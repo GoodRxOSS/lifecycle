@@ -289,6 +289,20 @@ describe('/api/v2/ai/agent/sessions/[sessionId]/threads', () => {
     expect(body.error.message).toBe('Agent session not found');
   });
 
+  it('maps an unexpected thread-history failure to 500', async () => {
+    mockListThreadHistoryForSession.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'session-1' }),
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'database unavailable' },
+    });
+    expect(mockListThreadHistoryForSession).toHaveBeenCalledWith('session-1', 'sample-user');
+  });
+
   it('creates a thread in an active owned session', async () => {
     mockCreateThread.mockResolvedValue({
       uuid: 'thread-2',

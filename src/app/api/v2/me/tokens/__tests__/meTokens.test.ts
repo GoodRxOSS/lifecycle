@@ -127,6 +127,16 @@ describe('POST /api/v2/me/tokens', () => {
     expect(mockIssueUserToken).not.toHaveBeenCalled();
   });
 
+  it('fails closed when the global configuration is unavailable', async () => {
+    mockGetConfig.mockResolvedValue(undefined);
+
+    const res = await issueMine(request('POST', validBody()));
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.code).toBe('api_keys_disabled');
+    expect(mockIssueUserToken).not.toHaveBeenCalled();
+  });
+
   it('403s a role-less principal at the wrapper before the handler runs', async () => {
     mockRequireIdentity.mockReturnValue({ ...USER, roles: [] });
     mockGetIdentity.mockReturnValue({ ...USER, roles: [] });
@@ -142,6 +152,48 @@ describe('POST /api/v2/me/tokens', () => {
     expect((await res.json()).error.code).toBe('forbidden_scope');
   });
 
+  it('400s malformed JSON before resolving scopes or repositories', async () => {
+    const res = await issueMine(
+      new NextRequest('http://localhost/api/v2/me/tokens', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{',
+      })
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockResolveAllowlist).not.toHaveBeenCalled();
+    expect(mockIssueUserToken).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'a null body', body: null },
+    { label: 'an array body', body: [] },
+    { label: 'a scalar body', body: 'token' },
+  ])('400s $label before resolving scopes or repositories', async ({ body }) => {
+    const res = await issueMine(request('POST', body));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_body');
+    expect(mockResolveAllowlist).not.toHaveBeenCalled();
+    expect(mockIssueUserToken).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'a missing name', name: undefined },
+    { label: 'a non-string name', name: 42 },
+    { label: 'a whitespace-only name', name: '   ' },
+    { label: 'a name longer than 255 characters', name: 'n'.repeat(256) },
+  ])('400s $label before resolving repositories', async ({ name }) => {
+    const res = await issueMine(request('POST', validBody({ name })));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('invalid_name');
+    expect(mockResolveAllowlist).not.toHaveBeenCalled();
+    expect(mockIssueUserToken).not.toHaveBeenCalled();
+  });
+
   it('400s when both ttlHours and expiresAt are provided', async () => {
     const res = await issueMine(request('POST', validBody({ ttlHours: 24 })));
     expect(res.status).toBe(400);
@@ -154,6 +206,18 @@ describe('POST /api/v2/me/tokens', () => {
     const { error } = await res.json();
     expect(error.code).toBe('invalid_body');
     expect(error.message).toContain('expiresInHours');
+    expect(mockIssueUserToken).not.toHaveBeenCalled();
+  });
+
+  it('reports every unknown body field', async () => {
+    const res = await issueMine(request('POST', validBody({ expiresInHours: 24, repositoryAllowlist: ['org/repo'] })));
+    const { error } = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(error.code).toBe('invalid_body');
+    expect(error.message).toContain('Unknown fields');
+    expect(error.message).toContain('"expiresInHours"');
+    expect(error.message).toContain('"repositoryAllowlist"');
     expect(mockIssueUserToken).not.toHaveBeenCalled();
   });
 
@@ -262,6 +326,27 @@ describe('POST /api/v2/me/tokens', () => {
         scopes: ['env:write'],
         repositoryAllowlistRepoIds: [42],
         owner: expect.objectContaining({ userId: 'sub-1', roleAtIssue: 'user', email: 'a@corp.com' }),
+      })
+    );
+  });
+
+  it('records an administrator role snapshot when an admin mints a personal token', async () => {
+    const admin = { ...USER, roles: ['admin'] };
+    mockRequireIdentity.mockReturnValue(admin);
+    mockGetIdentity.mockReturnValue(admin);
+    mockResolveAllowlist.mockResolvedValue({ names: ['org/repo'], repoIds: [42] });
+    mockIssueUserToken.mockResolvedValue({
+      token: `lfc_${'a'.repeat(40)}`,
+      record: { id: 10, name: 'admin-ci', tokenPrefix: 'lfc_aaaaaaaa', scopes: ['env:write'] },
+    });
+
+    const res = await issueMine(request('POST', validBody({ name: ' admin-ci ' })));
+
+    expect(res.status).toBe(201);
+    expect(mockIssueUserToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'admin-ci',
+        owner: expect.objectContaining({ userId: 'sub-1', roleAtIssue: 'admin' }),
       })
     );
   });

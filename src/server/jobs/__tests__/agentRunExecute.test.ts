@@ -14,6 +14,11 @@
  * limitations under the License.
  */
 
+const mockLogger = {
+  info: jest.fn(),
+  warn: jest.fn(),
+};
+
 jest.mock('server/services/agent/LifecycleAiSdkHarness', () => ({
   __esModule: true,
   default: {
@@ -33,10 +38,7 @@ jest.mock('server/services/agent/RunService', () => ({
 }));
 
 jest.mock('server/lib/logger', () => ({
-  getLogger: jest.fn(() => ({
-    info: jest.fn(),
-    warn: jest.fn(),
-  })),
+  getLogger: jest.fn(() => mockLogger),
 }));
 
 jest.mock('server/lib/logger/context', () => ({
@@ -72,7 +74,6 @@ describe('agentRunExecute', () => {
       data: {
         runId: 'run-1',
         dispatchAttemptId: 'attempt-1',
-        reason: 'submit',
       },
     } as any);
 
@@ -134,7 +135,6 @@ describe('agentRunExecute', () => {
       data: {
         runId: 'run-1',
         dispatchAttemptId: 'attempt-1',
-        reason: 'submit',
         encryptedGithubToken: 'encrypted-token',
       },
     } as any);
@@ -165,7 +165,6 @@ describe('agentRunExecute', () => {
         data: {
           runId: 'run-1',
           dispatchAttemptId: 'attempt-1',
-          reason: 'submit',
         },
       } as any)
     ).rejects.toThrow('setup failed');
@@ -231,6 +230,85 @@ describe('agentRunExecute', () => {
     expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
   });
 
+  it('treats ownership loss while recording a recovery pause as a clean superseded-worker exit', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    const ownershipLoss = new AgentRunOwnershipLostError({
+      runUuid: 'run-1',
+      expectedExecutionOwner: 'worker-1',
+    });
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockExecuteRun.mockRejectedValue(
+      new AgentRunTerminalFailure({
+        code: 'run_event_history_exhausted',
+        message: 'Saved event history is exhausted.',
+      })
+    );
+    mockMarkWaitingForInputForRecovery.mockRejectedValue(ownershipLoss);
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'approval_resolved',
+        },
+      } as any)
+    ).resolves.toBeUndefined();
+
+    expect(mockMarkWaitingForInputForRecovery).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({
+        decision: 'manual_recovery_required',
+        reason: 'event_history_exhausted',
+        leaseExpiresAt: null,
+      }),
+      expect.objectContaining({
+        errorCode: 'run_event_history_exhausted',
+        dispatchAttemptId: 'attempt-1',
+      })
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        currentStatus: null,
+        currentOwner: null,
+      }),
+      expect.stringContaining('AgentExec: ownership lost')
+    );
+    expect(mockGetRunByUuid).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a recovery-pause persistence failure instead of reporting the run as paused', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    const recordError = new Error('database unavailable');
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockExecuteRun.mockRejectedValue(
+      new AgentRunTerminalFailure({
+        code: 'run_resume_state_invalid',
+        message: 'Saved state is invalid.',
+      })
+    );
+    mockMarkWaitingForInputForRecovery.mockRejectedValue(recordError);
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'resume',
+        },
+      } as any)
+    ).rejects.toBe(recordError);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: recordError, runId: 'run-1' },
+      'AgentExec: recovery pause record failed runId=run-1'
+    );
+    expect(mockGetRunByUuid).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
   it('keeps submit jobs on the normal failure path when saved UI message validation fails', async () => {
     const run = { uuid: 'run-1', status: 'starting' };
     mockClaimQueuedRunForExecution.mockResolvedValue(run);
@@ -279,6 +357,66 @@ describe('agentRunExecute', () => {
     expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
   });
 
+  it('preserves the execution error when failure recording loses ownership', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    const executionError = new Error('setup failed');
+    const ownershipLoss = new AgentRunOwnershipLostError({
+      runUuid: 'run-1',
+      expectedExecutionOwner: 'worker-1',
+    });
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockGetRunByUuid.mockResolvedValue(null);
+    mockExecuteRun.mockRejectedValue(executionError);
+    mockMarkFailedForExecutionOwner.mockRejectedValue(ownershipLoss);
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'submit',
+        },
+      } as any)
+    ).rejects.toBe(executionError);
+
+    expect(mockIsTerminalStatus).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        currentStatus: null,
+        currentOwner: null,
+      }),
+      expect.stringContaining('AgentExec: ownership lost')
+    );
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it('logs a failure-record persistence error while preserving the execution error', async () => {
+    const run = { uuid: 'run-1', status: 'starting' };
+    const executionError = new Error('setup failed');
+    const recordError = new Error('database unavailable');
+    mockClaimQueuedRunForExecution.mockResolvedValue(run);
+    mockGetRunByUuid.mockResolvedValue(run);
+    mockExecuteRun.mockRejectedValue(executionError);
+    mockIsTerminalStatus.mockReturnValue(false);
+    mockMarkFailedForExecutionOwner.mockRejectedValue(recordError);
+
+    await expect(
+      processAgentRunExecute({
+        data: {
+          runId: 'run-1',
+          dispatchAttemptId: 'attempt-1',
+          reason: 'submit',
+        },
+      } as any)
+    ).rejects.toBe(executionError);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      { error: recordError, runId: 'run-1' },
+      'AgentExec: queued run failure record failed runId=run-1'
+    );
+  });
+
   it('treats ownership loss from execution as a clean stale-worker exit', async () => {
     const run = { uuid: 'run-1', status: 'starting' };
     mockClaimQueuedRunForExecution.mockResolvedValue(run);
@@ -286,8 +424,6 @@ describe('agentRunExecute', () => {
       new AgentRunOwnershipLostError({
         runUuid: 'run-1',
         expectedExecutionOwner: 'worker-1',
-        currentStatus: 'running',
-        currentExecutionOwner: 'worker-2',
       })
     );
 
@@ -301,6 +437,14 @@ describe('agentRunExecute', () => {
       } as any)
     ).resolves.toBeUndefined();
 
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        currentStatus: null,
+        currentOwner: null,
+      }),
+      expect.stringContaining('AgentExec: ownership lost')
+    );
     expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
   });
 });

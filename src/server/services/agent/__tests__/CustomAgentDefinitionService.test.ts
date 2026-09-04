@@ -55,7 +55,12 @@ jest.mock('server/services/agent/ProviderRegistry', () => ({
   },
 }));
 
-import { CustomAgentDefinitionService, CustomAgentDefinitionServiceError } from '../CustomAgentDefinitionService';
+import {
+  customAgentDefinitionNeedsOneAgentConversion,
+  CustomAgentDefinitionService,
+  CustomAgentDefinitionServiceError,
+  serializeUserAgentDefinition,
+} from '../CustomAgentDefinitionService';
 
 function buildRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -129,6 +134,42 @@ describe('CustomAgentDefinitionService', () => {
     });
     expect(mockOrderBy).toHaveBeenCalledWith('updatedAt', 'desc');
     expect(definitions.map((definition) => definition.id)).toEqual(['custom.newest', 'custom.oldest']);
+  });
+
+  it('listUserDefinitions forwards an explicit disabled-status filter', async () => {
+    mockOrderBy.mockResolvedValue([buildRow({ definitionId: 'custom.disabled', status: 'disabled' })]);
+
+    const definitions = await service.listUserDefinitions({
+      userId: 'sample-user',
+      filters: { status: 'disabled' },
+    });
+
+    expect(mockWhere).toHaveBeenCalledWith({
+      ownerKind: 'user',
+      ownerUserId: 'sample-user',
+      status: 'disabled',
+    });
+    expect(mockOrderBy).toHaveBeenCalledWith('updatedAt', 'desc');
+    expect(definitions).toEqual([expect.objectContaining({ id: 'custom.disabled', status: 'disabled' })]);
+  });
+
+  it('getUserDefinition returns the active definition owned by the caller', async () => {
+    mockFindOne.mockResolvedValue(buildRow({ id: 12, definitionId: 'custom.owned' }));
+
+    const definition = await service.getUserDefinition('custom.owned', 'sample-user');
+
+    expect(mockFindOne).toHaveBeenCalledWith({
+      definitionId: 'custom.owned',
+      ownerKind: 'user',
+      ownerUserId: 'sample-user',
+      status: 'active',
+    });
+    expect(definition).toEqual(
+      expect.objectContaining({
+        id: 'custom.owned',
+        owner: { kind: 'user', userId: 'sample-user', organizationId: null },
+      })
+    );
   });
 
   it('getUserDefinition returns not found for another user, an archived row, or a system row', async () => {
@@ -216,6 +257,94 @@ describe('CustomAgentDefinitionService', () => {
     );
   });
 
+  it.each([
+    {
+      fieldName: 'Name',
+      input: {
+        name: '   ',
+        instructionAddendum: 'Answer briefly.',
+        resourceBehavior: 'chat_only' as const,
+      },
+    },
+    {
+      fieldName: 'Instructions',
+      input: {
+        name: 'Sample agent',
+        instructionAddendum: '\n\t ',
+        resourceBehavior: 'chat_only' as const,
+      },
+    },
+  ])('rejects a blank $fieldName before configuration or persistence calls', async ({ fieldName, input }) => {
+    await expect(service.createUserDefinition(userIdentity, input)).rejects.toMatchObject({
+      name: 'CustomAgentDefinitionServiceError',
+      reason: 'invalid_input',
+      httpStatus: 400,
+      code: 'custom_agent_invalid',
+      details: { reason: 'invalid_input' },
+      message: `${fieldName} is required.`,
+    });
+
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListAvailableModelsForUser).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  it('normalizes omitted capabilities and blank model fields before persistence', async () => {
+    mockInsert.mockImplementation(async (row) => buildRow({ id: 13, ...row }));
+
+    const definition = await service.createUserDefinition(userIdentity, {
+      name: '  Minimal helper  ',
+      instructionAddendum: '  Answer briefly.  ',
+      modelPreference: { provider: '  ', model: '\t' },
+      resourceBehavior: 'chat_only',
+    });
+
+    expect(mockListAvailableModelsForUser).not.toHaveBeenCalled();
+    expect(mockInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Minimal helper',
+        description: null,
+        instructionAddendum: 'Answer briefly.',
+        capabilityRefs: [],
+        requiredCapabilityRefs: [],
+        optionalCapabilityRefs: [],
+        modelPreference: null,
+      })
+    );
+    expect(definition).toEqual(
+      expect.objectContaining({
+        capabilityRefs: [],
+        optionalCapabilityRefs: [],
+        modelPreference: null,
+      })
+    );
+  });
+
+  it.each([
+    {
+      selection: 'provider only',
+      modelPreference: { provider: ' openai ', model: '   ' },
+      expected: { provider: 'openai', model: null },
+    },
+    {
+      selection: 'model only',
+      modelPreference: { provider: '\t', model: ' sample-model ' },
+      expected: { provider: null, model: 'sample-model' },
+    },
+  ])('normalizes and persists an available $selection model preference', async ({ modelPreference, expected }) => {
+    mockInsert.mockImplementation(async (row) => buildRow({ id: 14, ...row }));
+
+    await service.createUserDefinition(userIdentity, {
+      name: 'Model helper',
+      instructionAddendum: 'Answer briefly.',
+      modelPreference,
+      resourceBehavior: 'chat_only',
+    });
+
+    expect(mockListAvailableModelsForUser).toHaveBeenCalledWith({ userIdentity });
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ modelPreference: expected }));
+  });
+
   it('keeps crafted system-definition fields out of user create and update persistence', async () => {
     mockInsert.mockImplementation(async (row) => buildRow({ id: 10, ...row }));
     mockFindOne.mockResolvedValue(buildRow({ id: 10, version: 4 }));
@@ -278,8 +407,53 @@ describe('CustomAgentDefinitionService', () => {
 
     const archived = await service.archiveUserDefinition('custom.to-archive', 'sample-user');
 
+    expect(mockFindOne).toHaveBeenCalledWith({
+      definitionId: 'custom.to-archive',
+      ownerKind: 'user',
+      ownerUserId: 'sample-user',
+      status: 'active',
+    });
     expect(mockPatchAndFetchById).toHaveBeenCalledWith(4, { status: 'archived' });
     expect(archived.status).toBe('archived');
+  });
+
+  it('stops an update before validation and persistence when the owned active row is missing', async () => {
+    mockFindOne.mockResolvedValue(null);
+
+    await expect(
+      service.updateUserDefinition('custom.missing', userIdentity, {
+        name: 'Updated agent',
+        instructionAddendum: 'Answer briefly.',
+        capabilityRefs: ['read_context'],
+        resourceBehavior: 'chat_only',
+      })
+    ).rejects.toMatchObject({
+      reason: 'not_found',
+      httpStatus: 404,
+      code: 'custom_agent_not_found',
+      details: { reason: 'not_found' },
+    });
+
+    expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+    expect(mockListAvailableModelsForUser).not.toHaveBeenCalled();
+    expect(mockPatchAndFetchById).not.toHaveBeenCalled();
+  });
+
+  it('propagates persistence failures from create without attempting another write', async () => {
+    const databaseError = new Error('database insert failed');
+    mockInsert.mockRejectedValue(databaseError);
+
+    await expect(
+      service.createUserDefinition(userIdentity, {
+        name: 'Sample agent',
+        instructionAddendum: 'Answer briefly.',
+        capabilityRefs: ['read_context'],
+        resourceBehavior: 'chat_only',
+      })
+    ).rejects.toBe(databaseError);
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockPatchAndFetchById).not.toHaveBeenCalled();
   });
 
   it('rejects unknown capability ids before persistence', async () => {
@@ -458,6 +632,30 @@ describe('CustomAgentDefinitionService', () => {
     ).resolves.toMatchObject({ name: 'Allowlisted agent' });
   });
 
+  it('normalizes configured user-id allowlist entries before authorizing creation', async () => {
+    mockGetEffectiveConfig.mockResolvedValueOnce({
+      customAgentCreationPolicy: {
+        mode: 'allowlist',
+        allowedUserIds: ['  ', ' sample-user '],
+      },
+    });
+    mockInsert.mockImplementationOnce(async (row) => buildRow({ id: 15, ...row }));
+
+    await expect(
+      service.createUserDefinition(
+        { ...userIdentity, githubUsername: null },
+        {
+          name: 'Allowlisted by ID',
+          instructionAddendum: 'Answer briefly.',
+          capabilityRefs: ['read_context'],
+          resourceBehavior: 'chat_only',
+        }
+      )
+    ).resolves.toMatchObject({ name: 'Allowlisted by ID' });
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
   it('reports current-user custom-agent creation status from policy', async () => {
     await expect(
       service.getUserDefinitionCreationStatus({ userIdentity: { ...userIdentity, roles: [] } as any })
@@ -569,6 +767,9 @@ describe('CustomAgentDefinitionService', () => {
       })
     ).rejects.toMatchObject({
       reason: 'model_unavailable',
+      httpStatus: 409,
+      code: 'custom_agent_conflict',
+      details: { reason: 'model_unavailable' },
       message: 'Selected model is no longer available. Choose another model and save again.',
     });
     expect(mockListAvailableModelsForUser).toHaveBeenCalledWith({ userIdentity });
@@ -663,5 +864,134 @@ describe('CustomAgentDefinitionService', () => {
     });
 
     expect(capabilities).toEqual([]);
+  });
+});
+
+describe('custom-agent public contract helpers', () => {
+  const baseDefinition = {
+    id: 'custom.sample-agent',
+    version: 3,
+    owner: { kind: 'user' as const, userId: 'sample-user', organizationId: null },
+    name: 'Sample agent',
+    description: 'Sample description',
+    instructionRefs: [],
+    instructionAddendum: 'Answer briefly.',
+    capabilityRefs: ['read_context' as const],
+    requiredCapabilityRefs: [],
+    optionalCapabilityRefs: ['workspace_shell' as const],
+    resourcePolicy: {
+      sourceKinds: ['freeform_chat'],
+      workspaceRequired: false,
+      sandboxRequired: false,
+    },
+    modelPreference: null,
+    status: 'active' as const,
+    codeOwned: false,
+    readOnly: false,
+  };
+
+  it('serializes selected optional capabilities and workspace behavior for an archived definition', () => {
+    const result = serializeUserAgentDefinition({
+      ...baseDefinition,
+      description: '',
+      instructionAddendum: null,
+      resourcePolicy: {
+        sourceKinds: ['freeform_chat', 'workspace_session'],
+        workspaceRequired: false,
+        sandboxRequired: false,
+      },
+      modelPreference: { provider: 'openai', model: 'sample-model' },
+      status: 'archived',
+    });
+
+    expect(result).toEqual({
+      id: 'custom.sample-agent',
+      version: 3,
+      name: 'Sample agent',
+      description: null,
+      instructions: '',
+      capabilityIds: ['workspace_shell'],
+      modelPreference: { provider: 'openai', model: 'sample-model' },
+      resourceBehavior: 'current_workspace_when_available',
+      status: 'archived',
+    });
+  });
+
+  it('falls back to required fields when optional public-contract fields are absent', () => {
+    const result = serializeUserAgentDefinition({
+      ...baseDefinition,
+      description: undefined,
+      instructionAddendum: undefined,
+      optionalCapabilityRefs: undefined,
+      modelPreference: undefined,
+      status: 'disabled',
+    });
+
+    expect(result).toEqual({
+      id: 'custom.sample-agent',
+      version: 3,
+      name: 'Sample agent',
+      description: null,
+      instructions: '',
+      capabilityIds: ['read_context'],
+      modelPreference: null,
+      resourceBehavior: 'chat_only',
+      status: 'active',
+    });
+  });
+
+  it.each([
+    {
+      caseName: 'non-user ownership',
+      definition: {
+        ...baseDefinition,
+        owner: { kind: 'admin' as const },
+        resourcePolicy: { sourceKinds: ['workspace_session'], workspaceRequired: true, sandboxRequired: true },
+      },
+      expected: false,
+    },
+    {
+      caseName: 'required workspace',
+      definition: {
+        ...baseDefinition,
+        resourcePolicy: { sourceKinds: ['freeform_chat'], workspaceRequired: true, sandboxRequired: false },
+      },
+      expected: true,
+    },
+    {
+      caseName: 'required sandbox',
+      definition: {
+        ...baseDefinition,
+        resourcePolicy: { sourceKinds: ['freeform_chat'], workspaceRequired: false, sandboxRequired: true },
+      },
+      expected: true,
+    },
+    {
+      caseName: 'workspace-only source',
+      definition: {
+        ...baseDefinition,
+        resourcePolicy: { sourceKinds: ['workspace_session'], workspaceRequired: false, sandboxRequired: false },
+      },
+      expected: true,
+    },
+    {
+      caseName: 'workspace-capable freeform source',
+      definition: {
+        ...baseDefinition,
+        resourcePolicy: {
+          sourceKinds: ['freeform_chat', 'workspace_session'],
+          workspaceRequired: false,
+          sandboxRequired: false,
+        },
+      },
+      expected: false,
+    },
+    {
+      caseName: 'chat-only source',
+      definition: baseDefinition,
+      expected: false,
+    },
+  ])('reports one-agent conversion as $expected for $caseName', ({ definition, expected }) => {
+    expect(customAgentDefinitionNeedsOneAgentConversion(definition)).toBe(expected);
   });
 });

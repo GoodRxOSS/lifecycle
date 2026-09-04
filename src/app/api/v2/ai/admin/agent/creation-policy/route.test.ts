@@ -165,6 +165,29 @@ describe('/api/v2/ai/admin/agent/creation-policy', () => {
     expect(mockUpdateGlobalCustomAgentCreationPolicy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { label: 'null', body: null },
+    { label: 'an array', body: [] },
+    { label: 'a scalar', body: 'allowlist' },
+  ])('rejects $label request body before service mutation', async ({ body }) => {
+    const response = await PUT(makeRequest('http://localhost/api/v2/ai/admin/agent/creation-policy', body));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe('Request body must be an object.');
+    expect(mockUpdateGlobalCustomAgentCreationPolicy).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed JSON before service mutation', async () => {
+    const request = makeRequest('http://localhost/api/v2/ai/admin/agent/creation-policy');
+    request.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+    const response = await PUT(request);
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain('Invalid JSON');
+    expect(mockUpdateGlobalCustomAgentCreationPolicy).not.toHaveBeenCalled();
+  });
+
   it('rejects malformed capability availability before service mutation', async () => {
     const response = await PUT(
       makeRequest('http://localhost/api/v2/ai/admin/agent/creation-policy', {
@@ -196,5 +219,18 @@ describe('/api/v2/ai/admin/agent/creation-policy', () => {
 
     expect(response.status).toBe(400);
     expect(body.error.message).toBe('Invalid custom agent creation mode "sometimes".');
+  });
+
+  it('maps an unexpected update failure to 500', async () => {
+    mockUpdateGlobalCustomAgentCreationPolicy.mockRejectedValue(new Error('configuration store unavailable'));
+
+    const response = await PUT(
+      makeRequest('http://localhost/api/v2/ai/admin/agent/creation-policy', {
+        customAgentCreationPolicy: { mode: 'all_users' },
+      })
+    );
+
+    expect(response.status).toBe(500);
+    expect(mockGetGlobalConfig).not.toHaveBeenCalled();
   });
 });

@@ -46,6 +46,8 @@ function makeQuery(result: any = undefined) {
     select: jest.fn(() => q),
     where: jest.fn(() => q),
     whereRaw: jest.fn(() => q),
+    orWhere: jest.fn(() => q),
+    orWhereRaw: jest.fn(() => q),
     whereNull: jest.fn(() => q),
     whereNotNull: jest.fn(() => q),
     whereIn: jest.fn(() => q),
@@ -59,6 +61,10 @@ function makeQuery(result: any = undefined) {
     resultSize: jest.fn(async () => 0),
     then: (resolve: any, reject: any) => Promise.resolve(q._result).then(resolve, reject),
   };
+  q.where.mockImplementation((first: any) => {
+    if (typeof first === 'function') first(q);
+    return q;
+  });
   return q;
 }
 
@@ -197,6 +203,17 @@ describe('resolveRepositoryAccess', () => {
     ).rejects.toMatchObject({ code: 'invalid_body' });
   });
 
+  it('identifies every unknown repositoryAccess field in the validation error', async () => {
+    await expect(
+      ApiTokenService.resolveRepositoryAccess({
+        repositoryAccess: { mode: 'all', repositories: [], repositoryAllowlist: [] },
+      })
+    ).rejects.toMatchObject({
+      code: 'invalid_body',
+      message: expect.stringContaining('unknown fields: repositories, repositoryAllowlist'),
+    });
+  });
+
   it('rejects all-repository access when Personal-key policy requires a selection', async () => {
     await expect(
       ApiTokenService.resolveRepositoryAccess({ repositoryAccess: { mode: 'all' } }, { allowAll: false })
@@ -272,6 +289,16 @@ describe('resolveRepositoryAllowlist (invariant 10)', () => {
     (getRepositoryByFullName as jest.Mock).mockRejectedValue(new Error('boom'));
     await expect(ApiTokenService.resolveRepositoryAllowlist(['org/down'])).rejects.toThrow('boom');
   });
+
+  it('normalizes a non-Error repository-not-found rejection into the public not-found error', async () => {
+    repoQuery._result = [];
+    (getRepositoryByFullName as jest.Mock).mockRejectedValue('Repository not found');
+
+    await expect(ApiTokenService.resolveRepositoryAllowlist(['org/ghost'])).rejects.toMatchObject({
+      httpStatus: 400,
+      code: 'repo_not_found',
+    });
+  });
 });
 
 describe('assertServiceTokenScopes', () => {
@@ -317,6 +344,14 @@ describe('tokenKind / tokenStatus (derived response fields)', () => {
 });
 
 describe('listTokens filters', () => {
+  it('uses newest-first ordering and no lifecycle filters by default', async () => {
+    await ApiTokenService.listTokens();
+
+    expect(apiQuery.orderBy).toHaveBeenCalledWith('createdAt', 'desc');
+    expect(apiQuery.whereNull).not.toHaveBeenCalled();
+    expect(apiQuery.whereNotNull).not.toHaveBeenCalled();
+  });
+
   it('filters kind=service to null owners and kind=personal to owned rows', async () => {
     await ApiTokenService.listTokens({ kind: 'service' });
     expect(apiQuery.whereNull).toHaveBeenCalledWith('ownerUserId');
@@ -331,6 +366,30 @@ describe('listTokens filters', () => {
   it('searches by name/prefix/owner fields', async () => {
     await ApiTokenService.listTokens({ search: 'CI' });
     expect(apiQuery.where).toHaveBeenCalled();
+  });
+
+  it('selects only revoked tokens for the revoked status', async () => {
+    await ApiTokenService.listTokens({ status: 'revoked' });
+
+    expect(apiQuery.whereNotNull).toHaveBeenCalledWith('revokedAt');
+    expect(apiQuery.whereNull).not.toHaveBeenCalledWith('revokedAt');
+  });
+
+  it('selects expired, non-revoked tokens using the current timestamp', async () => {
+    await ApiTokenService.listTokens({ status: 'expired' });
+
+    expect(apiQuery.whereNull).toHaveBeenCalledWith('revokedAt');
+    expect(apiQuery.whereNotNull).toHaveBeenCalledWith('expiresAt');
+    expect(apiQuery.where).toHaveBeenCalledWith('expiresAt', '<=', expect.any(String));
+  });
+
+  it('selects non-revoked tokens whose expiry is absent or still in the future', async () => {
+    await ApiTokenService.listTokens({ status: 'active' });
+
+    expect(apiQuery.whereNull).toHaveBeenCalledWith('revokedAt');
+    expect(apiQuery.whereNull).toHaveBeenCalledWith('expiresAt');
+    expect(apiQuery.orWhere).toHaveBeenCalledWith('expiresAt', '>', expect.any(String));
+    expect(apiQuery.whereNotNull).not.toHaveBeenCalledWith('expiresAt');
   });
 
   it('escapes LIKE metacharacters so search terms match literally', async () => {
@@ -360,6 +419,32 @@ describe('listTokens filters', () => {
     });
     expect(apiQuery.whereNull).toHaveBeenCalledWith('ownerUserId');
     expect(apiQuery.page).toHaveBeenCalledWith(1, 10);
+  });
+});
+
+describe('listTokensByOwner', () => {
+  it("returns only the owner's tokens in newest-first order", async () => {
+    const records = [{ id: 2 }, { id: 1 }];
+    apiQuery._result = records;
+
+    await expect(ApiTokenService.listTokensByOwner('sub-1')).resolves.toBe(records);
+
+    expect(apiQuery.where).toHaveBeenCalledWith({ ownerUserId: 'sub-1' });
+    expect(apiQuery.orderBy).toHaveBeenCalledWith('createdAt', 'desc');
+  });
+});
+
+describe('assertPersonalKeyCapacity', () => {
+  it('counts only live keys for the requested owner inside the caller transaction', async () => {
+    apiQuery.resultSize.mockResolvedValueOnce(9);
+
+    await expect(ApiTokenService.assertPersonalKeyCapacity('sub-1', trx)).resolves.toBeUndefined();
+
+    expect(ApiToken.query).toHaveBeenCalledWith(trx);
+    expect(apiQuery.where).toHaveBeenCalledWith({ ownerUserId: 'sub-1' });
+    expect(apiQuery.whereNull).toHaveBeenCalledWith('revokedAt');
+    expect(apiQuery.whereNull).toHaveBeenCalledWith('expiresAt');
+    expect(apiQuery.orWhere).toHaveBeenCalledWith('expiresAt', '>', expect.any(String));
   });
 });
 
@@ -559,5 +644,25 @@ describe('isRepositoryAllowedById (invariant 10, F4)', () => {
     expect(isRepositoryAllowedById([42, 7], 42)).toBe(true);
     expect(isRepositoryAllowedById([42], 99)).toBe(false);
     expect(isRepositoryAllowedById([42], null)).toBe(false);
+  });
+});
+
+describe('repository resolver configuration', () => {
+  it('fails before a GitHub request when the installation id is not numeric', async () => {
+    jest.resetModules();
+    jest.doMock('shared/config', () => ({ GITHUB_APP_INSTALLATION_ID: 'not-a-number' }));
+
+    const [{ default: IsolatedApiTokenService }, { default: IsolatedRepository }, github] = await Promise.all([
+      import('server/services/apiToken'),
+      import('server/models/Repository'),
+      import('server/lib/github'),
+    ]);
+    const isolatedRepositoryQuery = makeQuery([]);
+    (IsolatedRepository.query as jest.Mock).mockReturnValue(isolatedRepositoryQuery);
+
+    await expect(IsolatedApiTokenService.resolveRepositoryAllowlist(['org/repo'])).rejects.toThrow(
+      'A valid GitHub App installation ID is required'
+    );
+    expect(github.getRepositoryByFullName).not.toHaveBeenCalled();
   });
 });

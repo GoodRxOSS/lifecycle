@@ -90,15 +90,17 @@ const mockLaunchBuildContextChat = BuildContextChatService.launchBuildContextCha
 const mockSerializeSessionRecord = AgentSessionReadService.serializeSessionRecord as jest.Mock;
 const mockSerializeThread = AgentSessionReadService.serializeThread as jest.Mock;
 
-function makeRequest(body: unknown): NextRequest {
+function makeRequest(body: unknown, jsonError?: unknown): NextRequest {
   return {
-    json: jest.fn().mockResolvedValue(body),
+    json: jsonError === undefined ? jest.fn().mockResolvedValue(body) : jest.fn().mockRejectedValue(jsonError),
     headers: new Headers([['x-request-id', 'req-test']]),
     nextUrl: new URL('http://localhost/api/v2/ai/agent/build-context-chats'),
   } as unknown as NextRequest;
 }
 
-function mockSuccessfulLaunch(overrides: { created?: boolean; reused?: boolean } = {}) {
+function mockSuccessfulLaunch(
+  overrides: { created?: boolean; reused?: boolean; buildContext?: Record<string, unknown> } = {}
+) {
   const session = { id: 17, uuid: 'session-1' };
   const thread = { id: 29, uuid: 'thread-1' };
   mockLaunchBuildContextChat.mockResolvedValue({
@@ -119,6 +121,7 @@ function mockSuccessfulLaunch(overrides: { created?: boolean; reused?: boolean }
       selectedDeployUuid: null,
       selectedDeploy: null,
       contextFreshAt: '2026-04-30T00:00:00.000Z',
+      ...overrides.buildContext,
     },
   });
   mockSerializeSessionRecord.mockResolvedValue({
@@ -170,6 +173,13 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
     expect(mockLaunchBuildContextChat).not.toHaveBeenCalled();
   });
 
+  it('returns 400 when request JSON cannot be parsed', async () => {
+    const response = await POST(makeRequest(undefined, new SyntaxError('invalid JSON')));
+
+    expect(response.status).toBe(400);
+    expect(mockLaunchBuildContextChat).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['missing buildUuid', {}],
     ['blank buildUuid', { buildUuid: '   ' }],
@@ -177,6 +187,10 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
     ['non-string selectedDeployUuid', { buildUuid: 'build-1', selectedDeployUuid: 123 }],
     ['unsupported selected service field', { buildUuid: 'build-1', selectedServiceUuid: 'deploy-1' }],
     ['non-string defaults.model', { buildUuid: 'build-1', defaults: { model: 123 } }],
+    ['null defaults', { buildUuid: 'build-1', defaults: null }],
+    ['primitive defaults', { buildUuid: 'build-1', defaults: 'gpt-5.4' }],
+    ['array defaults', { buildUuid: 'build-1', defaults: [] }],
+    ['blank selectedDeployUuid with defaults', { buildUuid: 'build-1', selectedDeployUuid: ' ', defaults: {} }],
     ['unsupported defaults key', { buildUuid: 'build-1', defaults: { model: 'gpt-5.4', provider: 'openai' } }],
     ['unsupported source field', { buildUuid: 'build-1', source: { adapter: 'blank_workspace' } }],
     ['unsupported workspace field', { buildUuid: 'build-1', workspace: {} }],
@@ -311,5 +325,77 @@ describe('POST /api/v2/ai/agent/build-context-chats', () => {
     expect(response.status).toBe(200);
     expect(body.data.created).toBe(false);
     expect(body.data.reused).toBe(true);
+  });
+
+  it('omits blank optional defaults and selected deploy fields from launch input', async () => {
+    const response = await POST(
+      makeRequest({
+        buildUuid: ' build-1 ',
+        defaults: { model: '   ' },
+      })
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockLaunchBuildContextChat).toHaveBeenCalledWith({
+      buildUuid: 'build-1',
+      selectedDeployUuid: undefined,
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+        roles: ['user'],
+      },
+      model: undefined,
+    });
+  });
+
+  it('accepts an empty defaults object without selecting a model', async () => {
+    const response = await POST(makeRequest({ buildUuid: 'build-1', defaults: {} }));
+
+    expect(response.status).toBe(201);
+    expect(mockLaunchBuildContextChat).toHaveBeenCalledWith({
+      buildUuid: 'build-1',
+      selectedDeployUuid: undefined,
+      userId: 'sample-user',
+      userIdentity: {
+        userId: 'sample-user',
+        githubUsername: 'sample-user',
+        roles: ['user'],
+      },
+      model: undefined,
+    });
+  });
+
+  it('serializes nullable pull-request context and populated selected-deploy context', async () => {
+    const selectedDeploy = { uuid: 'deploy-1', name: 'web' };
+    mockSuccessfulLaunch({
+      buildContext: {
+        pullRequest: null,
+        selectedDeployUuid: 'deploy-1',
+        selectedDeploy,
+      },
+    });
+
+    const response = await POST(makeRequest({ buildUuid: 'build-1' }));
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body.data.buildContext).toEqual(
+      expect.objectContaining({
+        repo: null,
+        branch: null,
+        pullRequestNumber: null,
+        selectedDeployUuid: 'deploy-1',
+        selectedDeploy,
+      })
+    );
+  });
+
+  it('returns 500 when build-context launch fails unexpectedly', async () => {
+    mockLaunchBuildContextChat.mockRejectedValueOnce(new Error('database unavailable'));
+
+    const response = await POST(makeRequest({ buildUuid: 'build-1' }));
+
+    expect(response.status).toBe(500);
   });
 });

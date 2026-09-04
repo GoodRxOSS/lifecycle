@@ -99,6 +99,17 @@ it('accepts exactly enabled and allowChanges', async () => {
   expect(mockSetConfig).toHaveBeenCalledWith(body, 'admin-user', 'request-1');
 });
 
+it('rejects malformed JSON before writing MCP settings', async () => {
+  const req = request('PUT');
+  req.json = jest.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input'));
+
+  const response = await PUT(req);
+
+  expect(response.status).toBe(400);
+  expect((await response.json()).error.message).toContain('Invalid JSON');
+  expect(mockSetConfig).not.toHaveBeenCalled();
+});
+
 it('keeps both methods admin-only', async () => {
   mockGetUser.mockReturnValue({
     sub: 'ordinary-user',

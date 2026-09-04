@@ -15,6 +15,7 @@
  */
 
 import {
+  containsSecretRefTemplate,
   parseSecretRef,
   parseSecretRefsFromEnv,
   isSecretRef,
@@ -32,6 +33,22 @@ describe('secretRefs', () => {
         '{{aws:myapp/db:password}} and https://example.com'
       );
     });
+  });
+
+  describe('containsSecretRefTemplate', () => {
+    it('detects an embedded secret reference on repeated calls', () => {
+      const template = 'postgres://user:{{vault:payments/database:password}}@database.internal';
+
+      expect(containsSecretRefTemplate(template)).toBe(true);
+      expect(containsSecretRefTemplate(template)).toBe(true);
+    });
+
+    it.each(['', 'static-value', '{{service_publicUrl}}', '{{azure:payments/database:password}}'])(
+      'returns false when %p contains no supported secret reference',
+      (value) => {
+        expect(containsSecretRefTemplate(value)).toBe(false);
+      }
+    );
   });
 
   describe('isSecretRef', () => {
@@ -102,6 +119,7 @@ describe('secretRefs', () => {
     });
 
     it('returns null for non-secret reference', () => {
+      expect(parseSecretRef('')).toBeNull();
       expect(parseSecretRef('{{service_publicUrl}}')).toBeNull();
       expect(parseSecretRef('static-value')).toBeNull();
     });
@@ -153,6 +171,15 @@ describe('secretRefs', () => {
       const result = validateSecretRef(ref, enabledConfig);
       expect(result.valid).toBe(false);
       expect(result.error).toContain('not configured');
+    });
+
+    it('returns invalid when no secret-provider configuration is available', () => {
+      const ref: SecretRef = { provider: 'aws', path: 'myapp/secret', key: 'key' };
+
+      expect(validateSecretRef(ref, undefined)).toEqual({
+        valid: false,
+        error: "Secret provider 'aws' not configured",
+      });
     });
 
     it('returns invalid for disabled provider', () => {

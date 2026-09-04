@@ -17,12 +17,21 @@
 var mockToolLoopAgent = jest.fn().mockImplementation((config) => ({ config }));
 var mockConvertToModelMessages = jest.fn();
 var mockGenerateText = jest.fn();
+var mockLoggerWarn = jest.fn();
+var mockLoggerInfo = jest.fn();
 
 jest.mock('ai', () => ({
   __esModule: true,
   convertToModelMessages: mockConvertToModelMessages,
   generateText: mockGenerateText,
   ToolLoopAgent: mockToolLoopAgent,
+}));
+
+jest.mock('server/lib/logger', () => ({
+  getLogger: jest.fn(() => ({
+    warn: (...args: unknown[]) => mockLoggerWarn(...args),
+    info: (...args: unknown[]) => mockLoggerInfo(...args),
+  })),
 }));
 
 const mockResolveSelection = jest.fn().mockResolvedValue({ provider: 'openai', modelId: 'gpt-5.4' });
@@ -254,6 +263,7 @@ jest.mock('server/services/agent/RunService', () => ({
 
 const mockGetSessionAppendSystemPrompt = jest.fn().mockResolvedValue('Append prompt');
 const mockTouchActivity = jest.fn().mockResolvedValue(undefined);
+const mockBuildWorkspaceCorePromptLines = jest.fn().mockReturnValue([]);
 const mockGetEffectiveSessionConfig = jest.fn().mockResolvedValue({
   systemPrompt: 'DB prompt as stored',
   appendSystemPrompt: undefined,
@@ -275,7 +285,7 @@ jest.mock('server/services/agentSession', () => ({
 
 jest.mock('server/services/workspaceCoreMcp/prompt', () => ({
   __esModule: true,
-  buildWorkspaceCorePromptLines: jest.fn(() => []),
+  buildWorkspaceCorePromptLines: (...args: unknown[]) => mockBuildWorkspaceCorePromptLines(...args),
 }));
 
 jest.mock('server/services/agentSessionConfig', () => ({
@@ -287,11 +297,14 @@ jest.mock('server/services/agentSessionConfig', () => ({
   },
 }));
 
+const mockIsToolKeyAlwaysAllowEligible = jest.fn().mockReturnValue(true);
+
 jest.mock('server/services/agent/ApprovalService', () => ({
   __esModule: true,
   default: {
     syncApprovalRequestsFromMessages: jest.fn(),
     syncApprovalRequestStateFromMessages: jest.fn(),
+    isToolKeyAlwaysAllowEligible: (...args: unknown[]) => mockIsToolKeyAlwaysAllowEligible(...args),
   },
 }));
 
@@ -342,6 +355,16 @@ const mockToolExecutionInsert = jest.fn();
 const mockToolExecutionFirst = jest.fn();
 const mockToolExecutionPatchAndFetchById = jest.fn();
 const mockScheduleEnvironmentWatch = jest.fn();
+const mockExtractDebugRepairCommitFromToolExecutions = jest.fn().mockResolvedValue(null);
+
+jest.mock('server/services/agent/debugRepairObservation', () => {
+  const originalModule = jest.requireActual('server/services/agent/debugRepairObservation');
+  return {
+    ...originalModule,
+    extractDebugRepairCommitFromToolExecutions: (...args: unknown[]) =>
+      mockExtractDebugRepairCommitFromToolExecutions(...args),
+  };
+});
 
 jest.mock('server/services/agent/EnvironmentWatchService', () => ({
   __esModule: true,
@@ -390,12 +413,63 @@ import ApprovalService from 'server/services/agent/ApprovalService';
 import AgentMessageStore from 'server/services/agent/MessageStore';
 import AgentSessionService from 'server/services/agentSession';
 import { SessionWorkspaceGatewayUnavailableError } from 'server/services/agent/errors';
+import { AgentRunOwnershipLostError } from 'server/services/agent/AgentRunOwnershipLostError';
 
 const mockSyncApprovalRequests = ApprovalService.syncApprovalRequestsFromMessages as jest.Mock;
 const mockSyncApprovalRequestState = ApprovalService.syncApprovalRequestStateFromMessages as jest.Mock;
 const mockSyncCanonicalMessagesFromUiMessages = AgentMessageStore.syncCanonicalMessagesFromUiMessages as jest.Mock;
 const mockUpsertCanonicalUiMessagesForThread = AgentMessageStore.upsertCanonicalUiMessagesForThread as jest.Mock;
 const mockMarkSessionRuntimeFailure = AgentSessionService.markSessionRuntimeFailure as jest.Mock;
+
+function makeDebugRepairRunPlanSnapshot() {
+  return {
+    ...runPlanSnapshot,
+    agent: {
+      id: 'system.debug',
+      label: 'Debug',
+      sourceKind: 'build_context_chat',
+    },
+    debug: {
+      requestedIntent: 'repair',
+      resolvedIntent: 'repair',
+      decisionSource: 'client_request',
+      reasonCode: 'repair_requested',
+    },
+  } as const;
+}
+
+function mockAdmissionSnapshot(snapshot: Record<string, unknown>) {
+  mockResolveForRunAdmission.mockResolvedValueOnce({
+    approvalPolicy: 'on-request',
+    requestedHarness: null,
+    requestedProvider: null,
+    requestedModel: null,
+    resolvedHarness: 'lifecycle_ai_sdk',
+    resolvedProvider: 'openai',
+    resolvedModel: 'gpt-5.4',
+    sandboxRequirement: { filesystem: 'persistent' },
+    runtimeOptions: {},
+    runPlanSnapshot: snapshot,
+  });
+}
+
+function executeDefault(overrides: Record<string, unknown> = {}) {
+  return AgentRunExecutor.execute({
+    session: { id: 17, uuid: 'sess-1' } as any,
+    thread: { id: 7, uuid: 'thread-1' } as any,
+    userIdentity: { userId: 'sample-user' } as any,
+    ...overrides,
+  });
+}
+
+function makeOwnershipLostError() {
+  return new AgentRunOwnershipLostError({
+    runUuid: 'run-1',
+    expectedExecutionOwner: 'worker-1',
+    currentStatus: 'completed',
+    currentExecutionOwner: 'worker-2',
+  });
+}
 
 describe('AgentRunExecutor', () => {
   beforeEach(() => {
@@ -455,6 +529,9 @@ describe('AgentRunExecutor', () => {
     });
     mockGetSessionAppendSystemPrompt.mockResolvedValue('Append prompt');
     mockTouchActivity.mockResolvedValue(undefined);
+    mockBuildWorkspaceCorePromptLines.mockReturnValue([]);
+    mockIsToolKeyAlwaysAllowEligible.mockReturnValue(true);
+    mockExtractDebugRepairCommitFromToolExecutions.mockResolvedValue(null);
     mockMarkSessionRuntimeFailure.mockResolvedValue(undefined);
     mockGetEffectiveSessionConfig.mockResolvedValue({
       systemPrompt: 'DB prompt as stored',
@@ -2205,6 +2282,918 @@ describe('AgentRunExecutor', () => {
       expect.objectContaining({ message: 'message sync failed' }),
       expect.any(Object),
       { dispatchAttemptId: undefined }
+    );
+  });
+
+  it('rejects a direct run before admission when its source is not ready', async () => {
+    mockGetSessionSource.mockResolvedValueOnce({ id: 3, uuid: 'source-1', status: 'provisioning' });
+
+    await expect(executeDefault()).rejects.toThrow('Session source is not ready yet.');
+
+    expect(mockResolveForRunAdmission).not.toHaveBeenCalled();
+    expect(mockCreateQueuedRun).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('fails a direct run when the queued run cannot be claimed', async () => {
+    mockClaimQueuedRunForExecution.mockResolvedValueOnce(null);
+
+    await expect(executeDefault()).rejects.toThrow('Agent run could not be claimed for execution.');
+
+    expect(mockCreateQueuedRun).toHaveBeenCalled();
+    expect(mockStartRunForExecutionOwner).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('rejects an existing run without an execution owner and does not write an ownerless failure', async () => {
+    await expect(
+      executeDefault({
+        existingRun: {
+          id: 11,
+          uuid: 'queued-run-1',
+          status: 'queued',
+          runPlanSnapshot,
+        } as any,
+      })
+    ).rejects.toThrow('Agent run execution owner is required.');
+
+    expect(mockStartRunForExecutionOwner).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('keeps an existing run lease alive while tool discovery is still pending', async () => {
+    let resolveToolSet!: (value: Record<string, unknown>) => void;
+    mockBuildToolSet.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveToolSet = resolve;
+        })
+    );
+    mockPatchProgressForExecutionOwner
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('transient bootstrap heartbeat failure'));
+
+    const executionPromise = executeDefault({
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        runPlanSnapshot,
+      } as any,
+    });
+    for (let index = 0; index < 10 && !mockBuildToolSet.mock.calls.length; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(mockPatchProgressForExecutionOwner).toHaveBeenCalledWith('queued-run-1', 'worker-1', {});
+    jest.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    expect(mockPatchProgressForExecutionOwner).toHaveBeenCalledTimes(2);
+
+    resolveToolSet({ tools: {}, metadata: [], toolApproval: {}, toolsContext: {} });
+    const execution = await executionPromise;
+    execution.dispose();
+  });
+
+  it('locks tool audit, auth handoff, file-change, and allowlist edge behavior', async () => {
+    const onFileChange = jest.fn();
+    const approvalAuth = {
+      githubToken: 'approver-token',
+      source: 'user',
+      writeAuthorized: true,
+    };
+    mockGetApprovalGitHubAuthByToolCallId.mockResolvedValueOnce(approvalAuth);
+    mockIsToolKeyAlwaysAllowEligible.mockImplementation((toolKey) => toolKey === 'read_file');
+    const execution = await executeDefault({
+      thread: {
+        id: 7,
+        uuid: 'thread-1',
+        metadata: {
+          toolApprovalAllowlist: {
+            version: 1,
+            toolKeys: ['read_file', 'update_file'],
+          },
+        },
+      } as any,
+      onFileChange,
+    });
+    const toolSetArgs = mockBuildToolSet.mock.calls[0][0];
+
+    await expect(
+      toolSetArgs.resolveApprovalGitHubAuth({ runUuid: null, toolCallId: 'tool-call-1' })
+    ).resolves.toBeNull();
+    expect(mockGetApprovalGitHubAuthByToolCallId).not.toHaveBeenCalled();
+    await expect(toolSetArgs.resolveApprovalGitHubAuth({ runUuid: 'run-1', toolCallId: 'tool-call-1' })).resolves.toBe(
+      approvalAuth
+    );
+    expect(mockIsToolKeyAlwaysAllowEligible).toHaveBeenCalledWith('read_file', []);
+    expect(mockIsToolKeyAlwaysAllowEligible).toHaveBeenCalledWith('update_file', []);
+
+    mockPendingActionFirst.mockResolvedValueOnce({ id: 55, status: 'denied' });
+    await toolSetArgs.hooks.onToolStarted({
+      source: 'mcp',
+      toolName: 'update_file',
+      toolCallId: 'tool-call-denied',
+      args: { path: 'README.md' },
+      capabilityKey: 'git_write',
+    });
+    expect(mockToolExecutionInsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        pendingActionId: 55,
+        serverSlug: null,
+        approved: false,
+      })
+    );
+
+    await toolSetArgs.hooks.onToolStarted({
+      source: 'builtin',
+      toolName: 'read_file',
+      args: { path: 'README.md' },
+      capabilityKey: 'read',
+    });
+    expect(mockToolExecutionInsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        pendingActionId: null,
+        toolCallId: null,
+        approved: true,
+      })
+    );
+
+    await toolSetArgs.hooks.onToolStarted({
+      source: 'builtin',
+      toolName: 'unlisted_tool',
+      args: {},
+      capabilityKey: 'read',
+    });
+    expect(mockToolExecutionInsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        pendingActionId: null,
+        approved: null,
+      })
+    );
+
+    mockToolExecutionFirst.mockResolvedValueOnce(undefined);
+    await toolSetArgs.hooks.onToolFinished({
+      source: 'builtin',
+      toolName: 'read_file',
+      args: {},
+      result: { ok: true },
+      status: 'completed',
+    });
+    expect(mockToolExecutionPatchAndFetchById).not.toHaveBeenCalled();
+
+    mockToolExecutionFirst.mockResolvedValueOnce({ id: 99, startedAt: null });
+    await toolSetArgs.hooks.onToolFinished({
+      source: 'builtin',
+      toolName: 'read_file',
+      args: {},
+      result: { ok: true, auth: { token: 'must-not-be-durable' } },
+      auth: { source: 'github_handoff' },
+      status: 'completed',
+    });
+    expect(mockToolExecutionPatchAndFetchById).toHaveBeenLastCalledWith(
+      99,
+      expect.objectContaining({
+        durationMs: null,
+        result: {
+          value: { ok: true },
+          auth: { source: 'github_handoff' },
+        },
+      })
+    );
+
+    mockToolExecutionFirst.mockResolvedValueOnce({ id: 100, startedAt: 'not-a-timestamp' });
+    await toolSetArgs.hooks.onToolFinished({
+      source: 'builtin',
+      toolName: 'read_file',
+      args: {},
+      result: 'done',
+      status: 'completed',
+    });
+    expect(mockToolExecutionPatchAndFetchById).toHaveBeenLastCalledWith(
+      100,
+      expect.objectContaining({ durationMs: null })
+    );
+
+    mockToolExecutionFirst.mockResolvedValueOnce({ id: 101, startedAt: '2026-05-01T00:00:00.000Z' });
+    await toolSetArgs.hooks.onToolFinished({
+      source: 'mcp',
+      toolName: 'write_file',
+      toolCallId: 'tool-call-write',
+      args: { path: 'src/sample.ts', content: 'export const sample = true;' },
+      result: {
+        fileChanges: [
+          {
+            path: 'src/sample.ts',
+            kind: 'created',
+            additions: 1,
+            deletions: 0,
+          },
+        ],
+      },
+      status: 'completed',
+    });
+    expect(mockToolExecutionPatchAndFetchById).toHaveBeenLastCalledWith(
+      101,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          fileChanges: expect.arrayContaining([
+            expect.objectContaining({
+              path: 'src/sample.ts',
+              toolCallId: 'tool-call-write',
+              sourceTool: 'write_file',
+              stage: 'applied',
+            }),
+          ]),
+        }),
+      })
+    );
+
+    await toolSetArgs.hooks.onFileChange({ path: 'README.md', kind: 'modified' });
+    expect(onFileChange).toHaveBeenCalledWith({ path: 'README.md', kind: 'modified' });
+    expect(toolSetArgs.hooks.getActiveRunUuid()).toBe('run-1');
+    execution.dispose();
+  });
+
+  it('uses cached discovery and the queued run identity for approval resumes', async () => {
+    let activeRunUuidDuringBuild: string | null = null;
+    let toolSetArgs: Record<string, any> | null = null;
+    mockBuildToolSet.mockImplementationOnce(async (args) => {
+      toolSetArgs = args;
+      activeRunUuidDuringBuild = args.hooks.getActiveRunUuid();
+      return { tools: {}, metadata: [], toolApproval: {}, toolsContext: {} };
+    });
+
+    const execution = await executeDefault({
+      existingRun: {
+        id: 11,
+        uuid: 'queued-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        runPlanSnapshot,
+      } as any,
+      dispatchReason: 'approval_resolved',
+    });
+
+    expect(activeRunUuidDuringBuild).toBe('queued-run-1');
+    expect(mockBuildToolSet).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceToolDiscoveryMode: 'prefer_cached' })
+    );
+    await expect(toolSetArgs?.hooks.onFileChange({ path: 'README.md', kind: 'modified' })).resolves.toBeUndefined();
+    execution.dispose();
+  });
+
+  it.each([
+    ['length', 'token_limit_reached'],
+    ['content-filter', 'content_filtered'],
+    ['error', 'stream_error'],
+    ['other-provider-finish', 'run_incomplete'],
+  ])('classifies terminal finish reason %s as %s', async (finishReason, expectedCode) => {
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Partial response' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason,
+      isAborted: false,
+    });
+
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({
+          code: expectedCode,
+          details: { finishReason },
+        }),
+      })
+    );
+  });
+
+  it('treats an omitted finish reason as a completed stream', async () => {
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({ messages: [], finishReason: undefined, isAborted: false });
+
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'completed' }));
+  });
+
+  it('ignores an unscoped approval part when classifying the current run outcome', async () => {
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-current-run',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Still working' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+        {
+          id: 'assistant-unscoped',
+          role: 'assistant',
+          parts: [{ type: 'dynamic-tool', state: 'approval-requested' }],
+        } as any,
+      ],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({ code: 'max_iterations_exceeded' }),
+      })
+    );
+  });
+
+  it('adds a synthesized repair answer when the stream has no assistant message for the run', async () => {
+    mockAdmissionSnapshot(makeDebugRepairRunPlanSnapshot());
+    mockGenerateText.mockResolvedValueOnce({
+      text: 'No file was changed. Next: verify the failing image tag.',
+      usage: {},
+      finishReason: 'stop',
+      rawFinishReason: 'STOP',
+      warnings: [],
+      response: { id: 'outer-synthesis-response', modelId: 'gpt-5.4' },
+      finalStep: {
+        providerMetadata: { openai: { totalCostUsd: 0.002 } },
+        response: { id: 'synthesis-1', modelId: 'gpt-5.4' },
+      },
+    });
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({
+      messages: [{ id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'Repair it' }] } as any],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    const persistedMessages = mockUpsertCanonicalUiMessagesForThread.mock.calls[0][1];
+    expect(persistedMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: expect.any(String),
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'No file was changed. Next: verify the failing image tag.' }],
+          metadata: expect.objectContaining({ runId: 'run-1' }),
+        }),
+      ])
+    );
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'completed' }));
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        patch: expect.objectContaining({
+          usageSummary: expect.objectContaining({ responseId: 'synthesis-1' }),
+        }),
+      })
+    );
+  });
+
+  it('falls back to the terminal failure when repair-summary synthesis fails', async () => {
+    mockAdmissionSnapshot(makeDebugRepairRunPlanSnapshot());
+    const synthesisFailure = new Error('provider unavailable during synthesis');
+    mockGenerateText.mockRejectedValueOnce(synthesisFailure);
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Still investigating' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: synthesisFailure, runId: 'run-1' },
+      'AgentExec: debug synthesis failed runId=run-1'
+    );
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({ code: 'max_iterations_exceeded' }),
+      })
+    );
+  });
+
+  it('does not append an empty repair synthesis result', async () => {
+    mockAdmissionSnapshot(makeDebugRepairRunPlanSnapshot());
+    mockGenerateText.mockResolvedValueOnce({
+      text: '   ',
+      usage: {},
+      finishReason: 'stop',
+      rawFinishReason: 'STOP',
+      warnings: [],
+      response: { id: 'empty-synthesis', modelId: 'gpt-5.4' },
+    });
+    const execution = await executeDefault();
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Still investigating' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'tool-calls',
+      isAborted: false,
+    });
+
+    const persistedAssistant = mockUpsertCanonicalUiMessagesForThread.mock.calls[0][1][0];
+    expect(persistedAssistant.parts).toEqual([{ type: 'text', text: 'Still investigating' }]);
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        error: expect.objectContaining({ code: 'max_iterations_exceeded' }),
+      })
+    );
+  });
+
+  it('logs repair-watch lookup failures without changing successful stream finalization', async () => {
+    mockAdmissionSnapshot(makeDebugRepairRunPlanSnapshot());
+    const observationFailure = new Error('tool execution history unavailable');
+    mockExtractDebugRepairCommitFromToolExecutions.mockRejectedValueOnce(observationFailure);
+    const execution = await executeDefault({
+      session: { id: 17, uuid: 'sess-1', buildUuid: 'build-1' } as any,
+    });
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'No repair commit was created.' }],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'stop',
+      isAborted: false,
+    });
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: observationFailure, runId: 'run-1' },
+      'AgentExec: repair watch scheduling failed runId=run-1'
+    );
+    expect(mockScheduleEnvironmentWatch).not.toHaveBeenCalled();
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'completed' }));
+  });
+
+  it('schedules a repair watch with no commit URL when only the commit SHA is reported', async () => {
+    mockAdmissionSnapshot(makeDebugRepairRunPlanSnapshot());
+    const commitSha = '0123456789abcdef0123456789abcdef01234567';
+    const execution = await executeDefault({
+      session: { id: 17, uuid: 'sess-1', buildUuid: 'build-1' } as any,
+    });
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'dynamic-tool',
+              toolName: 'mcp__lifecycle__update_file',
+              toolCallId: 'tool-1',
+              state: 'output-available',
+              output: { success: true, commit_sha: commitSha },
+            },
+          ],
+          metadata: { runId: 'run-1' },
+        } as any,
+      ],
+      finishReason: 'stop',
+      isAborted: false,
+    });
+
+    expect(mockScheduleEnvironmentWatch).toHaveBeenCalledWith({
+      buildUuid: 'build-1',
+      threadUuid: 'thread-1',
+      sessionUuid: 'sess-1',
+      reason: 'repair_commit',
+      commitUrl: null,
+    });
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'completed' }));
+  });
+
+  it('adds workspace guidance when a free-form run provisions its workspace mid-loop', async () => {
+    const requestWorkspaceTool = 'mcp__lifecycle__request_workspace';
+    const execTool = 'mcp__workspace_core__exec';
+    const metadata = [
+      {
+        toolKey: execTool,
+        catalogCapabilityId: 'workspace_shell',
+        capabilityKey: 'shell_exec',
+        approvalMode: 'require_approval',
+        resourceDomain: 'workspace',
+      },
+    ];
+    mockBuildToolSet.mockResolvedValueOnce({
+      tools: { [requestWorkspaceTool]: {}, [execTool]: {} },
+      metadata,
+      toolApproval: {},
+      toolsContext: {},
+      workspaceRuntimeReady: false,
+    });
+    mockBuildWorkspaceCorePromptLines.mockReturnValueOnce(['`exec`: run a command in the workspace']);
+    const execution = await executeDefault();
+    const prepareStep = latestAgentConfig().prepareStep;
+
+    const prepared = await prepareStep({
+      stepNumber: 1,
+      steps: [{ toolResults: [{ toolName: requestWorkspaceTool, output: { status: 'ready' } }] }],
+      messages: [],
+      initialInstructions: 'Base instructions',
+    });
+
+    expect(mockBuildWorkspaceCorePromptLines).toHaveBeenCalledWith({
+      approvalPolicy: 'on-request',
+      toolRules: [],
+      runtimeToolMetadata: metadata,
+    });
+    expect(prepared).toEqual({
+      activeTools: [requestWorkspaceTool, execTool],
+      instructions:
+        'Base instructions\n\nThe Lifecycle workspace is now ready. Equipped tools:\n  `exec`: run a command in the workspace',
+    });
+    execution.dispose();
+  });
+
+  it('moves the Anthropic cache breakpoint to the last prepared message', async () => {
+    mockResolveSelection.mockResolvedValueOnce({ provider: 'anthropic', modelId: 'claude-sonnet-4.6' });
+    const execution = await executeDefault({
+      existingRun: {
+        id: 11,
+        uuid: 'queued-custom-run-1',
+        status: 'queued',
+        executionOwner: 'worker-1',
+        runPlanSnapshot: customAgentRunPlanSnapshot,
+      } as any,
+    });
+    const prepareStep = latestAgentConfig().prepareStep;
+
+    const prepared = await prepareStep({
+      stepNumber: 1,
+      steps: [],
+      messages: [
+        { role: 'user', content: 'Fix it', providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } },
+        { role: 'assistant', content: 'Working' },
+      ],
+    });
+
+    expect(prepared.messages[0].providerOptions.anthropic).toEqual({});
+    expect(prepared.messages[1].providerOptions.anthropic.cacheControl).toEqual({ type: 'ephemeral' });
+    execution.dispose();
+  });
+
+  it('repairs only genuine no-such-tool namespace mangling against the active tool set', async () => {
+    const execution = await executeDefault();
+    const repairToolCall = latestAgentConfig().experimental_repairToolCall;
+    const activeTools = { mcp__workspace_core__exec: {} };
+
+    await expect(
+      repairToolCall({
+        toolCall: { toolName: 'default_api:mcp__workspace_core__exec', input: {} },
+        tools: activeTools,
+        error: { name: 'AI_InvalidToolInputError' },
+      })
+    ).resolves.toBeNull();
+    await expect(
+      repairToolCall({
+        toolCall: { toolName: 'unknown_tool', input: {} },
+        tools: activeTools,
+        error: { name: 'AI_NoSuchToolError' },
+      })
+    ).resolves.toBeNull();
+    await expect(
+      repairToolCall({
+        toolCall: { toolName: 'default_api:mcp__workspace_core__exec', input: { command: 'pwd' } },
+        tools: activeTools,
+        error: { name: 'AI_NoSuchToolError' },
+      })
+    ).resolves.toEqual({
+      toolName: 'mcp__workspace_core__exec',
+      input: { command: 'pwd' },
+    });
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      'AgentExec: repaired tool name default_api:mcp__workspace_core__exec -> mcp__workspace_core__exec runId=run-1'
+    );
+    execution.dispose();
+  });
+
+  it('persists final SDK observability and merges it into existing assistant usage metadata', async () => {
+    const execution = await executeDefault();
+    const onEnd = latestAgentConfig().onEnd;
+    onEnd({
+      usage: { inputTokens: 12, outputTokens: 5, totalTokens: 17 },
+      providerMetadata: { openai: { totalCostUsd: 0.01 } },
+      steps: [{ toolCalls: [{}] }, { toolCalls: [] }],
+      finishReason: 'stop',
+      rawFinishReason: 'STOP',
+      warnings: [{ type: 'sample-warning' }],
+      response: { id: 'response-1', modelId: 'gpt-5.4', timestamp: '2026-05-07T00:00:00.000Z' },
+      finalStep: {
+        providerMetadata: { openai: { totalCostUsd: 0.02 } },
+        response: { id: 'final-step-response', modelId: 'gpt-5.4' },
+      },
+    });
+
+    await execution.onStreamFinish({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Done' }],
+          metadata: { runId: 'run-1', usage: { priorCounter: 9 } },
+        } as any,
+      ],
+      finishReason: 'stop',
+      isAborted: false,
+    });
+
+    expect(mockLastFinalizeResult).toEqual(
+      expect.objectContaining({
+        patch: expect.objectContaining({
+          usageSummary: expect.objectContaining({
+            inputTokens: 12,
+            outputTokens: 5,
+            totalTokens: 17,
+            toolCalls: 1,
+            finishReason: 'stop',
+            rawFinishReason: 'STOP',
+            responseId: 'final-step-response',
+          }),
+        }),
+      })
+    );
+    const persistedAssistant = mockUpsertCanonicalUiMessagesForThread.mock.calls[0][1][0];
+    expect(persistedAssistant.metadata.usage).toEqual(
+      expect.objectContaining({ priorCounter: 9, inputTokens: 12, outputTokens: 5 })
+    );
+  });
+
+  it('finalizes successfully when the SDK end event omits optional observability fields', async () => {
+    const execution = await executeDefault();
+    latestAgentConfig().onEnd({});
+
+    await execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false });
+
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'completed' }));
+  });
+
+  it('swallows session-activity failures after successful step progress', async () => {
+    const execution = await executeDefault();
+    const activityFailure = new Error('activity store unavailable');
+    mockTouchActivity.mockRejectedValueOnce(activityFailure);
+
+    await expect(latestAgentConfig().onStepEnd({ usage: { inputTokens: 1 } })).resolves.toBeUndefined();
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: activityFailure, sessionId: 'sess-1' },
+      'Session: activity touch failed sessionId=sess-1'
+    );
+    execution.dispose();
+  });
+
+  it('logs an ordinary step-progress persistence failure without aborting the run', async () => {
+    const execution = await executeDefault();
+    const patchFailure = new Error('progress patch unavailable');
+    mockPatchProgressForExecutionOwner.mockRejectedValueOnce(patchFailure);
+
+    await expect(latestAgentConfig().onStepEnd({ stepNumber: 1, toolCalls: [] })).resolves.toBeUndefined();
+
+    expect(execution.abortSignal.aborted).toBe(false);
+    expect(mockTouchActivity).not.toHaveBeenCalled();
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: patchFailure, runId: 'run-1' },
+      'AgentExec: step observability patch failed runId=run-1'
+    );
+    execution.dispose();
+  });
+
+  it('aborts and surfaces ownership loss while persisting step progress', async () => {
+    const execution = await executeDefault();
+    const ownershipLost = makeOwnershipLostError();
+    mockPatchProgressForExecutionOwner.mockRejectedValueOnce(ownershipLost);
+
+    await expect(latestAgentConfig().onStepEnd({ stepNumber: 1, toolCalls: [] })).rejects.toBe(ownershipLost);
+
+    expect(execution.abortSignal.aborted).toBe(true);
+    expect(mockTouchActivity).not.toHaveBeenCalled();
+    execution.dispose();
+  });
+
+  it('logs heartbeat failures but leaves an ordinarily owned run active', async () => {
+    const execution = await executeDefault();
+    const heartbeatFailure = new Error('heartbeat store unavailable');
+    mockHeartbeatRunExecution.mockRejectedValueOnce(heartbeatFailure);
+
+    jest.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(execution.abortSignal.aborted).toBe(false);
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: heartbeatFailure, runId: 'run-1' },
+      'AgentExec: heartbeat failed runId=run-1'
+    );
+    execution.dispose();
+  });
+
+  it('aborts and stops heartbeats when the execution lease loses ownership', async () => {
+    const execution = await executeDefault();
+    const ownershipLost = makeOwnershipLostError();
+    mockHeartbeatRunExecution.mockRejectedValueOnce(ownershipLost);
+
+    jest.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(execution.abortSignal.aborted).toBe(true);
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      {
+        runId: 'run-1',
+        owner: expect.stringMatching(/^direct:/),
+        currentStatus: 'completed',
+        currentOwner: 'worker-2',
+      },
+      expect.stringMatching(/^AgentExec: ownership lost runId=run-1 owner=direct:/)
+    );
+    mockHeartbeatRunExecution.mockClear();
+    jest.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    expect(mockHeartbeatRunExecution).not.toHaveBeenCalled();
+    execution.dispose();
+  });
+
+  it('uses request auth when approval handoff lookup fails during a requeue', async () => {
+    mockSyncApprovalRequestState.mockResolvedValueOnce({ pendingActions: [], resolvedActionCount: 1 });
+    mockGetFirstApprovalGitHubAuthForRun.mockRejectedValueOnce(new Error('handoff store unavailable'));
+    const execution = await executeDefault({ requestGitHubToken: 'submit-token' });
+
+    await execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false });
+
+    expect(mockEnqueueRun).toHaveBeenCalledWith('run-1', 'approval_resolved', {
+      githubAuth: expect.objectContaining({ githubToken: 'submit-token', source: 'user' }),
+    });
+  });
+
+  it('keeps the queued finalization result when approval resume enqueue fails', async () => {
+    mockSyncApprovalRequestState.mockResolvedValueOnce({ pendingActions: [], resolvedActionCount: 1 });
+    const enqueueFailure = new Error('queue unavailable');
+    mockEnqueueRun.mockRejectedValueOnce(enqueueFailure);
+    const execution = await executeDefault();
+
+    await expect(
+      execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false })
+    ).resolves.toBeUndefined();
+
+    expect(mockLastFinalizeResult).toEqual(expect.objectContaining({ status: 'queued' }));
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: enqueueFailure, runId: 'run-1' },
+      'AgentExec: approval resume enqueue failed runId=run-1'
+    );
+  });
+
+  it('aborts and surfaces ownership loss during stream finalization', async () => {
+    const execution = await executeDefault();
+    const ownershipLost = makeOwnershipLostError();
+    mockFinalizeRunForExecutionOwner.mockRejectedValueOnce(ownershipLost);
+
+    await expect(execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false })).rejects.toBe(
+      ownershipLost
+    );
+
+    expect(execution.abortSignal.aborted).toBe(true);
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+    expect(mockClearAbortController).toHaveBeenCalledWith('run-1');
+  });
+
+  it('rejects stream finalization when the started run has no execution owner', async () => {
+    mockStartRunForExecutionOwner.mockResolvedValueOnce({
+      id: 11,
+      uuid: 'run-1',
+      status: 'running',
+      executionOwner: null,
+    });
+    const execution = await executeDefault();
+
+    await expect(execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false })).rejects.toThrow(
+      'Agent run execution owner is required.'
+    );
+
+    expect(mockUpsertCanonicalUiMessagesForThread).not.toHaveBeenCalled();
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+    expect(mockClearAbortController).toHaveBeenCalledWith('run-1');
+  });
+
+  it('surfaces ownership loss while recording a stream persistence failure', async () => {
+    const persistenceFailure = new Error('message sync failed');
+    const ownershipLost = makeOwnershipLostError();
+    mockUpsertCanonicalUiMessagesForThread.mockRejectedValueOnce(persistenceFailure);
+    mockMarkFailedForExecutionOwner.mockRejectedValueOnce(ownershipLost);
+    const execution = await executeDefault();
+
+    await expect(execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false })).rejects.toBe(
+      ownershipLost
+    );
+
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ error: ownershipLost }),
+      expect.stringContaining('stream finalization failure record failed')
+    );
+  });
+
+  it('preserves the stream persistence error when failure recording also fails ordinarily', async () => {
+    const persistenceFailure = new Error('message sync failed');
+    const recordFailure = new Error('failure store unavailable');
+    mockUpsertCanonicalUiMessagesForThread.mockRejectedValueOnce(persistenceFailure);
+    mockMarkFailedForExecutionOwner.mockRejectedValueOnce(recordFailure);
+    const execution = await executeDefault();
+
+    await expect(execution.onStreamFinish({ messages: [], finishReason: 'stop', isAborted: false })).rejects.toBe(
+      persistenceFailure
+    );
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: recordFailure, runId: 'run-1' },
+      'AgentExec: stream finalization failure record failed runId=run-1'
+    );
+  });
+
+  it('preserves a workspace gateway error when recording the runtime failure also fails', async () => {
+    const gatewayError = new SessionWorkspaceGatewayUnavailableError({
+      sessionId: 'sess-1',
+      cause: new Error('sandbox unavailable'),
+    });
+    const recordFailure = new Error('session store unavailable');
+    mockBuildToolSet.mockRejectedValueOnce(gatewayError);
+    mockMarkSessionRuntimeFailure.mockRejectedValueOnce(recordFailure);
+
+    await expect(executeDefault()).rejects.toBe(gatewayError);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: recordFailure, sessionId: 'sess-1' },
+      'Session: runtime failure record failed sessionId=sess-1'
+    );
+  });
+
+  it('surfaces ownership loss while starting an existing run without recording another failure', async () => {
+    const ownershipLost = makeOwnershipLostError();
+    mockStartRunForExecutionOwner.mockRejectedValueOnce(ownershipLost);
+
+    await expect(
+      executeDefault({
+        existingRun: {
+          id: 11,
+          uuid: 'run-1',
+          status: 'queued',
+          executionOwner: 'worker-1',
+          runPlanSnapshot,
+        } as any,
+      })
+    ).rejects.toBe(ownershipLost);
+
+    expect(mockMarkFailedForExecutionOwner).not.toHaveBeenCalled();
+  });
+
+  it('surfaces ownership loss while recording an execution-construction failure', async () => {
+    const initFailure = new Error('agent init failed');
+    const ownershipLost = makeOwnershipLostError();
+    mockToolLoopAgent.mockImplementationOnce(() => {
+      throw initFailure;
+    });
+    mockMarkFailedForExecutionOwner.mockRejectedValueOnce(ownershipLost);
+
+    await expect(executeDefault()).rejects.toBe(ownershipLost);
+  });
+
+  it('preserves an execution-construction failure when failure recording also fails ordinarily', async () => {
+    const initFailure = new Error('agent init failed');
+    const recordFailure = new Error('failure store unavailable');
+    mockToolLoopAgent.mockImplementationOnce(() => {
+      throw initFailure;
+    });
+    mockMarkFailedForExecutionOwner.mockRejectedValueOnce(recordFailure);
+
+    await expect(executeDefault()).rejects.toBe(initFailure);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      { error: recordFailure, runId: 'run-1' },
+      'AgentExec: run failure record failed runId=run-1'
     );
   });
 });

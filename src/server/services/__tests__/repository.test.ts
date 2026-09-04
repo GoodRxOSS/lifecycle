@@ -237,6 +237,45 @@ describe('RepositoryService', () => {
       expect(empty.repositories).toEqual([]);
       expect(empty.pagination.items).toBe(0);
     });
+
+    test('applies installation and stable repository-id constraints before pagination', async () => {
+      repositories.push(
+        createRepository({ id: 1, githubRepositoryId: 12, githubInstallationId: 34, fullName: 'example-org/api' }),
+        createRepository({ id: 2, githubRepositoryId: 13, githubInstallationId: 34, fullName: 'example-org/web' }),
+        createRepository({ id: 3, githubRepositoryId: 12, githubInstallationId: 99, fullName: 'other-org/api' })
+      );
+
+      const result = await service.listOnboardedRepositories({
+        installationId: '34',
+        allowedGithubRepositoryIds: [13],
+      });
+
+      expect(result.repositories).toEqual([expect.objectContaining({ id: 2, fullName: 'example-org/web' })]);
+      expect(result.pagination.items).toBe(1);
+    });
+
+    test('serializes nullable repository metadata through the default list options', async () => {
+      repositories.push(
+        createRepository({
+          ownerId: null,
+          htmlUrl: null,
+          defaultEnvId: null,
+          createdAt: undefined,
+          updatedAt: undefined,
+        })
+      );
+
+      const result = await service.listOnboardedRepositories();
+
+      expect(result.repositories).toEqual([
+        expect.objectContaining({
+          ownerId: null,
+          htmlUrl: null,
+          defaultEnvId: null,
+          deletedAt: null,
+        }),
+      ]);
+    });
   });
 
   describe('listInstalledRepositories', () => {
@@ -370,6 +409,90 @@ describe('RepositoryService', () => {
 
       expect(legacy.repositories.map((repository) => repository.fullName)).toEqual(['example-org/api']);
       expect(idBound.repositories.map((repository) => repository.fullName)).toEqual(['example-org/web']);
+    });
+
+    test('evicts a malformed installed-repository cache before refetching GitHub', async () => {
+      const cacheKey = githubInstalledRepositoriesCacheKey(34);
+      redis.store.set(cacheKey, '{invalid json');
+      (github.listInstallationRepositories as jest.Mock).mockResolvedValue({
+        data: { total_count: 0, repositories: [] },
+      });
+
+      await expect(service.listInstalledRepositories({ installationId: 34 })).resolves.toEqual({
+        repositories: [],
+        pagination: { current: 1, total: 1, items: 0, limit: 25 },
+      });
+
+      expect(redis.del).toHaveBeenCalledWith(cacheKey);
+      expect(github.listInstallationRepositories).toHaveBeenCalledWith({ installationId: 34, page: 1, perPage: 100 });
+    });
+
+    test('rejects a nonnumeric installation id before reading caches or GitHub', async () => {
+      await expect(service.listInstalledRepositories({ installationId: 'not-a-number' })).rejects.toThrow(
+        'A valid GitHub App installation ID is required'
+      );
+
+      expect(redis.get).not.toHaveBeenCalled();
+      expect(github.listInstallationRepositories).not.toHaveBeenCalled();
+    });
+
+    test('normalizes sparse GitHub metadata and invalid pagination values', async () => {
+      (github.listInstallationRepositories as jest.Mock).mockResolvedValue({
+        data: {
+          repositories: [{ id: 12, name: 'api', full_name: 'example-org/api' }],
+        },
+      });
+
+      const result = await service.listInstalledRepositories({
+        installationId: 34,
+        refresh: true,
+        page: Number.NaN,
+        limit: 0,
+      });
+
+      expect(result).toEqual({
+        repositories: [
+          {
+            githubRepositoryId: 12,
+            ownerId: null,
+            ownerLogin: null,
+            name: 'api',
+            fullName: 'example-org/api',
+            htmlUrl: null,
+            private: null,
+            archived: null,
+            disabled: null,
+            visibility: null,
+            defaultBranch: null,
+            updatedAt: null,
+            pushedAt: null,
+            onboarded: false,
+          },
+        ],
+        pagination: { current: 1, total: 1, items: 1, limit: 25 },
+      });
+    });
+  });
+
+  describe('public input normalization', () => {
+    test('parses all supported onboarded query values and rejects ambiguous input', () => {
+      expect(service.parseOnboardedParam()).toBeUndefined();
+      expect(service.parseOnboardedParam('')).toBeUndefined();
+      expect(service.parseOnboardedParam('true')).toBe(true);
+      expect(service.parseOnboardedParam('false')).toBe(false);
+      expect(() => service.parseOnboardedParam('yes')).toThrow('onboarded must be true or false');
+    });
+
+    test('rejects malformed repository names before external reads or writes', async () => {
+      await expect(service.onboardRepository('missing-owner', 34)).rejects.toThrow(
+        'Invalid repository fullName. Expected format: owner/repo'
+      );
+      await expect(service.removeRepository('one/two/three', 34)).rejects.toThrow(
+        'Invalid repository fullName. Expected format: owner/repo'
+      );
+
+      expect(github.getRepositoryByFullName).not.toHaveBeenCalled();
+      expect(db.models.Repository.query).not.toHaveBeenCalled();
     });
   });
 
@@ -523,6 +646,18 @@ describe('RepositoryService', () => {
         })
       );
     });
+
+    test('accepts GitHub repository metadata without an owner object', async () => {
+      (github.getRepositoryByFullName as jest.Mock).mockResolvedValue({
+        data: createInstalledRepository({ owner: undefined }),
+      });
+
+      await expect(service.onboardRepository('example-org/example-repo', 34)).resolves.toMatchObject({
+        created: true,
+      });
+
+      expect(db.models.Repository.create).toHaveBeenCalledWith(expect.objectContaining({ ownerId: undefined }));
+    });
   });
 
   describe('removeRepository', () => {
@@ -549,6 +684,25 @@ describe('RepositoryService', () => {
           deletedAt: expect.any(String),
         })
       );
+    });
+
+    test('rejects removal when no active matching repository exists', async () => {
+      await expect(service.removeRepository('example-org/missing', 34)).rejects.toThrow(
+        'Repository not found or already removed: example-org/missing'
+      );
+
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    test('removes a matching active repository without an installation filter', async () => {
+      const repository = createRepository({ fullName: 'example-org/api', githubInstallationId: 99 });
+      repositories.push(repository);
+
+      await expect(service.removeRepository('example-org/api')).resolves.toEqual(
+        expect.objectContaining({ onboarded: false, githubInstallationId: 99 })
+      );
+
+      expect(repository.patchAndFetch).toHaveBeenCalledWith({ deletedAt: expect.any(String) });
     });
   });
 
@@ -591,6 +745,22 @@ describe('RepositoryService', () => {
         JSON.stringify({ onboarded: false }),
         'EX',
         60
+      );
+    });
+
+    test('evicts malformed membership cache data before checking the database', async () => {
+      const cacheKey = githubOnboardedRepositoryCacheKey(34, 12);
+      redis.store.set(cacheKey, '{invalid json');
+      repositories.push(createRepository({ id: 7 }));
+
+      await expect(service.isRepositoryOnboarded(34, 12)).resolves.toBe(true);
+
+      expect(redis.del).toHaveBeenCalledWith(cacheKey);
+      expect(redis.set).toHaveBeenCalledWith(
+        cacheKey,
+        expect.stringContaining('"onboarded":true'),
+        'EX',
+        GITHUB_API_CACHE_EXPIRATION_SECONDS
       );
     });
   });
@@ -666,6 +836,147 @@ describe('RepositoryService', () => {
         githubInstallationId: 34,
         fullName: 'example-org/new-name',
       });
+    });
+
+    test('returns null when the repository is not onboarded', async () => {
+      await expect(
+        service.syncRepositoryRename({
+          githubRepositoryId: 999,
+          githubInstallationId: 34,
+          fullName: 'example-org/missing',
+        })
+      ).resolves.toBeNull();
+
+      expect(redis.get).not.toHaveBeenCalled();
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    test('keeps unchanged repository metadata and evicts malformed rename caches', async () => {
+      const repository = createRepository();
+      repositories.push(repository);
+      const installedCacheKey = githubInstalledRepositoriesCacheKey(34);
+      const onboardedCacheKey = githubOnboardedRepositoryCacheKey(34, 12);
+      redis.store.set(installedCacheKey, '{invalid installed cache');
+      redis.store.set(onboardedCacheKey, '{invalid onboarded cache');
+
+      await expect(
+        service.syncRepositoryRename({
+          githubRepositoryId: 12,
+          githubInstallationId: 34,
+          ownerId: 56,
+          ownerLogin: 'example-org',
+          name: 'example-repo',
+          fullName: 'example-org/example-repo',
+          htmlUrl: 'https://github.com/example-org/example-repo',
+          defaultEnvId: 78,
+        })
+      ).resolves.toBe(repository);
+
+      expect(repository.patchAndFetch).not.toHaveBeenCalled();
+      expect(redis.del).toHaveBeenCalledWith(installedCacheKey);
+      expect(redis.del).toHaveBeenCalledWith(onboardedCacheKey);
+    });
+
+    test('patches changed owner and default environment while tolerating absent caches', async () => {
+      const repository = createRepository({ ownerId: 1, defaultEnvId: null });
+      repositories.push(repository);
+
+      await expect(
+        service.syncRepositoryRename({
+          githubRepositoryId: 12,
+          githubInstallationId: 34,
+          ownerId: 56,
+          fullName: repository.fullName,
+          htmlUrl: repository.htmlUrl,
+          defaultEnvId: 78,
+        })
+      ).resolves.toBe(repository);
+
+      expect(repository.patchAndFetch).toHaveBeenCalledWith({ ownerId: 56, defaultEnvId: 78 });
+      expect(redis.get).toHaveBeenCalledWith(githubInstalledRepositoriesCacheKey(34));
+      expect(redis.get).toHaveBeenCalledWith(githubOnboardedRepositoryCacheKey(34, 12));
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    test('does not rewrite a cached negative onboarded result during rename sync', async () => {
+      const repository = createRepository();
+      repositories.push(repository);
+      const onboardedCacheKey = githubOnboardedRepositoryCacheKey(34, 12);
+      redis.store.set(onboardedCacheKey, JSON.stringify({ onboarded: false }));
+
+      await expect(
+        service.syncRepositoryRename({
+          githubRepositoryId: 12,
+          githubInstallationId: 34,
+          fullName: repository.fullName,
+        })
+      ).resolves.toBe(repository);
+
+      expect(redis.store.get(onboardedCacheKey)).toBe(JSON.stringify({ onboarded: false }));
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('repository lookup compatibility methods', () => {
+    test('finds an active repository by owner and GitHub identities', async () => {
+      const repository = createRepository();
+      repositories.push(repository);
+
+      await expect(service.findRepository(56, 12, 34)).resolves.toBe(repository);
+      await expect(service.findRepository(999, 12, 34)).resolves.toBeUndefined();
+    });
+
+    test('returns an existing repository without creating a duplicate', async () => {
+      const repository = createRepository();
+      repositories.push(repository);
+
+      await expect(
+        service.findOrCreateRepository(
+          repository.ownerId,
+          repository.githubRepositoryId,
+          repository.githubInstallationId,
+          repository.fullName,
+          repository.htmlUrl,
+          repository.defaultEnvId
+        )
+      ).resolves.toBe(repository);
+
+      expect(db.models.Repository.create).not.toHaveBeenCalled();
+    });
+
+    test('creates a repository when the identity is not already active', async () => {
+      const result = await service.findOrCreateRepository(
+        56,
+        12,
+        34,
+        'example-org/example-repo',
+        'https://github.com/example-org/example-repo',
+        78
+      );
+
+      expect(db.models.Repository.create).toHaveBeenCalledWith({
+        githubRepositoryId: 12,
+        githubInstallationId: 34,
+        ownerId: 56,
+        fullName: 'example-org/example-repo',
+        htmlUrl: 'https://github.com/example-org/example-repo',
+        defaultEnvId: 78,
+      });
+      expect(result).toEqual(expect.objectContaining({ id: 1, githubRepositoryId: 12 }));
+    });
+
+    test('propagates repository query failures from direct and find-or-create lookups', async () => {
+      const error = new Error('database unavailable');
+      db.models.Repository.query.mockImplementation(() => {
+        throw error;
+      });
+
+      await expect(service.findRepository(56, 12, 34)).rejects.toBe(error);
+      await expect(
+        service.findOrCreateRepository(56, 12, 34, 'example-org/example-repo', 'https://github.com/repo', 78)
+      ).rejects.toBe(error);
+      await expect(service.findRepositoryByGithubId(12, 34)).rejects.toBe(error);
+      expect(db.models.Repository.create).not.toHaveBeenCalled();
     });
   });
 });

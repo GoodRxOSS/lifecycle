@@ -65,7 +65,7 @@ jest.mock('server/services/agent/WorkspaceRuntimeStateService', () => {
   };
 });
 
-import { DELETE } from './route';
+import { DELETE, GET } from './route';
 import { WorkspaceActionBlockedError } from 'server/services/agent/WorkspaceRuntimeStateService';
 
 function makeRequest(): NextRequest {
@@ -89,6 +89,51 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
       status: 'active',
     });
     mockArchiveSession.mockResolvedValue(undefined);
+  });
+
+  it('returns the session record owned by the current user', async () => {
+    const session = { uuid: 'sample-session', userId: 'sample-user', status: 'active', title: 'Sample' };
+    mockGetOwnedSessionRecord.mockResolvedValue(session);
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).data).toEqual(session);
+    expect(mockGetOwnedSessionRecord).toHaveBeenCalledWith('sample-session', 'sample-user');
+  });
+
+  it('returns 404 when the current user does not own the requested session', async () => {
+    mockGetOwnedSessionRecord.mockResolvedValue(null);
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'missing-session' }),
+    });
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Session not found');
+  });
+
+  it('rejects unauthenticated session reads before querying', async () => {
+    mockGetRequestUserIdentity.mockReturnValue(null);
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(mockGetOwnedSessionRecord).not.toHaveBeenCalled();
+  });
+
+  it('maps an unexpected session read failure to 500', async () => {
+    mockGetOwnedSessionRecord.mockRejectedValue(new Error('session store unavailable'));
+
+    const response = await GET(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+
+    expect(response.status).toBe(500);
   });
 
   it('archives the session and reports the archived state', async () => {
@@ -135,6 +180,17 @@ describe('/api/v2/ai/agent/sessions/[sessionId]', () => {
     expect(response.status).toBe(409);
     expect(body.error.message).toBe('Wait for the current agent run to finish before changing the workspace.');
     expect(mockGetSession).toHaveBeenCalledWith('sample-session');
+    expect(mockArchiveSession).toHaveBeenCalledWith('sample-session');
+  });
+
+  it('maps an unexpected archive failure to 500', async () => {
+    mockArchiveSession.mockRejectedValue(new Error('archive store unavailable'));
+
+    const response = await DELETE(makeRequest(), {
+      params: Promise.resolve({ sessionId: 'sample-session' }),
+    });
+
+    expect(response.status).toBe(500);
     expect(mockArchiveSession).toHaveBeenCalledWith('sample-session');
   });
 
