@@ -18,6 +18,7 @@ const mockGetAllConfigs = jest.fn();
 const mockGetApiEnvironmentsConfig = jest.fn();
 const mockGetYamlFileContent = jest.fn();
 const mockApplyServiceOverrides = jest.fn();
+const mockUpdatePullRequestActivityStream = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -92,6 +93,12 @@ jest.mock('server/services/deployCleanup', () =>
 jest.mock('server/services/deploy', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({ patchAndUpdateActivityFeed: jest.fn() })),
+}));
+jest.mock('server/services/activityStream', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    updatePullRequestActivityStream: mockUpdatePullRequestActivityStream,
+  })),
 }));
 jest.mock('server/services/webhook', () => ({
   __esModule: true,
@@ -1902,6 +1909,55 @@ describe('applyApiEnvironmentPatch', () => {
       uuid: build.uuid,
       kind: BuildKind.ENVIRONMENT,
     });
+  });
+
+  it('refreshes the mission control comment when a config change does not queue a redeploy', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      triggerType: 'github_pr',
+      pullRequest: { deployOnUpdate: false },
+      commentRuntimeEnv: {},
+    };
+    allowMutableBuild(models, build);
+
+    const result = await service.applyApiEnvironmentPatch(build, override as any, {
+      env: { A: 'b' },
+    });
+
+    expect(result).toEqual({ mode: 'applied', changed: true, build });
+    expect(mockUpdatePullRequestActivityStream).toHaveBeenCalledWith(
+      build,
+      [],
+      build.pullRequest,
+      null,
+      true,
+      true,
+      null,
+      true
+    );
+  });
+
+  it('does not duplicate the comment refresh when the config change already queues a redeploy', async () => {
+    const { service, models } = makeService();
+    const override = overrideMock();
+    const build = {
+      ...apiBuild(),
+      triggerType: 'github_pr',
+      pullRequest: { deployOnUpdate: true },
+      commentRuntimeEnv: {},
+    };
+    allowMutableBuild(models, build);
+    const enqueue = jest.spyOn(service, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined as any);
+
+    const result = await service.applyApiEnvironmentPatch(build, override as any, {
+      env: { A: 'b' },
+    });
+
+    expect(enqueue).toHaveBeenCalled();
+    expect(result.mode).toBe('redeploy_queued');
+    expect(mockUpdatePullRequestActivityStream).not.toHaveBeenCalled();
   });
 
   it('merges and null-deletes individual MCP env keys inside the locked patch', async () => {

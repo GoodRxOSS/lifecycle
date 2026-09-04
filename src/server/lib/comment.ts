@@ -15,8 +15,41 @@
  */
 
 import { getLogger } from './logger';
-import { CommentParser } from 'shared/constants';
+import { BuildKind, CommentParser } from 'shared/constants';
 import { compact, flatten, set } from 'lodash';
+import type Service from 'server/services/_service';
+import type { Build, PullRequest } from 'server/models';
+
+/**
+ * Only build and deploy status transitions normally rebuild the Mission Control comment, so a
+ * config change that queues no redeploy would leave it stale — and editing that stale comment
+ * would then reapply the old state. Callers decide when this applies, since the environments
+ * patch aggregates its sub-calls while the per-build routes refresh per call.
+ */
+export async function refreshMissionControlComment(
+  service: Service,
+  build: Build,
+  pullRequest: PullRequest | null | undefined = build?.pullRequest
+): Promise<void> {
+  if (!pullRequest || build?.kind === BuildKind.SANDBOX) {
+    return;
+  }
+
+  try {
+    const { db, redis, redlock, queueManager } = service;
+    const activityStream =
+      db.services?.ActivityStream ??
+      new (await import('server/services/activityStream')).default(db, redis, redlock, queueManager);
+
+    // queue:true enqueues by pullRequest.id and returns before `repository` is read; the queued worker re-fetches its own graph.
+    await activityStream.updatePullRequestActivityStream(build, [], pullRequest, null, true, true, null, true);
+  } catch (error) {
+    getLogger().warn({ error }, 'Comment: mission control refresh failed after non-redeploy config change');
+  }
+}
+
+// Matches the list-item line only; quoted lines are not checkboxes on GitHub.
+const REDEPLOY_ON_PUSH_LINE = /^[ \t]*[-*+] \[([ xX])\] Redeploy on pushes to default branches[ \t]*\r?$/m;
 
 export class CommentHelper {
   public static parseServiceBranches(comment: string): Array<{
@@ -42,8 +75,13 @@ export class CommentHelper {
     return compact(flatten(serviceBranches));
   }
 
-  public static parseRedeployOnPushes(comment: string): boolean {
-    return comment.match(/\[x\] Redeploy on pushes to default branches/g) != null;
+  /** Undefined means the line is absent, which callers must not persist as false. */
+  public static parseRedeployOnPushes(comment: string): boolean | undefined {
+    const match = REDEPLOY_ON_PUSH_LINE.exec(comment ?? '');
+    if (!match) {
+      return undefined;
+    }
+    return match[1].toLowerCase() === 'x';
   }
 
   public static parseVanityUrl(comment: string): string {

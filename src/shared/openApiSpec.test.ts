@@ -73,8 +73,13 @@ describe('OpenAPI v2 environment contract', () => {
       $ref: '#/components/schemas/EnvironmentDetailSuccessResponse',
     });
     expect(successSchema('/api/v2/environments/{uuid}', 'patch', '200')).toEqual({
-      $ref: '#/components/schemas/EnvironmentDetailSuccessResponse',
+      $ref: '#/components/schemas/EnvironmentPatchSuccessResponse',
     });
+    const patchResultExtension = schemas.EnvironmentPatchResult.allOf[1];
+    expect(patchResultExtension.properties.redeployQueued).toEqual(expect.objectContaining({ type: 'boolean' }));
+    expect(patchResultExtension.properties.deployId).toEqual(expect.objectContaining({ type: 'string' }));
+    expect(patchResultExtension.required).toContain('redeployQueued');
+    expect(patchResultExtension.required).not.toContain('deployId');
     expect(successSchema('/api/v2/environments/{uuid}', 'delete', '202')).toEqual({
       $ref: '#/components/schemas/EnvironmentQueuedOperationSuccessResponse',
     });
@@ -347,6 +352,9 @@ describe('OpenAPI v2 agent session contract', () => {
         additionalProperties: true,
       })
     );
+    expect(schemas.Build.properties.trackDefaultBranches).toEqual({ type: 'boolean', example: false });
+    // The column is nullable, so requiring it would make the spec lie about degraded responses.
+    expect(schemas.Build.required).not.toContain('trackDefaultBranches');
     expect(schemas.UpdateBuildServiceOverrideRequest).toBeUndefined();
     expect(schemas.UpdateBuildEnvironmentOverridesRequest).toBeUndefined();
     expect(schemas.UpdateBuildOptionsRequest).toBeUndefined();

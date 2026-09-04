@@ -21,6 +21,7 @@ const mockLogger = {
   warn: jest.fn(),
 };
 const mockFallbackEnqueueResolveAndDeployBuild = jest.fn();
+const mockUpdatePullRequestActivityStream = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('server/lib/dependencies', () => ({
   defaultDb: {},
@@ -52,6 +53,13 @@ jest.mock('../build', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     enqueueResolveAndDeployBuild: mockFallbackEnqueueResolveAndDeployBuild,
+  })),
+}));
+
+jest.mock('../activityStream', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({
+    updatePullRequestActivityStream: mockUpdatePullRequestActivityStream,
   })),
 }));
 
@@ -212,6 +220,25 @@ describe('OverrideService.applyBuildOverrides', () => {
       buildId: 42,
       runUUID: 'run-uuid',
     });
+  });
+
+  it('leaves trackDefaultBranches untouched when the comment has no option line', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs({ redeployOnPush: undefined });
+
+    await service.applyBuildOverrides(args);
+
+    const patchArg = (args.build.$query().patch as jest.Mock).mock.calls[0][0];
+    expect(patchArg).not.toHaveProperty('trackDefaultBranches');
+  });
+
+  it('persists an unchecked option line as false', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs({ redeployOnPush: false });
+
+    await service.applyBuildOverrides(args);
+
+    expect(args.build.$query().patch).toHaveBeenCalledWith(expect.objectContaining({ trackDefaultBranches: false }));
   });
 
   it('patches unchecked services as inactive while preserving branch override behavior', async () => {
@@ -422,6 +449,59 @@ describe('OverrideService.applyBuildOverrides', () => {
       queued: false,
       status: 'success',
     });
+  });
+
+  it('refreshes the mission control comment when service overrides change but deploy is disabled', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createFullYamlArgs();
+    args.pullRequest = { deployOnUpdate: false } as any;
+
+    const result = await service.applyServiceOverrides({
+      build: args.build,
+      deploys: args.deploys,
+      pullRequest: args.pullRequest,
+      serviceOverrides: [
+        {
+          name: 'api',
+          active: false,
+        },
+      ],
+      runUuid: 'run-uuid',
+    });
+
+    expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+    expect(result.queued).toBe(false);
+    expect(mockUpdatePullRequestActivityStream).toHaveBeenCalledWith(
+      args.build,
+      [],
+      args.pullRequest,
+      null,
+      true,
+      true,
+      null,
+      true
+    );
+  });
+
+  it('does not duplicate the comment refresh when service overrides already queue a redeploy', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createFullYamlArgs();
+
+    await service.applyServiceOverrides({
+      build: args.build,
+      deploys: args.deploys,
+      pullRequest: args.pullRequest,
+      serviceOverrides: [
+        {
+          name: 'api',
+          active: false,
+        },
+      ],
+      runUuid: 'run-uuid',
+    });
+
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalled();
+    expect(mockUpdatePullRequestActivityStream).not.toHaveBeenCalled();
   });
 
   it('applies branch-only service overrides without changing dependents', async () => {
@@ -933,6 +1013,28 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     await service.applyBuildConfigPatch(args);
 
     expect(enqueueResolveAndDeployBuild).not.toHaveBeenCalled();
+    expect(mockUpdatePullRequestActivityStream).toHaveBeenCalledWith(
+      args.build,
+      [],
+      args.pullRequest,
+      null,
+      true,
+      true,
+      null,
+      true
+    );
+  });
+
+  it('does not duplicate the comment refresh when the config change already queues a redeploy', async () => {
+    const { service, enqueueResolveAndDeployBuild } = createService();
+    const args = createBuildConfigPatchArgs({
+      isStatic: true,
+    });
+
+    await service.applyBuildConfigPatch(args);
+
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalled();
+    expect(mockUpdatePullRequestActivityStream).not.toHaveBeenCalled();
   });
 
   it('patches build config without queueing when the build has no pull request', async () => {

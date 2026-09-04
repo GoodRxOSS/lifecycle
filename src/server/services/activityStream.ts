@@ -145,24 +145,27 @@ export default class ActivityStream extends BaseService {
       const isFastlyPurgeRequested = commentBody.includes(PURGE_FASTLY_CHECKBOX);
 
       try {
-        if (isRedeployRequested) {
-          getLogger().info('Deploy: redeploy reason=commentEdit');
-          await this.db.services.BuildService.enqueueResolveAndDeployBuild({
-            buildId,
-            runUUID: runUuid,
-          });
-          return;
-        }
-
-        if (isFastlyPurgeRequested) {
+        // A redeploy request still takes precedence over a purge, as it did before overrides moved first.
+        if (isFastlyPurgeRequested && !isRedeployRequested) {
           // if fastly purge is requested from comment, we do not have to update the status
           await this.purgeFastlyServiceCache(buildUuid);
           shouldUpdateStatus = false;
           return;
         }
 
-        // handle all environment/service overrides
-        await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid });
+        // Runs first so one edit can change options and redeploy, and a bad body still redeploys.
+        await this.applyCommentOverrides({ build, deploys, pullRequest, commentBody, runUuid }).catch((error) => {
+          getLogger().error({ error }, 'Comment: override apply failed');
+        });
+
+        if (isRedeployRequested) {
+          getLogger().info('Deploy: redeploy reason=commentEdit');
+          // Same runUuid as the override path, so the two enqueues collapse into one deployment.
+          await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+            buildId,
+            runUUID: runUuid,
+          });
+        }
       } finally {
         // after everything update the pr comment
         await this.updatePullRequestActivityStream(
@@ -465,9 +468,9 @@ export default class ActivityStream extends BaseService {
       }
     }
 
-    if (build.trackDefaultBranches) {
+    if (build.status !== BuildStatus.TORN_DOWN) {
       message += '### Options\n*(Toggle options by clicking the checkboxes)*\n';
-      message += `- [x] Redeploy on pushes to default branches\n\n`;
+      message += `- [${build.trackDefaultBranches ? 'x' : ' '}] Redeploy on pushes to default branches\n\n`;
     }
 
     return message;

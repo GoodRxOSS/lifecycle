@@ -2349,6 +2349,18 @@ describe('BuildService focused changed-line coverage', () => {
       'grpc',
       'hostPortMapping'
     );
+    expect(graphSelect).toHaveBeenCalledWith(
+      'id',
+      'title',
+      'fullName',
+      'githubLogin',
+      'pullRequestNumber',
+      'branchName',
+      'status',
+      'labels',
+      'deployOnUpdate',
+      'commentId'
+    );
   });
 
   test('builds every supported image type and ignores inactive and unsupported deploys', async () => {

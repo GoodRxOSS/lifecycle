@@ -708,6 +708,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        EnvironmentPatchResult: {
+          allOf: [
+            { $ref: '#/components/schemas/EnvironmentDetail' },
+            {
+              type: 'object',
+              properties: {
+                redeployQueued: {
+                  type: 'boolean',
+                  description: 'Whether this request queued a redeploy for the environment.',
+                },
+                deployId: {
+                  type: 'string',
+                  description:
+                    'Identifier of the redeploy queued by this request. Present only when redeployQueued is true.',
+                },
+              },
+              required: ['redeployQueued'],
+            },
+          ],
+        },
+
         EnvironmentCreateResult: {
           type: 'object',
           properties: {
@@ -885,6 +906,17 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             {
               type: 'object',
               properties: { data: { $ref: '#/components/schemas/EnvironmentDetail' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        EnvironmentPatchSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/EnvironmentPatchResult' } },
               required: ['data'],
             },
           ],
@@ -4664,6 +4696,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             kind: { $ref: '#/components/schemas/BuildKind' },
             namespace: { type: 'string', example: 'env-white-poetry-596195' },
             isStatic: { type: 'boolean', example: false },
+            trackDefaultBranches: { type: 'boolean', example: false },
             baseBuildId: { type: 'integer', nullable: true },
             commentRuntimeEnv: {
               type: 'object',
@@ -5089,8 +5122,24 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'array',
               items: { type: 'string', example: 'lifecycle-deploy!' },
             },
+            commentId: {
+              type: 'integer',
+              nullable: true,
+              description: "GitHub comment ID of Lifecycle's mission control comment on this PR, if posted yet.",
+              example: 123456789,
+            },
           },
-          required: ['id', 'title', 'fullName', 'githubLogin', 'pullRequestNumber', 'branchName', 'status', 'labels'],
+          required: [
+            'id',
+            'title',
+            'fullName',
+            'githubLogin',
+            'pullRequestNumber',
+            'branchName',
+            'status',
+            'labels',
+            'commentId',
+          ],
         },
 
         /**
