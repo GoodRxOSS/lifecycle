@@ -297,6 +297,25 @@ export default class GlobalConfigService extends BaseService {
     }
   }
 
+  async updateConfig<T>(key: string, initialValue: T, update: (current: T) => T): Promise<T> {
+    const nextConfig = await this.db.knex.transaction(async (trx) => {
+      // Create the row before locking so concurrent first-time updates also serialize.
+      await trx('global_config').insert({ key, config: initialValue }).onConflict('key').ignore();
+      const row = await trx('global_config').where({ key }).forUpdate().first();
+      const currentConfig = typeof row.config === 'string' ? JSON.parse(row.config) : row.config;
+      const next = update(currentConfig ?? initialValue);
+      await this.setConfig(key, next, trx);
+      return next;
+    });
+
+    try {
+      await this.invalidateCache();
+    } catch (cacheError) {
+      getLogger().warn({ error: cacheError }, `Config: cache clear failed key=${key}`);
+    }
+    return nextConfig;
+  }
+
   /**
    * Fetch a config value by key directly from the database (not cache).
    * @param key The config key to fetch.

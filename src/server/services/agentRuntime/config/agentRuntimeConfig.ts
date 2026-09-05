@@ -18,6 +18,7 @@ import BaseService from '../../_service';
 import GlobalConfigService from '../../globalConfig';
 import { getLogger } from 'server/lib/logger';
 import type {
+  AgentFeedbackScope,
   AgentRuntimeConfig,
   AgentRuntimeRepoOverride,
   AgentRuntimeRepoConfigRow,
@@ -26,11 +27,22 @@ import type {
   CustomAgentCreationPolicyConfig,
 } from 'server/services/types/agentRuntimeConfig';
 import {
+  validateAgentFeedbackScope,
   validateAgentRuntimeConfig,
   validateAgentRuntimeRepoOverride,
 } from 'server/lib/validation/agentRuntimeConfigValidator';
 
 const REDIS_KEY_PREFIX = 'agent_runtime_repo_config:';
+
+function defaultGlobalConfig(): AgentRuntimeConfig {
+  return {
+    enabled: false,
+    providers: [],
+    maxMessagesPerSession: 50,
+    sessionTTL: 3600,
+    allowedWritePatterns: ['lifecycle.yaml', 'lifecycle.yml'],
+  };
+}
 
 export class AgentRuntimeConfigService extends BaseService {
   private static instance: AgentRuntimeConfigService;
@@ -174,16 +186,7 @@ export class AgentRuntimeConfigService extends BaseService {
 
   async getGlobalConfig(): Promise<AgentRuntimeConfig> {
     const config = await GlobalConfigService.getInstance().getConfig('agentRuntime');
-    if (!config) {
-      return {
-        enabled: false,
-        providers: [],
-        maxMessagesPerSession: 50,
-        sessionTTL: 3600,
-        allowedWritePatterns: ['lifecycle.yaml', 'lifecycle.yml'],
-      };
-    }
-    return config as AgentRuntimeConfig;
+    return config || defaultGlobalConfig();
   }
 
   async setGlobalConfig(config: AgentRuntimeConfig): Promise<void> {
@@ -195,43 +198,28 @@ export class AgentRuntimeConfigService extends BaseService {
 
   async updateGlobalApprovalPolicy(approvalPolicy: ApprovalPolicyConfig): Promise<AgentRuntimeConfig> {
     validateAgentRuntimeRepoOverride({ approvalPolicy });
-
-    const currentConfig = await this.getGlobalConfig();
-    const nextApprovalPolicy = this.normalizeApprovalPolicy(approvalPolicy);
-    const nextConfig: AgentRuntimeConfig = {
-      ...currentConfig,
-    };
-
-    if (nextApprovalPolicy) {
-      nextConfig.approvalPolicy = nextApprovalPolicy;
-    } else {
-      delete nextConfig.approvalPolicy;
-    }
-
-    await GlobalConfigService.getInstance().setConfig('agentRuntime', nextConfig);
-    this.invalidateCaches();
+    const nextConfig = await this.updateGlobalConfigSection(
+      'approvalPolicy',
+      this.normalizeApprovalPolicy(approvalPolicy)
+    );
     getLogger().info('AgentRuntimeConfig: global approval policy updated via=api');
 
     return nextConfig;
   }
 
+  async updateGlobalFeedbackScope(feedbackScope: AgentFeedbackScope): Promise<AgentRuntimeConfig> {
+    validateAgentFeedbackScope(feedbackScope);
+    const nextConfig = await this.updateGlobalConfigSection('feedbackScope', feedbackScope);
+    getLogger().info('AgentRuntimeConfig: feedback scope updated via=api');
+    return nextConfig;
+  }
+
   async updateGlobalCapabilityPolicy(capabilityPolicy: CapabilityPolicyConfig): Promise<AgentRuntimeConfig> {
     validateAgentRuntimeRepoOverride({ capabilityPolicy });
-
-    const currentConfig = await this.getGlobalConfig();
-    const nextCapabilityPolicy = this.normalizeCapabilityPolicy(capabilityPolicy);
-    const nextConfig: AgentRuntimeConfig = {
-      ...currentConfig,
-    };
-
-    if (nextCapabilityPolicy) {
-      nextConfig.capabilityPolicy = nextCapabilityPolicy;
-    } else {
-      delete nextConfig.capabilityPolicy;
-    }
-
-    await GlobalConfigService.getInstance().setConfig('agentRuntime', nextConfig);
-    this.invalidateCaches();
+    const nextConfig = await this.updateGlobalConfigSection(
+      'capabilityPolicy',
+      this.normalizeCapabilityPolicy(capabilityPolicy)
+    );
     getLogger().info('AgentRuntimeConfig: global capability policy updated via=api');
 
     return nextConfig;
@@ -248,22 +236,30 @@ export class AgentRuntimeConfigService extends BaseService {
       customAgentCreationPolicy,
     });
 
-    const currentConfig = await this.getGlobalConfig();
-    const nextCustomAgentCreationPolicy = this.normalizeCustomAgentCreationPolicy(customAgentCreationPolicy);
-    const nextConfig: AgentRuntimeConfig = {
-      ...currentConfig,
-    };
-
-    if (nextCustomAgentCreationPolicy) {
-      nextConfig.customAgentCreationPolicy = nextCustomAgentCreationPolicy;
-    } else {
-      delete nextConfig.customAgentCreationPolicy;
-    }
-
-    await GlobalConfigService.getInstance().setConfig('agentRuntime', nextConfig);
-    this.invalidateCaches();
+    const nextConfig = await this.updateGlobalConfigSection(
+      'customAgentCreationPolicy',
+      this.normalizeCustomAgentCreationPolicy(customAgentCreationPolicy)
+    );
     getLogger().info('AgentRuntimeConfig: global custom agent creation policy updated via=api');
 
+    return nextConfig;
+  }
+
+  private async updateGlobalConfigSection<K extends keyof AgentRuntimeConfig>(
+    section: K,
+    value: AgentRuntimeConfig[K] | undefined
+  ): Promise<AgentRuntimeConfig> {
+    const nextConfig = await GlobalConfigService.getInstance().updateConfig(
+      'agentRuntime',
+      defaultGlobalConfig(),
+      (currentConfig) => {
+        const next = { ...currentConfig };
+        if (value === undefined) delete next[section];
+        else next[section] = value;
+        return next;
+      }
+    );
+    this.invalidateCaches();
     return nextConfig;
   }
 

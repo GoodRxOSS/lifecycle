@@ -26,7 +26,7 @@ import {
   agentRuntimeConfigSchema,
 } from 'server/lib/validation/agentRuntimeConfigSchemas';
 import { AgentRuntimeConfigValidationError } from 'server/lib/validation/agentRuntimeConfigValidator';
-import type { ApprovalPolicyConfig } from 'server/services/types/agentRuntimeConfig';
+import type { AgentFeedbackScope, ApprovalPolicyConfig } from 'server/services/types/agentRuntimeConfig';
 
 /**
  * @openapi
@@ -120,8 +120,10 @@ const getHandler = async (req: NextRequest) => {
  *     summary: Patch global Agent runtime configuration
  *     description: >
  *       Updates one patchable global Agent runtime configuration section without replacing
- *       the rest of the configuration. Supported patch targets are additive rules and
- *       approval policy. Approval policy updates replace that section with the provided
+ *       the rest of the configuration. Supported patch targets are feedback scope and
+ *       approval policy. Feedback can be disabled, limited to Debug Agent investigations (the default),
+ *       limited to normal chats, or enabled for both.
+ *       Approval policy updates replace that section with the provided
  *       value, so omitting defaultMode or rules clears them. This avoids revalidating
  *       unrelated provider/model settings.
  *     tags:
@@ -215,6 +217,13 @@ const patchHandler = async (req: NextRequest) => {
   const service = AgentRuntimeConfigService.getInstance();
 
   try {
+    if ('feedbackScope' in (body as object)) {
+      const updatedConfig = await service.updateGlobalFeedbackScope(
+        (body as { feedbackScope: AgentFeedbackScope }).feedbackScope
+      );
+      return successResponse(updatedConfig, { status: 200 }, req);
+    }
+
     const approvalPolicyResult = validator.validate(body, agentRuntimeApprovalPolicyUpdateSchema);
     if (!approvalPolicyResult.valid) {
       const messages = approvalPolicyResult.errors.map((e) => e.stack).join('; ');

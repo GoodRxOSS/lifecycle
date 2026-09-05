@@ -15,6 +15,9 @@
  */
 
 import type { AgentCapabilityAvailability, AgentCapabilityCatalogId } from 'server/services/agent/capabilityCatalog';
+import type { AgentFeedbackScope } from 'shared/types/agentFeedback';
+
+export type { AgentFeedbackScope } from 'shared/types/agentFeedback';
 
 export interface AgentRuntimeModelConfig {
   id: string;
@@ -68,6 +71,7 @@ export interface CustomAgentCreationPolicyConfig {
 
 export interface AgentRuntimeConfig {
   enabled: boolean;
+  feedbackScope?: AgentFeedbackScope;
   providers: AgentRuntimeProviderConfig[];
   maxMessagesPerSession: number;
   sessionTTL: number;

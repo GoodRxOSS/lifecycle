@@ -30,6 +30,7 @@ const mockWithLogContext = jest.fn((_context, callback) => callback());
 
 import { Queue } from 'bullmq';
 import GlobalConfigService from '../globalConfig';
+import { AgentRuntimeConfigService } from '../agentRuntime/config/agentRuntimeConfig';
 
 jest.mock('redlock', () => {
   return jest.fn().mockImplementation(() => ({}));
@@ -71,6 +72,78 @@ jest.mock('bullmq', () => ({
     close: jest.fn(),
   })),
 }));
+
+function configurationStore(initialConfig?: object) {
+  let stored = initialConfig;
+  let tail = Promise.resolve();
+  const readLocks = jest.fn();
+  type TransactionState = { release?: () => void; next?: object; writes: boolean };
+  const lock = async (transaction: TransactionState) => {
+    if (transaction.release) return;
+    const previous = tail;
+    tail = new Promise((resolve) => {
+      transaction.release = resolve;
+    });
+    await previous;
+  };
+  const query = (transaction?: TransactionState) => {
+    let inserted;
+    let locking = false;
+    const builder = {
+      insert: jest.fn((value) => {
+        inserted = value.config;
+        return builder;
+      }),
+      onConflict: jest.fn(() => builder),
+      where: jest.fn(() => builder),
+      forUpdate: jest.fn(() => {
+        locking = true;
+        readLocks();
+        return builder;
+      }),
+      first: jest.fn(async () => {
+        if (locking) await lock(transaction!);
+        const config = transaction?.writes ? transaction.next : stored;
+        return config === undefined ? undefined : { config: structuredClone(config) };
+      }),
+      ignore: jest.fn(async () => {
+        if (stored === undefined) {
+          await lock(transaction!);
+          if (stored === undefined) {
+            transaction!.next = structuredClone(inserted);
+            transaction!.writes = true;
+          }
+        }
+      }),
+      merge: jest.fn(async () => {
+        if (transaction) {
+          await lock(transaction);
+          transaction.next = structuredClone(inserted);
+          transaction.writes = true;
+        } else {
+          stored = structuredClone(inserted);
+        }
+      }),
+    };
+    return builder;
+  };
+  const knex = Object.assign(
+    jest.fn(() => query()),
+    {
+      transaction: jest.fn(async (callback) => {
+        const state: TransactionState = { writes: false };
+        try {
+          const result = await callback(jest.fn(() => query(state)));
+          if (state.writes) stored = state.next;
+          return result;
+        } finally {
+          state.release?.();
+        }
+      }),
+    }
+  );
+  return { knex, readLocks, read: () => stored };
+}
 
 describe('GlobalConfigService', () => {
   let service;
@@ -269,6 +342,128 @@ describe('GlobalConfigService', () => {
       await expect(service.setConfig('features', {})).rejects.toBe(failure);
 
       expect(mockLogger.error).toHaveBeenCalledWith({ error: failure }, 'Config: set failed key=features');
+    });
+  });
+
+  describe('updateConfig', () => {
+    it.each([true, false])(
+      'preserves simultaneous approval and feedback updates with an existing row: %s',
+      async (exists) => {
+        const initial = {
+          enabled: true,
+          providers: [],
+          maxMessagesPerSession: 50,
+          sessionTTL: 3600,
+          approvalPolicy: { defaultMode: 'require_approval' },
+          feedbackScope: 'debug',
+        };
+        const store = configurationStore(exists ? initial : undefined);
+        service.db = { knex: store.knex };
+        const instance = jest.spyOn(GlobalConfigService, 'getInstance').mockReturnValue(service);
+        const approvalWriter = new AgentRuntimeConfigService(service.db, service.redis, {} as any, {} as any);
+        const feedbackWriter = new AgentRuntimeConfigService(service.db, service.redis, {} as any, {} as any);
+
+        try {
+          await Promise.all([
+            approvalWriter.updateGlobalApprovalPolicy({ defaultMode: 'deny' }),
+            feedbackWriter.updateGlobalFeedbackScope('all'),
+          ]);
+
+          expect(store.read()).toEqual({
+            ...initial,
+            ...(!exists && { enabled: false, allowedWritePatterns: ['lifecycle.yaml', 'lifecycle.yml'] }),
+            approvalPolicy: { defaultMode: 'deny' },
+            feedbackScope: 'all',
+          });
+          expect(store.readLocks).toHaveBeenCalledTimes(2);
+        } finally {
+          instance.mockRestore();
+        }
+      }
+    );
+
+    it('preserves independent sections when replacing or clearing another section', async () => {
+      const store = configurationStore({
+        enabled: true,
+        providers: [],
+        maxMessagesPerSession: 50,
+        sessionTTL: 3600,
+        approvalPolicy: { defaultMode: 'deny' },
+        customAgentCreationPolicy: { mode: 'disabled' },
+      });
+      service.db = { knex: store.knex };
+      const instance = jest.spyOn(GlobalConfigService, 'getInstance').mockReturnValue(service);
+      const runtime = new AgentRuntimeConfigService(service.db, service.redis, {} as any, {} as any);
+
+      try {
+        await Promise.all([
+          runtime.updateGlobalApprovalPolicy({}),
+          runtime.updateGlobalCustomAgentCreationPolicy({ mode: 'admins_only' }),
+          runtime.updateGlobalCapabilityPolicy({ availability: { workspace_shell: 'disabled' } }),
+          runtime.updateGlobalFeedbackScope('all'),
+        ]);
+
+        expect(store.read()).toEqual({
+          enabled: true,
+          providers: [],
+          maxMessagesPerSession: 50,
+          sessionTTL: 3600,
+          customAgentCreationPolicy: { mode: 'admins_only' },
+          capabilityPolicy: { availability: { workspace_shell: 'disabled' } },
+          feedbackScope: 'all',
+        });
+      } finally {
+        instance.mockRestore();
+      }
+    });
+
+    it.each([undefined, { enabled: true }])(
+      'rolls back a failed transformation without invalidating cache: %p',
+      async (initial) => {
+        const store = configurationStore(initial);
+        service.db = { knex: store.knex };
+        const failure = new Error('invalid replacement');
+
+        await expect(
+          service.updateConfig('features', { enabled: false }, () => {
+            throw failure;
+          })
+        ).rejects.toBe(failure);
+
+        expect(store.read()).toEqual(initial);
+        expect(service.redis.del).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each([JSON.stringify({ enabled: true }), null])(
+      'normalizes a stored JSON string or null before updating: %p',
+      async (stored) => {
+        const store = configurationStore(stored as any);
+        service.db = { knex: store.knex };
+
+        const result = await service.updateConfig('features', { enabled: false }, (current) => ({
+          ...current,
+          feedback: true,
+        }));
+
+        expect(result).toEqual({ enabled: stored !== null, feedback: true });
+      }
+    );
+
+    it('invalidates caches only after commit and preserves a committed update when Redis is unavailable', async () => {
+      const store = configurationStore({ enabled: false });
+      service.db = { knex: store.knex };
+      service.memoryCache = { features: { enabled: false } };
+      const cacheFailure = new Error('redis unavailable');
+      service.redis.del.mockImplementationOnce(async () => {
+        expect(store.read()).toEqual({ enabled: true });
+        throw cacheFailure;
+      });
+
+      await expect(service.updateConfig('features', {}, () => ({ enabled: true }))).resolves.toEqual({ enabled: true });
+
+      expect(service.memoryCache).toBeNull();
+      expect(mockLogger.warn).toHaveBeenCalledWith({ error: cacheFailure }, 'Config: cache clear failed key=features');
     });
   });
 

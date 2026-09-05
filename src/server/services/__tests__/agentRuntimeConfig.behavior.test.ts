@@ -27,6 +27,11 @@ jest.mock('server/services/globalConfig', () => ({
     getInstance: jest.fn(() => ({
       getConfig: (...args: unknown[]) => mockGetGlobalConfig(...args),
       setConfig: (...args: unknown[]) => mockSetGlobalConfig(...args),
+      updateConfig: async (key, initialValue, update) => {
+        const nextConfig = update((await mockGetGlobalConfig(key)) ?? initialValue);
+        await mockSetGlobalConfig(key, nextConfig);
+        return nextConfig;
+      },
     })),
   },
 }));

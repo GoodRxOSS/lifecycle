@@ -27,7 +27,7 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *     summary: Get agent session details for admin review
  *     description: >
  *       Returns a single agent session with thread-level summaries,
- *       including message, run, and pending action counts.
+ *       including archived conversation history and message, run, and pending action counts.
  *     tags:
  *       - Agent Admin
  *     operationId: getAdminAgentSession

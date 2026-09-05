@@ -4,6 +4,7 @@ const mockGetUser = jest.fn();
 const mockGetGlobalConfig = jest.fn();
 const mockSetGlobalConfig = jest.fn();
 const mockUpdateGlobalApprovalPolicy = jest.fn();
+const mockUpdateGlobalFeedbackScope = jest.fn();
 const mockGetRepoConfig = jest.fn();
 const mockGetEffectiveConfig = jest.fn();
 const mockSetRepoConfig = jest.fn();
@@ -27,6 +28,7 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
       getGlobalConfig: (...args: unknown[]) => mockGetGlobalConfig(...args),
       setGlobalConfig: (...args: unknown[]) => mockSetGlobalConfig(...args),
       updateGlobalApprovalPolicy: (...args: unknown[]) => mockUpdateGlobalApprovalPolicy(...args),
+      updateGlobalFeedbackScope: (...args: unknown[]) => mockUpdateGlobalFeedbackScope(...args),
       getRepoConfig: (...args: unknown[]) => mockGetRepoConfig(...args),
       getEffectiveConfig: (...args: unknown[]) => mockGetEffectiveConfig(...args),
       setRepoConfig: (...args: unknown[]) => mockSetRepoConfig(...args),
@@ -166,6 +168,54 @@ describe('global agent runtime configuration route behavior', () => {
     expect(response.status).toBe(200);
     expect(mockUpdateGlobalApprovalPolicy).toHaveBeenCalledWith(approvalPolicy);
     expect((await response.json()).data).toEqual({ ...globalConfig, approvalPolicy: { defaultMode: 'deny' } });
+  });
+
+  it.each(['none', 'debug', 'chat', 'all'])(
+    'patches feedback scope to %s without replacing other configuration',
+    async (feedbackScope) => {
+      mockUpdateGlobalFeedbackScope.mockResolvedValue({ ...globalConfig, feedbackScope });
+      const response = await patchGlobal(request('http://localhost/api/v2/ai/agent/runtime-config', { feedbackScope }));
+      expect(response.status).toBe(200);
+      expect((await response.json()).data).toEqual({ ...globalConfig, feedbackScope });
+      expect(mockUpdateGlobalFeedbackScope).toHaveBeenCalledWith(feedbackScope);
+      expect(mockUpdateGlobalApprovalPolicy).not.toHaveBeenCalled();
+      expect(mockSetGlobalConfig).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([null, 'disabled', false, {}, ['all']])('rejects invalid feedback scope %j', async (feedbackScope) => {
+    const response = await patchGlobal(request('http://localhost/api/v2/ai/agent/runtime-config', { feedbackScope }));
+    expect(response.status).toBe(400);
+    expect(mockUpdateGlobalFeedbackScope).not.toHaveBeenCalled();
+  });
+
+  it('rejects feedback scope patches from a non-admin before parsing the body', async () => {
+    mockGetUser.mockReturnValue({ sub: 'user-1', realm_access: { roles: ['user'] } });
+    const req = request('http://localhost/api/v2/ai/agent/runtime-config', { feedbackScope: 'all' });
+    const response = await patchGlobal(req);
+    expect(response.status).toBe(403);
+    expect(req.json).not.toHaveBeenCalled();
+    expect(mockUpdateGlobalFeedbackScope).not.toHaveBeenCalled();
+  });
+
+  it('rejects combined patches without updating either setting', async () => {
+    const response = await patchGlobal(
+      request('http://localhost/api/v2/ai/agent/runtime-config', {
+        feedbackScope: 'all',
+        approvalPolicy: { defaultMode: 'deny' },
+      })
+    );
+    expect(response.status).toBe(400);
+    expect(mockUpdateGlobalFeedbackScope).not.toHaveBeenCalled();
+    expect(mockUpdateGlobalApprovalPolicy).not.toHaveBeenCalled();
+  });
+
+  it('reports failed feedback scope persistence instead of returning a saved setting', async () => {
+    mockUpdateGlobalFeedbackScope.mockRejectedValueOnce(new Error('database unavailable'));
+    const response = await patchGlobal(
+      request('http://localhost/api/v2/ai/agent/runtime-config', { feedbackScope: 'all' })
+    );
+    expect(response.status).toBe(500);
   });
 
   it('rejects invalid JSON before patching global configuration', async () => {
