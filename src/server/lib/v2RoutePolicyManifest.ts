@@ -230,7 +230,7 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
     policy: 'session',
     roles: ['admin'],
   },
-  { method: 'GET', route: '/api/v2/config/sites', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/config/sites', policy: 'session' },
   { method: 'PUT', route: '/api/v2/config/sites', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/environments', policy: 'principal', scope: 'env:read' },
   { method: 'POST', route: '/api/v2/environments', policy: 'principal', scope: 'env:write' },

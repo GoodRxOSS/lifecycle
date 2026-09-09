@@ -44,12 +44,6 @@ import type { SitesConfig } from 'server/services/types/globalConfig';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '403':
- *         description: Forbidden
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
  *   put:
  *     summary: Update Sites configuration
  *     description: Replaces the global Sites hosting configuration stored in global_config under the sites key.
@@ -112,5 +106,5 @@ const putHandler = async (req: NextRequest) => {
   return successResponse({ config }, { status: 200 }, req);
 };
 
-export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });
+export const GET = createApiHandler(getHandler, { auth: 'session' });
 export const PUT = createApiHandler(putHandler, { auth: 'session', roles: ['admin'] });
