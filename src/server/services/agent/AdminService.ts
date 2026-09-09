@@ -15,6 +15,7 @@
  */
 
 import AgentMessage from 'server/models/AgentMessage';
+import { raw } from 'objection';
 import AgentPendingAction from 'server/models/AgentPendingAction';
 import AgentRun from 'server/models/AgentRun';
 import AgentRunEvent from 'server/models/AgentRunEvent';
@@ -30,6 +31,7 @@ import AgentRunEventService from './RunEventService';
 import ApprovalService from './ApprovalService';
 import AgentThreadService from './ThreadService';
 import AgentMessageStore from './MessageStore';
+import AgentFeedbackService from './FeedbackService';
 import type { CanonicalAgentMessage } from './canonicalMessages';
 import type {
   McpAuthConfig,
@@ -180,12 +182,44 @@ function paginateArray<T>(items: T[], page = 1, limit = 25) {
   };
 }
 
+const HISTORY_MESSAGE_PREDICATE = `history_message.role IN (?, ?)
+  AND jsonb_array_length(history_message.parts) > 0`;
+const HISTORY_MESSAGE_ROLES = ['user', 'assistant'];
+const THREAD_HAS_CONVERSATION_SQL = `EXISTS (
+  SELECT 1 FROM agent_messages AS history_message
+  WHERE history_message."threadId" = agent_threads.id AND ${HISTORY_MESSAGE_PREDICATE}
+) AS "hasConversation"`;
+
+type ReviewThread = Pick<
+  AgentThread,
+  'id' | 'uuid' | 'title' | 'archivedAt' | 'lastRunAt' | 'updatedAt' | 'createdAt'
+> & {
+  hasConversation?: boolean;
+};
+
+function latestReviewThread(threads: ReviewThread[]): ReviewThread | null {
+  const activity = (thread: ReviewThread) =>
+    Math.max(...[thread.lastRunAt, thread.updatedAt, thread.createdAt].map((value) => Date.parse(value || '') || 0));
+  return threads.reduce<ReviewThread | null>((latest, thread) => {
+    if (!thread.hasConversation) return latest;
+    if (
+      !latest ||
+      activity(thread) > activity(latest) ||
+      (activity(thread) === activity(latest) && thread.id > latest.id)
+    ) {
+      return thread;
+    }
+    return latest;
+  }, null);
+}
+
 function serializeSessionSummary(
   session: EnrichedSession,
   counts?: {
     threadCount?: number;
     pendingActionsCount?: number;
     lastRunAt?: string | null;
+    latestThread?: ReviewThread | null;
   }
 ) {
   return {
@@ -216,6 +250,8 @@ function serializeSessionSummary(
     threadCount: counts?.threadCount ?? 0,
     pendingActionsCount: counts?.pendingActionsCount ?? 0,
     lastRunAt: counts?.lastRunAt ?? null,
+    latestThreadId: counts?.latestThread?.uuid ?? null,
+    latestThreadTitle: counts?.latestThread?.title ?? null,
     createdAt: session.createdAt || null,
     updatedAt: session.updatedAt || null,
     editorUrl: session.podName && session.namespace ? `/api/agent-session/workspace-editor/${session.uuid}/` : null,
@@ -224,7 +260,15 @@ function serializeSessionSummary(
 
 export default class AgentAdminService {
   static async listSessions(filters: AgentAdminSessionListFilters) {
-    const query = AgentSession.query();
+    const query = AgentSession.query().whereRaw(
+      `EXISTS (
+        SELECT 1 FROM agent_threads AS history_thread
+        JOIN agent_messages AS history_message ON history_message."threadId" = history_thread.id
+        WHERE history_thread."sessionId" = agent_sessions.id
+          AND ${HISTORY_MESSAGE_PREDICATE}
+      )`,
+      HISTORY_MESSAGE_ROLES
+    );
 
     if (filters.status && filters.status !== 'all') {
       query.where({ status: filters.status });
@@ -263,8 +307,20 @@ export default class AgentAdminService {
       .filter((sessionId): sessionId is number => Number.isInteger(sessionId));
     const [threadRows, pendingRows] = await Promise.all([
       sessionIds.length
-        ? AgentThread.query().whereIn('sessionId', sessionIds).select('sessionId', 'lastRunAt')
-        : Promise.resolve([] as Pick<AgentThread, 'sessionId' | 'lastRunAt'>[]),
+        ? AgentThread.query()
+            .whereIn('sessionId', sessionIds)
+            .select(
+              'id',
+              'uuid',
+              'title',
+              'sessionId',
+              'archivedAt',
+              'lastRunAt',
+              'updatedAt',
+              'createdAt',
+              raw(THREAD_HAS_CONVERSATION_SQL, HISTORY_MESSAGE_ROLES)
+            )
+        : Promise.resolve([] as AgentThread[]),
       sessionIds.length
         ? AgentPendingAction.query()
             .alias('action')
@@ -277,7 +333,10 @@ export default class AgentAdminService {
 
     const threadCountBySessionId = new Map<number, number>();
     const lastRunAtBySessionId = new Map<number, string | null>();
+    const latestThreadBySessionId = new Map<number, ReviewThread | null>();
     for (const thread of threadRows) {
+      const latest = latestThreadBySessionId.get(thread.sessionId);
+      latestThreadBySessionId.set(thread.sessionId, latestReviewThread(latest ? [latest, thread] : [thread]));
       threadCountBySessionId.set(thread.sessionId, (threadCountBySessionId.get(thread.sessionId) || 0) + 1);
       const currentLastRunAt = lastRunAtBySessionId.get(thread.sessionId);
       if (!currentLastRunAt || (thread.lastRunAt && thread.lastRunAt > currentLastRunAt)) {
@@ -296,6 +355,7 @@ export default class AgentAdminService {
         threadCount: threadCountBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || 0,
         pendingActionsCount: pendingCountBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || 0,
         lastRunAt: lastRunAtBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || null,
+        latestThread: latestThreadBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1),
       })
     );
 
@@ -311,7 +371,7 @@ export default class AgentAdminService {
     const [enrichedSession] = await AgentSessionService.enrichSessions([session]);
     const threads = await AgentThread.query()
       .where({ sessionId: session.id })
-      .whereNull('archivedAt')
+      .select('agent_threads.*', raw(THREAD_HAS_CONVERSATION_SQL, HISTORY_MESSAGE_ROLES))
       .orderBy('isDefault', 'desc');
 
     const threadIds = threads.map((thread) => thread.id);
@@ -364,6 +424,7 @@ export default class AgentAdminService {
 
     return {
       session: serializeSessionSummary(enrichedSession, {
+        latestThread: latestReviewThread(threads),
         threadCount: serializedThreads.length,
         pendingActionsCount: serializedThreads.reduce((total, thread) => total + thread.pendingActionsCount, 0),
         lastRunAt:
@@ -388,7 +449,7 @@ export default class AgentAdminService {
       throw new Error('Agent session not found');
     }
 
-    const [sessionDetail, messageRows, runRows, pendingRows, toolRows, eventRows] = await Promise.all([
+    const [sessionDetail, messageRows, runRows, pendingRows, toolRows, eventRows, feedback] = await Promise.all([
       this.getSession(session.uuid),
       AgentMessage.query()
         .alias('message')
@@ -417,6 +478,7 @@ export default class AgentAdminService {
         .select('event.*', 'run.uuid as runUuid')
         .orderBy('event.runId', 'asc')
         .orderBy('event.sequence', 'asc'),
+      AgentFeedbackService.listThreadFeedback(thread.id),
     ]);
 
     const runs = runRows.map((run) => ({
@@ -439,6 +501,7 @@ export default class AgentAdminService {
     return {
       session: sessionDetail.session,
       thread: threadSummary,
+      feedback,
       messages: messageRows.flatMap((message) => {
         const serialized = toCanonicalMessageRecord(message, thread.uuid);
         return serialized ? [serialized] : [];

@@ -46,6 +46,16 @@ function makeConfig(): AgentRuntimeConfig {
 }
 
 describe('validateAgentRuntimeConfig', () => {
+  it.each(['none', 'debug', 'chat', 'all'] as const)('accepts feedback scope %s', (feedbackScope) => {
+    expect(() => validateAgentRuntimeConfig({ ...makeConfig(), feedbackScope })).not.toThrow();
+  });
+
+  it.each([null, 'disabled', false, {}])('rejects invalid feedback scope %j', (feedbackScope) => {
+    expect(() => validateAgentRuntimeConfig({ ...makeConfig(), feedbackScope } as AgentRuntimeConfig)).toThrow(
+      'feedbackScope must be "none", "debug", "chat", or "all".'
+    );
+  });
+
   it('accepts a valid config', () => {
     expect(() => validateAgentRuntimeConfig(makeConfig())).not.toThrow();
   });

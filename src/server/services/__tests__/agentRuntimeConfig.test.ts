@@ -60,9 +60,51 @@ function makeService() {
   };
 }
 
+function mockGlobalConfig(currentConfig: AgentRuntimeConfig) {
+  const getConfig = jest.fn().mockImplementation(async () => currentConfig);
+  const setConfig = jest.fn().mockImplementation(async (_key, config) => {
+    currentConfig = config;
+  });
+  const updateConfig = jest.fn().mockImplementation(async (key, initialValue, update) => {
+    const nextConfig = update(currentConfig ?? initialValue);
+    await setConfig(key, nextConfig);
+    return nextConfig;
+  });
+  (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({ getConfig, setConfig, updateConfig });
+  return { getConfig, setConfig, updateConfig };
+}
+
 describe('AgentRuntimeConfigService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it.each(['none', 'debug', 'chat', 'all'] as const)(
+    'updates feedback collection to %s without changing other settings and invalidates effective config',
+    async (feedbackScope) => {
+      const { service } = makeService();
+      const currentConfig: AgentRuntimeConfig = {
+        enabled: true,
+        providers: [],
+        maxMessagesPerSession: 50,
+        sessionTTL: 3600,
+        approvalPolicy: { defaultMode: 'deny' },
+      };
+      const { getConfig, setConfig, updateConfig } = mockGlobalConfig(currentConfig);
+      await service.getEffectiveConfig();
+      const result = await service.updateGlobalFeedbackScope(feedbackScope);
+      expect(result).toEqual({ ...currentConfig, feedbackScope });
+      expect(setConfig).toHaveBeenCalledWith('agentRuntime', result);
+      expect(await service.getEffectiveConfig()).toEqual(result);
+      expect(getConfig).toHaveBeenCalledTimes(2);
+      expect(updateConfig).toHaveBeenCalledWith('agentRuntime', expect.any(Object), expect.any(Function));
+    }
+  );
+
+  it('rejects invalid feedback scope before reading or persisting configuration', async () => {
+    const { service } = makeService();
+    await expect(service.updateGlobalFeedbackScope('disabled' as 'all')).rejects.toThrow('feedbackScope must be');
+    expect(GlobalConfigService.getInstance).not.toHaveBeenCalled();
   });
 
   it('replaces global approval policy without revalidating unrelated provider defaults', async () => {
@@ -99,11 +141,7 @@ describe('AgentRuntimeConfigService', () => {
       },
     };
 
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
+    const { setConfig } = mockGlobalConfig(currentConfig);
 
     const result = await service.updateGlobalApprovalPolicy({
       defaultMode: 'require_approval',
@@ -163,11 +201,7 @@ describe('AgentRuntimeConfigService', () => {
       },
     };
 
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
+    const { setConfig } = mockGlobalConfig(currentConfig);
 
     const result = await service.updateGlobalApprovalPolicy({});
 
@@ -218,11 +252,7 @@ describe('AgentRuntimeConfigService', () => {
       },
     };
 
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
+    const { setConfig } = mockGlobalConfig(currentConfig);
 
     const result = await service.updateGlobalCapabilityPolicy({
       availability: {
@@ -278,11 +308,7 @@ describe('AgentRuntimeConfigService', () => {
       },
     };
 
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
+    const { setConfig } = mockGlobalConfig(currentConfig);
 
     const result = await service.updateGlobalCapabilityPolicy({});
 
@@ -328,11 +354,7 @@ describe('AgentRuntimeConfigService', () => {
       sessionTTL: 3600,
     };
 
-    const setConfig = jest.fn().mockResolvedValue(undefined);
-    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
-      getConfig: jest.fn().mockResolvedValue(currentConfig),
-      setConfig,
-    });
+    const { setConfig } = mockGlobalConfig(currentConfig);
 
     const result = await service.updateGlobalCustomAgentCreationPolicy({
       mode: 'disabled',

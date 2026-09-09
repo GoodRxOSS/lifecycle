@@ -15,6 +15,7 @@
  */
 
 const mockEnrichSessions = jest.fn();
+const mockListThreadFeedback = jest.fn();
 const mockSessionQuery = jest.fn();
 const mockThreadQuery = jest.fn();
 const mockPendingActionQuery = jest.fn();
@@ -38,6 +39,11 @@ const canonicalStartupFailure = {
   retryable: false,
   origin: 'agent_session',
 };
+
+jest.mock('../FeedbackService', () => ({
+  __esModule: true,
+  default: { listThreadFeedback: (...args: unknown[]) => mockListThreadFeedback(...args) },
+}));
 
 jest.mock('server/services/agentSession', () => ({
   __esModule: true,
@@ -149,6 +155,190 @@ import AgentAdminService from '../AdminService';
 describe('AgentAdminService.listSessions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListThreadFeedback.mockResolvedValue([]);
+  });
+
+  it('excludes empty and system-only histories before enrichment, counts, and pagination while retaining first questions', async () => {
+    const sessions = [
+      { id: 1, uuid: 'no-threads' },
+      { id: 2, uuid: 'empty-thread' },
+      { id: 3, uuid: 'system-events-only' },
+      { id: 4, uuid: 'empty-assistant-placeholder' },
+      { id: 5, uuid: 'first-user-question' },
+      { id: 6, uuid: 'multiple-conversations' },
+      { id: 7, uuid: 'assistant-history' },
+    ].map((session) => ({ ...session, services: [], workspaceRepos: [], selectedServices: [] }));
+    const threads = [
+      { id: 20, sessionId: 2 },
+      { id: 30, sessionId: 3 },
+      { id: 40, sessionId: 4 },
+      { id: 50, sessionId: 5 },
+      { id: 60, sessionId: 6 },
+      { id: 61, sessionId: 6 },
+      { id: 70, sessionId: 7 },
+    ];
+    const messages = [
+      { threadId: 30, role: 'system', parts: [{ type: 'text', text: 'Environment is ready' }] },
+      { threadId: 40, role: 'assistant', parts: [] },
+      { threadId: 50, role: 'user', parts: [{ type: 'text', text: 'Why did the build fail?' }] },
+      { threadId: 60, role: 'user', parts: [{ type: 'text', text: 'Inspect this deployment.' }] },
+      { threadId: 60, role: 'assistant', parts: [{ type: 'text', text: 'The container failed to start.' }] },
+      { threadId: 61, role: 'user', parts: [{ type: 'text', text: 'What should I change?' }] },
+      { threadId: 70, role: 'assistant', parts: [{ type: 'text', text: 'Here is the investigation.' }] },
+    ];
+    let hasHistoryFilter = false;
+    const sessionQuery = {
+      whereRaw: jest.fn((sql: string, roles: string[]) => {
+        expect(sql).toContain('EXISTS (');
+        expect(sql).toContain('history_message."threadId" = history_thread.id');
+        expect(sql).toContain('history_thread."sessionId" = agent_sessions.id');
+        expect(sql).toContain('history_message.role IN (?, ?)');
+        expect(sql).toContain('jsonb_array_length(history_message.parts) > 0');
+        expect(roles).toEqual(['user', 'assistant']);
+        hasHistoryFilter = true;
+        return sessionQuery;
+      }),
+      orderBy: jest.fn().mockReturnThis(),
+      then: (resolve: (value: unknown[]) => unknown) =>
+        Promise.resolve(
+          hasHistoryFilter
+            ? sessions.filter((session) =>
+                threads.some(
+                  (thread) =>
+                    thread.sessionId === session.id &&
+                    messages.some(
+                      (message) =>
+                        message.threadId === thread.id &&
+                        ['user', 'assistant'].includes(message.role) &&
+                        message.parts.length > 0
+                    )
+                )
+              )
+            : sessions
+        ).then(resolve),
+    };
+    mockSessionQuery.mockReturnValue(sessionQuery);
+    mockEnrichSessions.mockImplementation(async (rows) => rows);
+    const threadWhereIn = jest.fn().mockReturnThis();
+    mockThreadQuery.mockReturnValue({ whereIn: threadWhereIn, select: jest.fn().mockResolvedValue(threads.slice(3)) });
+    mockPendingActionQuery.mockReturnValue({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([]),
+    });
+
+    for (const [index, id] of ['first-user-question', 'multiple-conversations', 'assistant-history'].entries()) {
+      const result = await AgentAdminService.listSessions({ page: index + 1, limit: 1 });
+
+      expect(result.data.map((session) => session.id)).toEqual([id]);
+      expect(result.metadata.pagination).toEqual({ current: index + 1, total: 3, items: 3, limit: 1 });
+      expect(mockEnrichSessions).toHaveBeenLastCalledWith(sessions.slice(4));
+      expect(threadWhereIn).toHaveBeenLastCalledWith('sessionId', [5, 6, 7]);
+    }
+    const pastLastPage = await AgentAdminService.listSessions({ page: 4, limit: 1 });
+    expect(pastLastPage.data).toEqual([]);
+    expect(pastLastPage.metadata.pagination).toEqual({ current: 4, total: 3, items: 3, limit: 1 });
+  });
+
+  it('returns zero history count when the database excludes every empty session', async () => {
+    const sessionQuery = {
+      whereRaw: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      then: (resolve: (value: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
+    };
+    mockSessionQuery.mockReturnValue(sessionQuery);
+    mockEnrichSessions.mockResolvedValue([]);
+
+    const result = await AgentAdminService.listSessions({ page: 1, limit: 25 });
+
+    expect(result).toEqual({
+      data: [],
+      metadata: { pagination: { current: 1, total: 1, items: 0, limit: 25 } },
+    });
+    expect(mockThreadQuery).not.toHaveBeenCalled();
+    expect(mockPendingActionQuery).not.toHaveBeenCalled();
+  });
+
+  it('links the latest populated conversation with deterministic ties and retains archived history', async () => {
+    const session = { id: 101, uuid: 'review-session', services: [], workspaceRepos: [], selectedServices: [] };
+    const sessionQuery = {
+      whereRaw: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      then: (resolve: (value: unknown[]) => unknown) => Promise.resolve([session]).then(resolve),
+    };
+    mockSessionQuery.mockReturnValue(sessionQuery);
+    mockEnrichSessions.mockResolvedValue([session]);
+    const threads = [
+      {
+        id: 1,
+        uuid: 'old-run',
+        title: 'Earlier diagnosis',
+        sessionId: 101,
+        lastRunAt: '2026-04-01T00:00:00Z',
+        hasConversation: true,
+      },
+      {
+        id: 5,
+        uuid: 'tie-lower',
+        title: 'Earlier creation',
+        sessionId: 101,
+        createdAt: '2026-04-02T00:00:00Z',
+        hasConversation: true,
+      },
+      {
+        id: 6,
+        uuid: 'latest',
+        title: 'New conversation',
+        sessionId: 101,
+        createdAt: '2026-04-02T00:00:00Z',
+        hasConversation: true,
+      },
+      {
+        id: 8,
+        uuid: 'archived',
+        title: 'Archived',
+        sessionId: 101,
+        updatedAt: '2026-04-01T00:00:00Z',
+        archivedAt: '2026-04-01T00:00:00Z',
+        hasConversation: true,
+      },
+      {
+        id: 9,
+        uuid: 'empty',
+        title: 'Empty latest conversation',
+        sessionId: 101,
+        updatedAt: '2026-04-04T00:00:00Z',
+        hasConversation: false,
+      },
+    ];
+    const threadSelect = jest.fn().mockResolvedValue(threads);
+    mockThreadQuery.mockReturnValue({ whereIn: jest.fn().mockReturnThis(), select: threadSelect });
+    mockPendingActionQuery.mockReturnValue({
+      alias: jest.fn().mockReturnThis(),
+      joinRelated: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([]),
+    });
+
+    const result = await AgentAdminService.listSessions({});
+    expect(result.data[0]).toEqual(
+      expect.objectContaining({ latestThreadId: 'latest', latestThreadTitle: 'New conversation' })
+    );
+    threadSelect.mockResolvedValue(threads.slice().reverse());
+    expect((await AgentAdminService.listSessions({})).data[0]).toEqual(
+      expect.objectContaining({ latestThreadId: 'latest', latestThreadTitle: 'New conversation' })
+    );
+    threadSelect.mockResolvedValue([threads[3]]);
+    expect((await AgentAdminService.listSessions({})).data[0]).toEqual(
+      expect.objectContaining({ latestThreadId: 'archived', latestThreadTitle: 'Archived' })
+    );
+    threadSelect.mockResolvedValue([threads[4]]);
+    expect((await AgentAdminService.listSessions({})).data[0]).toEqual(
+      expect.objectContaining({ latestThreadId: null, latestThreadTitle: null, threadCount: 1 })
+    );
   });
 
   it('uses internal numeric session ids for thread and approval queries while returning public uuids', async () => {
@@ -188,6 +378,7 @@ describe('AgentAdminService.listSessions', () => {
     ];
 
     const sessionQueryBuilder = {
+      whereRaw: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       orderBy: jest
         .fn()
@@ -286,6 +477,7 @@ describe('AgentAdminService.listSessions', () => {
       orWhereRaw: jest.fn().mockReturnThis(),
     };
     const sessionQueryBuilder = {
+      whereRaw: jest.fn().mockReturnThis(),
       where: jest.fn((clause: unknown) => {
         if (typeof clause === 'function') {
           clause(userSearchBuilder);
@@ -381,6 +573,7 @@ describe('AgentAdminService.listSessions', () => {
       selectedServices: [],
     };
     const sessionQueryBuilder = {
+      whereRaw: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       orderBy: jest
         .fn()
@@ -426,6 +619,7 @@ describe('AgentAdminService.listSessions', () => {
 describe('AgentAdminService.getSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListThreadFeedback.mockResolvedValue([]);
     mockSerializeThread.mockImplementation((thread, sessionId) => ({
       id: thread.uuid,
       sessionId,
@@ -461,7 +655,7 @@ describe('AgentAdminService.getSession', () => {
     expect(mockPendingActionQuery).not.toHaveBeenCalled();
   });
 
-  it('returns an empty summary without aggregate queries when a session has no active threads', async () => {
+  it('returns an empty summary without aggregate queries when a session has no threads', async () => {
     const rawSession = {
       id: 17,
       uuid: 'session-empty',
@@ -493,6 +687,7 @@ describe('AgentAdminService.getSession', () => {
     mockThreadQuery.mockReturnValueOnce({
       where: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockResolvedValue([]),
     });
 
@@ -515,7 +710,7 @@ describe('AgentAdminService.getSession', () => {
     expect(mockSerializeRun).not.toHaveBeenCalled();
   });
 
-  it('summarizes each non-archived thread with independent counts and latest run context', async () => {
+  it('summarizes archived and active threads but defaults to populated history instead of a newer empty thread', async () => {
     const rawSession = {
       id: 17,
       uuid: 'session-1',
@@ -542,24 +737,30 @@ describe('AgentAdminService.getSession', () => {
     const threadQuery = {
       where: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockResolvedValue([
         {
           id: 7,
           uuid: 'thread-old-debug',
           title: 'Old Debug diagnosis',
           lastRunAt: '2026-05-09T17:00:00.000Z',
+          archivedAt: '2026-05-09T17:30:00.000Z',
+          hasConversation: true,
         },
         {
           id: 9,
           uuid: 'thread-fresh-debug',
           title: 'Fresh Debug diagnosis',
           lastRunAt: '2026-05-09T18:00:00.000Z',
+          hasConversation: true,
         },
         {
           id: 11,
           uuid: 'thread-no-runs',
           title: 'New conversation',
           lastRunAt: null,
+          createdAt: '2026-05-10T18:00:00.000Z',
+          hasConversation: false,
         },
       ]),
     };
@@ -607,7 +808,7 @@ describe('AgentAdminService.getSession', () => {
     const result = await AgentAdminService.getSession('session-1');
 
     expect(threadQuery.where).toHaveBeenCalledWith({ sessionId: 17 });
-    expect(threadQuery.whereNull).toHaveBeenCalledWith('archivedAt');
+    expect(threadQuery.whereNull).not.toHaveBeenCalled();
     expect(result.threads).toEqual([
       expect.objectContaining({
         id: 'thread-old-debug',
@@ -642,6 +843,7 @@ describe('AgentAdminService.getSession', () => {
     expect(result.session).toEqual(
       expect.objectContaining({
         id: 'session-1',
+        latestThreadId: 'thread-fresh-debug',
         threadCount: 3,
         pendingActionsCount: 1,
         lastRunAt: '2026-05-09T18:00:00.000Z',
@@ -653,6 +855,7 @@ describe('AgentAdminService.getSession', () => {
 describe('AgentAdminService.listMcpServerCoverage', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListThreadFeedback.mockResolvedValue([]);
   });
 
   it('redacts transport and shared MCP secrets in admin coverage rows', async () => {
@@ -871,6 +1074,7 @@ describe('AgentAdminService.listMcpServerCoverage', () => {
 describe('AgentAdminService.listMcpServerUsers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListThreadFeedback.mockResolvedValue([]);
   });
 
   it('fails without loading user connection state when the scoped MCP config does not exist', async () => {
@@ -977,6 +1181,7 @@ describe('AgentAdminService.getThreadConversation', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
     jest.clearAllMocks();
+    mockListThreadFeedback.mockResolvedValue([]);
     mockSerializeThread.mockImplementation((thread, sessionId) => ({
       id: thread.uuid,
       sessionId,
@@ -1053,7 +1258,7 @@ describe('AgentAdminService.getThreadConversation', () => {
     expect(mockRunEventQuery).not.toHaveBeenCalled();
   });
 
-  it('rejects archived threads that are absent from the active session summary', async () => {
+  it('rejects a thread that disappears from the session summary during review', async () => {
     mockThreadQuery.mockReturnValueOnce({
       findOne: jest.fn().mockResolvedValue({
         id: 7,
@@ -1114,7 +1319,7 @@ describe('AgentAdminService.getThreadConversation', () => {
     expect(mockSerializeRunEvent).not.toHaveBeenCalled();
   });
 
-  it('returns canonical messages, runs, events, pending actions, and tool executions for admin replay', async () => {
+  it('returns canonical messages, feedback, runs, and activity for archived admin conversation replay', async () => {
     jest.spyOn(AgentAdminService, 'getSession').mockResolvedValueOnce({
       session: {
         id: 'session-1',
@@ -1124,6 +1329,7 @@ describe('AgentAdminService.getThreadConversation', () => {
         {
           id: 'thread-1',
           sessionId: 'session-1',
+          archivedAt: '2026-04-12T00:00:00.000Z',
           messageCount: 1,
           runCount: 1,
           pendingActionsCount: 1,
@@ -1137,6 +1343,7 @@ describe('AgentAdminService.getThreadConversation', () => {
         id: 7,
         uuid: 'thread-1',
         sessionId: 17,
+        archivedAt: '2026-04-12T00:00:00.000Z',
       }),
     });
     mockSessionQuery.mockReturnValueOnce({
@@ -1300,7 +1507,20 @@ describe('AgentAdminService.getThreadConversation', () => {
       ]);
     mockRunEventQuery.mockReturnValueOnce(eventQuery);
 
+    const feedback = [
+      {
+        id: 'feedback-1',
+        threadId: 'thread-1',
+        messageId: 'message-2',
+        rating: 'down',
+        text: 'The diagnosis missed the failing service.',
+      },
+    ];
+    mockListThreadFeedback.mockResolvedValueOnce(feedback);
     const result = await AgentAdminService.getThreadConversation('thread-1');
+    expect(result.thread.archivedAt).toBe('2026-04-12T00:00:00.000Z');
+    expect(mockListThreadFeedback).toHaveBeenCalledWith(7);
+    expect(result.feedback).toEqual(feedback);
 
     expect(mockSerializeCanonicalMessage).toHaveBeenCalledWith(
       expect.objectContaining({ uuid: 'message-1' }),

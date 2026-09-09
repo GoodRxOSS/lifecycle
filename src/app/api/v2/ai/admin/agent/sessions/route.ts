@@ -27,7 +27,9 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *   get:
  *     summary: List agent sessions for admin review
  *     description: >
- *       Returns paginated agent sessions across users for operational review.
+ *       Returns paginated agent sessions across users with at least one nonempty
+ *       user or assistant message. Empty sessions and system-event-only sessions are excluded.
+ *       Sessions remain visible while waiting for an assistant response to a user's first message.
  *       Results can be filtered by status, repository, user, and build UUID.
  *     tags:
  *       - Agent Admin

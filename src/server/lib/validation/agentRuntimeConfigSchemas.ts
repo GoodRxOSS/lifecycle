@@ -15,8 +15,10 @@
  */
 
 import { AGENT_CAPABILITY_AVAILABILITIES, AGENT_CAPABILITY_CATALOG_IDS } from 'server/services/agent/capabilityCatalog';
+import { AGENT_FEEDBACK_SCOPES } from 'shared/types/agentFeedback';
 
 const approvalModeSchema = { type: 'string', enum: ['allow', 'require_approval', 'deny'] };
+const feedbackScopeSchema = { type: 'string', enum: [...AGENT_FEEDBACK_SCOPES] };
 const customAgentCreationModeSchema = { type: 'string', enum: ['enabled', 'disabled', 'admins_only', 'allowlist'] };
 const creatorCapabilityAvailabilitySchema = { type: 'string', enum: ['available', 'reserved'] };
 
@@ -91,6 +93,7 @@ export const agentRuntimeConfigSchema = {
   type: 'object',
   properties: {
     enabled: { type: 'boolean' },
+    feedbackScope: feedbackScopeSchema,
     approvalPolicy: approvalPolicySchema,
     capabilityPolicy: capabilityPolicySchema,
     customAgentCreationPolicy: customAgentCreationPolicySchema,
@@ -169,6 +172,7 @@ export const agentRuntimeConfigPatchSchema = {
   type: 'object',
   properties: {
     approvalPolicy: approvalPolicySchema,
+    feedbackScope: feedbackScopeSchema,
   },
   additionalProperties: false,
   minProperties: 1,

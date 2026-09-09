@@ -1,5 +1,11 @@
 import { OAS3Options } from 'swagger-jsdoc';
 import {
+  AGENT_FEEDBACK_SCOPES,
+  MAX_AGENT_FEEDBACK_TEXT_LENGTH,
+  MAX_AGENT_FEEDBACK_REASONS,
+  AGENT_FEEDBACK_REASON_IDS,
+} from './types/agentFeedback';
+import {
   AgentChatStatus,
   AgentSessionKind,
   AgentWorkspaceStatus,
@@ -8,6 +14,26 @@ import {
   DeployStatus,
   DeployTypes,
 } from './constants';
+
+const agentFeedbackReasonsSchema = {
+  type: 'array',
+  items: { $ref: '#/components/schemas/AgentFeedbackReason' },
+  uniqueItems: true,
+  maxItems: MAX_AGENT_FEEDBACK_REASONS,
+  default: [],
+};
+
+const agentFeedbackProperties = {
+  id: { type: 'string', format: 'uuid' },
+  threadId: { type: 'string', format: 'uuid' },
+  messageId: { type: 'string', format: 'uuid', nullable: true },
+  rating: { type: 'string', enum: ['up', 'down'] },
+  text: { type: 'string', nullable: true, maxLength: MAX_AGENT_FEEDBACK_TEXT_LENGTH },
+  reasons: agentFeedbackReasonsSchema,
+  createdAt: { type: 'string', format: 'date-time' },
+  updatedAt: { type: 'string', format: 'date-time' },
+};
+const agentFeedbackRequired = ['id', 'threadId', 'messageId', 'rating', 'text', 'reasons', 'createdAt', 'updatedAt'];
 
 const agentRunEventBaseProperties = {
   id: { type: 'string' },
@@ -1673,6 +1699,144 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           ],
         },
 
+        AgentFeedbackReason: {
+          type: 'string',
+          enum: AGENT_FEEDBACK_REASON_IDS,
+          description:
+            'Current positive rating reasons: solved_task, clear_explanation, evidence_backed, actionable_steps. Current negative rating reasons: incorrect_or_incomplete, did_not_follow_instructions, missing_evidence, unhelpful_steps, wrong_context, too_slow. The other reason is valid for either rating.',
+        },
+        AgentFeedbackRequest: {
+          type: 'object',
+          properties: {
+            reasons: {
+              ...agentFeedbackReasonsSchema,
+              description:
+                'Distinct reasons appropriate for the selected rating. Omitted reasons clear any saved reasons.',
+            },
+            rating: { type: 'string', enum: ['up', 'down'] },
+            text: {
+              type: 'string',
+              nullable: true,
+              maxLength: MAX_AGENT_FEEDBACK_TEXT_LENGTH,
+              description: 'Optional comment. Omitted or blank text clears an existing comment.',
+            },
+          },
+          required: ['rating'],
+          additionalProperties: false,
+        },
+        AgentFeedback: {
+          type: 'object',
+          properties: agentFeedbackProperties,
+          required: agentFeedbackRequired,
+          additionalProperties: false,
+        },
+        AgentThreadFeedback: {
+          type: 'object',
+          properties: {
+            feedback: { type: 'array', items: { $ref: '#/components/schemas/AgentFeedback' } },
+            canRateThread: {
+              type: 'boolean',
+              description:
+                'Whether the current feedback policy permits rating this conversation and at least one finished assistant response has meaningful content.',
+            },
+            eligibleMessageIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description:
+                'Persisted assistant replies with finished runs and meaningful content that can currently receive feedback.',
+            },
+          },
+          required: ['feedback', 'canRateThread', 'eligibleMessageIds'],
+          additionalProperties: false,
+        },
+        AgentAdminFeedback: {
+          type: 'object',
+          properties: {
+            ...agentFeedbackProperties,
+            sessionId: { type: 'string', format: 'uuid' },
+            threadTitle: { type: 'string', nullable: true },
+            userId: { type: 'string' },
+            ownerGithubUsername: { type: 'string', nullable: true },
+            repo: { type: 'string', nullable: true },
+            buildUuid: { type: 'string', nullable: true },
+          },
+          required: [
+            ...agentFeedbackRequired,
+            'sessionId',
+            'threadTitle',
+            'userId',
+            'ownerGithubUsername',
+            'repo',
+            'buildUuid',
+          ],
+          additionalProperties: false,
+        },
+        AgentFeedbackSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: { data: { $ref: '#/components/schemas/AgentFeedback' } },
+            },
+          ],
+        },
+        AgentFeedbackListSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: { data: { $ref: '#/components/schemas/AgentThreadFeedback' } },
+            },
+          ],
+        },
+        DeleteAgentFeedbackSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data'],
+              properties: {
+                data: {
+                  type: 'object',
+                  required: ['deleted'],
+                  properties: { deleted: { type: 'boolean' } },
+                  additionalProperties: false,
+                },
+              },
+            },
+          ],
+        },
+        GetAdminAgentFeedbackSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              required: ['data', 'metadata'],
+              properties: {
+                data: { type: 'array', items: { $ref: '#/components/schemas/AgentAdminFeedback' } },
+                metadata: {
+                  type: 'object',
+                  required: ['pagination'],
+                  properties: {
+                    pagination: {
+                      type: 'object',
+                      required: ['current', 'total', 'items', 'limit'],
+                      properties: {
+                        current: { type: 'integer' },
+                        total: { type: 'integer' },
+                        items: { type: 'integer' },
+                        limit: { type: 'integer' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+
         AgentMessage: {
           type: 'object',
           properties: {
@@ -2987,6 +3151,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             lastActivity: { type: 'string', format: 'date-time', nullable: true },
             archivedAt: { type: 'string', format: 'date-time', nullable: true },
             threadCount: { type: 'integer' },
+            latestThreadId: {
+              type: 'string',
+              format: 'uuid',
+              nullable: true,
+              description:
+                'Latest conversation with user or assistant messages by activity time, including archived history.',
+            },
+            latestThreadTitle: { type: 'string', nullable: true },
             pendingActionsCount: { type: 'integer' },
             lastRunAt: { type: 'string', format: 'date-time', nullable: true },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
@@ -3962,6 +4134,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentMessage' },
             },
+            feedback: { type: 'array', items: { $ref: '#/components/schemas/AgentFeedback' } },
             runs: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentRun' },
@@ -3979,7 +4152,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { $ref: '#/components/schemas/AgentToolExecution' },
             },
           },
-          required: ['session', 'thread', 'messages', 'runs', 'events', 'pendingActions', 'toolExecutions'],
+          required: ['session', 'thread', 'messages', 'feedback', 'runs', 'events', 'pendingActions', 'toolExecutions'],
         },
 
         AgentAdminMcpServerCoverage: {
@@ -5539,6 +5712,13 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentRuntimeConfig: {
           type: 'object',
           properties: {
+            feedbackScope: {
+              type: 'string',
+              enum: [...AGENT_FEEDBACK_SCOPES],
+              default: 'debug',
+              description:
+                'Choose none, Debug Agent investigations only (debug, the default), normal chats only (chat), or both (all). Saved feedback remains readable and removable in every mode.',
+            },
             enabled: { type: 'boolean' },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
             capabilityPolicy: { $ref: '#/components/schemas/AgentCapabilityPolicy' },
@@ -5603,12 +5783,19 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         AgentRuntimeConfigPatchRequest: {
           type: 'object',
           properties: {
+            feedbackScope: {
+              type: 'string',
+              enum: [...AGENT_FEEDBACK_SCOPES],
+              default: 'debug',
+              description:
+                'Choose none, Debug Agent investigations only (debug, the default), normal chats only (chat), or both (all). Saved feedback remains readable and removable in every mode.',
+            },
             approvalPolicy: { $ref: '#/components/schemas/AgentApprovalPolicy' },
           },
           additionalProperties: false,
           minProperties: 1,
           maxProperties: 1,
-          description: 'Provide exactly one patch target: approvalPolicy.',
+          description: 'Provide exactly one patch target: approvalPolicy or feedbackScope.',
         },
 
         AgentRuntimeRepoConfigEntry: {

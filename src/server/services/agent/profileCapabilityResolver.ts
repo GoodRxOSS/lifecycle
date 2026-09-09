@@ -140,7 +140,7 @@ function allowedLegacyCapabilityIds(runPlanSnapshot: AgentRunPlanSnapshotV1): Ag
   return [...runPlanSnapshot.capabilities.provisionalCapabilityIds];
 }
 
-function isDebugRunPlan(runPlanSnapshot: AgentRunPlanSnapshotV1): boolean {
+export function isDebugRunPlan(runPlanSnapshot: AgentRunPlanSnapshotV1): boolean {
   return Boolean(
     runPlanSnapshot.debug ||
       (runPlanSnapshot.agent.id === 'system.debug' && runPlanSnapshot.agent.sourceKind === 'build_context_chat')

@@ -14,7 +14,11 @@
  * limitations under the License.
  */
 
-import type { AgentRuntimeConfig, AgentRuntimeRepoOverride } from 'server/services/types/agentRuntimeConfig';
+import type {
+  AgentFeedbackScope,
+  AgentRuntimeConfig,
+  AgentRuntimeRepoOverride,
+} from 'server/services/types/agentRuntimeConfig';
 import { isAgentCapabilityAvailability, isAgentCapabilityCatalogId } from 'server/services/agent/capabilityCatalog';
 import {
   getProviderEnvVarCandidates,
@@ -23,6 +27,7 @@ import {
   type SupportedAgentProviderName,
 } from 'server/services/agent/providerConfig';
 import { validateFileExclusionPatterns } from './filePatternValidator';
+import { AGENT_FEEDBACK_SCOPES } from 'shared/types/agentFeedback';
 
 const CORE_TOOLS = ['query_database'];
 const CUSTOM_AGENT_CREATION_MODES = ['enabled', 'disabled', 'admins_only', 'allowlist'] as const;
@@ -31,6 +36,12 @@ const CREATOR_CAPABILITY_AVAILABILITIES = ['available', 'reserved'] as const;
 type ModelConfig = NonNullable<AgentRuntimeConfig['providers']>[number]['models'][number];
 
 export class AgentRuntimeConfigValidationError extends Error {}
+
+export function validateAgentFeedbackScope(value: unknown): asserts value is AgentFeedbackScope {
+  if (!AGENT_FEEDBACK_SCOPES.some((scope) => value === scope)) {
+    throw new AgentRuntimeConfigValidationError('feedbackScope must be "none", "debug", "chat", or "all".');
+  }
+}
 
 function validateSharedConfigFields(
   config: Pick<
@@ -157,6 +168,9 @@ function validateProviderModels(
 
 export function validateAgentRuntimeConfig(config: AgentRuntimeConfig): void {
   validateSharedConfigFields(config);
+  if (config.feedbackScope !== undefined) {
+    validateAgentFeedbackScope(config.feedbackScope);
+  }
 
   const seenProviders = new Set<SupportedAgentProviderName>();
 
