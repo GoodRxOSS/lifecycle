@@ -30,12 +30,13 @@ jest.mock('server/lib/get-user', () => ({
 }));
 
 jest.mock('server/services/featuresConfig', () => ({
-  FEATURE_DEFINITIONS: [{ key: 'podShell' }, { key: 'envLens' }, { key: 'reconcileDeletedServices' }],
+  InvalidFeatureUpdateError: class InvalidFeatureUpdateError extends Error {},
   getFeaturesConfig: (...args: unknown[]) => mockGetFeaturesConfig(...args),
   updateFeaturesConfig: (...args: unknown[]) => mockUpdateFeaturesConfig(...args),
 }));
 
 import { GET, PUT } from './route';
+import { InvalidFeatureUpdateError } from 'server/services/featuresConfig';
 
 function makeRequest(body?: unknown): NextRequest {
   return {
@@ -50,8 +51,8 @@ describe('V2 feature settings', () => {
   beforeEach(() => {
     process.env.ENABLE_AUTH = 'true';
     mockGetUser.mockReturnValue({ sub: 'admin', realm_access: { roles: ['admin'] } });
-    mockGetFeaturesConfig.mockResolvedValue([]);
-    mockUpdateFeaturesConfig.mockResolvedValue([]);
+    mockGetFeaturesConfig.mockResolvedValue({});
+    mockUpdateFeaturesConfig.mockResolvedValue({});
   });
   afterAll(() => {
     if (original === undefined) delete process.env.ENABLE_AUTH;
@@ -69,17 +70,27 @@ describe('V2 feature settings', () => {
     expect((await PUT(makeRequest({ podShell: false }))).status).toBe(401);
     expect(mockUpdateFeaturesConfig).not.toHaveBeenCalled();
   });
-  test('an admin can save just one registered flag', async () => {
+  test('an admin can save just one stored flag', async () => {
     expect((await PUT(makeRequest({ podShell: false }))).status).toBe(200);
     expect(mockUpdateFeaturesConfig).toHaveBeenCalledWith({ podShell: false });
   });
-  test.each([null, [], {}, { podShell: 'false' }, { arbitrary: true }, { envLens: true, arbitrary: true }])(
+  test.each([null, [], {}, { podShell: 'false' }, { futureFlag: {} }, { futureFlag: null }])(
     'rejects invalid updates %j',
     async (body) => {
       expect((await PUT(makeRequest(body))).status).toBe(400);
       expect(mockUpdateFeaturesConfig).not.toHaveBeenCalled();
     }
   );
+  test('accepts boolean updates without a hardcoded key list', async () => {
+    expect((await PUT(makeRequest({ futureFlag: true }))).status).toBe(200);
+    expect(mockUpdateFeaturesConfig).toHaveBeenCalledWith({ futureFlag: true });
+  });
+  test('returns 400 when the stored feature no longer exists or is not boolean', async () => {
+    mockUpdateFeaturesConfig.mockRejectedValue(
+      new InvalidFeatureUpdateError('Unknown or non-boolean feature: missing')
+    );
+    expect((await PUT(makeRequest({ missing: false }))).status).toBe(400);
+  });
   test('rejects malformed JSON', async () => {
     const req = makeRequest();
     req.json = jest.fn().mockRejectedValue(new SyntaxError('bad json'));

@@ -23,29 +23,16 @@ jest.mock('./globalConfig', () => ({
 import { getFeaturesConfig, updateFeaturesConfig } from './featuresConfig';
 
 describe('feature settings', () => {
-  const original = { exec: process.env.POD_EXEC_ENABLED, auth: process.env.ENABLE_AUTH };
-  beforeEach(() => {
-    process.env.POD_EXEC_ENABLED = 'true';
-    process.env.ENABLE_AUTH = 'true';
-  });
-  afterAll(() => {
-    for (const [key, value] of [
-      ['POD_EXEC_ENABLED', original.exec],
-      ['ENABLE_AUTH', original.auth],
-    ]) {
-      if (value === undefined) delete process.env[key!];
-      else process.env[key!] = value;
-    }
-  });
-  test('missing flags are off and deployment support cannot override the setting', async () => {
+  test('returns only boolean values using the stored keys, with no registry', async () => {
+    getAllConfigs.mockResolvedValue({
+      features: { podShell: true, futureFlag: false, extendedFlag: { enabled: true } },
+    });
+    expect(await getFeaturesConfig()).toEqual({ podShell: true, futureFlag: false });
     getAllConfigs.mockResolvedValue({});
-    expect((await getFeaturesConfig()).every((flag) => !flag.enabled && !flag.effectiveEnabled)).toBe(true);
-    getAllConfigs.mockResolvedValue({ features: { podShell: true } });
-    process.env.POD_EXEC_ENABLED = 'false';
-    expect((await getFeaturesConfig())[0]).toMatchObject({ enabled: true, available: false, effectiveEnabled: false });
+    expect(await getFeaturesConfig()).toEqual({});
   });
-  test('merges a partial edit and awaits a forced cache refresh', async () => {
-    let stored = { podShell: true, envLens: true, unlistedFlag: true };
+  test('merges arbitrary stored boolean keys, preserves unrelated data and awaits refresh', async () => {
+    let stored = { podShell: true, futureFlag: false, extendedFlag: { enabled: true } };
     updateConfig.mockImplementation(async (key, initial, update) => {
       expect(key).toBe('features');
       expect(initial).toEqual({});
@@ -56,10 +43,20 @@ describe('feature settings', () => {
       expect(refresh).toBe(true);
       return { features: stored };
     });
-    expect((await updateFeaturesConfig({ podShell: false }))[0].effectiveEnabled).toBe(false);
-    expect(stored).toEqual({ podShell: false, envLens: true, unlistedFlag: true });
+    expect(await updateFeaturesConfig({ futureFlag: true })).toEqual({ podShell: true, futureFlag: true });
+    expect(stored).toEqual({ podShell: true, futureFlag: true, extendedFlag: { enabled: true } });
     expect(updateConfig.mock.invocationCallOrder[0]).toBeLessThan(getAllConfigs.mock.invocationCallOrder[0]);
   });
+  test.each(['missing', 'extendedFlag', 'toString'])(
+    'rejects edits to a missing or non-boolean stored key: %s',
+    async (key) => {
+      updateConfig.mockImplementation(async (_key, _initial, update) =>
+        update({ podShell: true, extendedFlag: { enabled: true } })
+      );
+      await expect(updateFeaturesConfig({ [key]: false })).rejects.toThrow('Unknown or non-boolean feature');
+      expect(getAllConfigs).not.toHaveBeenCalled();
+    }
+  );
   test('a failed forced refresh is surfaced to the caller', async () => {
     updateConfig.mockResolvedValue({});
     getAllConfigs.mockRejectedValue(new Error('cache unavailable'));

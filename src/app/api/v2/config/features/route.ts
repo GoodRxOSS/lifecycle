@@ -18,7 +18,7 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { errorResponse, successResponse } from 'server/lib/response';
 import {
-  FEATURE_DEFINITIONS,
+  InvalidFeatureUpdateError,
   getFeaturesConfig,
   updateFeaturesConfig,
   type FeatureUpdates,
@@ -94,17 +94,21 @@ const putHandler = async (req: NextRequest) => {
   } catch {
     return errorResponse(new Error('Invalid JSON in request body'), { status: 400 }, req);
   }
-  const keys = new Set<string>(FEATURE_DEFINITIONS.map((feature) => feature.key));
   if (
     !body ||
     typeof body !== 'object' ||
     Array.isArray(body) ||
     !Object.keys(body).length ||
-    Object.entries(body).some(([key, value]) => !keys.has(key) || typeof value !== 'boolean')
+    Object.values(body).some((value) => typeof value !== 'boolean')
   ) {
-    return errorResponse(new Error('Expected supported feature names with boolean values'), { status: 400 }, req);
+    return errorResponse(new Error('Expected feature keys with boolean values'), { status: 400 }, req);
   }
-  return successResponse({ features: await updateFeaturesConfig(body as FeatureUpdates) }, { status: 200 }, req);
+  try {
+    return successResponse({ features: await updateFeaturesConfig(body as FeatureUpdates) }, { status: 200 }, req);
+  } catch (error) {
+    if (error instanceof InvalidFeatureUpdateError) return errorResponse(error, { status: 400 }, req);
+    throw error;
+  }
 };
 
 export const GET = createApiHandler(getHandler, { auth: 'session' });

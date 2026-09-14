@@ -349,26 +349,9 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         FeaturesConfigInput: {
           type: 'object',
-          description: 'Merge supplied flags into global_config.features; unspecified keys are preserved.',
-          properties: {
-            podShell: { type: 'boolean' },
-            envLens: { type: 'boolean' },
-            reconcileDeletedServices: { type: 'boolean' },
-          },
+          description: 'Update existing boolean keys in global_config.features; unspecified keys are preserved.',
           minProperties: 1,
-          additionalProperties: false,
-        },
-        FeatureFlag: {
-          type: 'object',
-          properties: {
-            key: { type: 'string', enum: ['podShell', 'envLens', 'reconcileDeletedServices'] },
-            label: { type: 'string' },
-            description: { type: 'string' },
-            enabled: { type: 'boolean' },
-            available: { type: 'boolean', description: 'Whether this deployment supports the feature.' },
-            effectiveEnabled: { type: 'boolean' },
-          },
-          required: ['key', 'label', 'description', 'enabled', 'available', 'effectiveEnabled'],
+          additionalProperties: { type: 'boolean' },
         },
         FeaturesConfigSuccessResponse: {
           allOf: [
@@ -378,7 +361,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               properties: {
                 data: {
                   type: 'object',
-                  properties: { features: { type: 'array', items: { $ref: '#/components/schemas/FeatureFlag' } } },
+                  properties: { features: { type: 'object', additionalProperties: { type: 'boolean' } } },
                   required: ['features'],
                 },
               },
