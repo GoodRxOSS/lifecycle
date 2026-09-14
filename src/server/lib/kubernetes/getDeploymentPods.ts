@@ -17,7 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 
 import { getLogger } from 'server/lib/logger';
-import Build from 'server/models/Build';
+import { Build } from 'server/models';
 
 type ContainerState = 'Running' | 'Waiting' | 'Terminated' | 'Unknown';
 
