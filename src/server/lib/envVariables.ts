@@ -268,6 +268,21 @@ export abstract class EnvironmentVariables {
   }
 
   /**
+   * Resolves the UUID of the static environment an inactive service falls back to.
+   * A service may pin its own `defaultUUID`, which is published as `<service>_UUID` alongside
+   * `<service>_internalHostname`, so prefer that over the global default when it is available.
+   * @param captureGroup the `<service>_internalHostname` token being rendered
+   * @param data the available environment variables for this build
+   * @param defaultUuid the global default UUID to fall back to
+   */
+  defaultUuidForHostname(captureGroup: string, data: Record<string, any>, defaultUuid: string): string {
+    const uuidKey = captureGroup.replace(/_internalHostname$/, '_UUID');
+    if (uuidKey === captureGroup) return defaultUuid;
+    const serviceUuid = data[uuidKey];
+    return typeof serviceUuid === 'string' && serviceUuid.length > 0 ? serviceUuid : defaultUuid;
+  }
+
+  /**
    * Takes in a template string and a data object and renders the template with the data
    * For templates that contain a given string, we replace it with the default value and suffix from the global_config table
    * E.g. {{my______service______db_internalHostname}} will be replaced with my-service-db-${defaultUUID}
@@ -305,17 +320,21 @@ export abstract class EnvironmentVariables {
 
     const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
     const defaultUuid = useDefaultUUID ? globalConfig.lifecycleDefaults.defaultUUID : NO_DEFAULT_ENV_UUID;
-    const staticEnvNamespace = useDefaultUUID
-      ? await this.db.models.Build.query()
-          .findOne({ uuid: defaultUuid })
-          .select('namespace')
-          .then((build) => {
-            if (!build?.namespace) {
-              throw new Error(`[BUILD ${defaultUuid}] Build not found when looking for namespace`);
-            }
-            return build.namespace;
-          })
-      : 'no-namespace';
+
+    const namespaceByUuid = new Map<string, string>();
+    const staticEnvNamespaceFor = async (uuid: string): Promise<string> => {
+      if (!useDefaultUUID) return 'no-namespace';
+      const cached = namespaceByUuid.get(uuid);
+      if (cached) return cached;
+      const staticEnvBuild = await this.db.models.Build.query().findOne({ uuid }).select('namespace');
+      if (!staticEnvBuild?.namespace) {
+        throw new Error(`[BUILD ${uuid}] Build not found when looking for namespace`);
+      }
+      namespaceByUuid.set(uuid, staticEnvBuild.namespace);
+      return staticEnvBuild.namespace;
+    };
+
+    const staticEnvNamespace = await staticEnvNamespaceFor(defaultUuid);
     const templateMatches = template.matchAll(regex);
     for (const match of templateMatches) {
       const fullMatch = match[0];
@@ -327,11 +346,17 @@ export abstract class EnvironmentVariables {
         // we have to figure out if its an active service to decide on what namespace to use
         // hackity hack, if data[captureGroup] does not contain the buildUUID, then its an inactive service!!!
         // inactive service default to static env so find that namespace to render in the value.
-        const nsForDeploy =
-          data[captureGroup] && typeof data[captureGroup] === 'string' && data[captureGroup].includes(data['buildUUID'])
-            ? namespace
-            : staticEnvNamespace;
         if (captureGroup.includes('_internalHostname')) {
+          const isActiveDeploy =
+            data[captureGroup] &&
+            typeof data[captureGroup] === 'string' &&
+            data[captureGroup].includes(data['buildUUID']);
+          // A service can pin its own defaultUUID, so the static env it falls back to is not
+          // necessarily the global default one. Its UUID is published next to its hostname in the
+          // same dictionary, so read the namespace off that rather than assuming the global default.
+          const nsForDeploy = isActiveDeploy
+            ? namespace
+            : await staticEnvNamespaceFor(this.defaultUuidForHostname(captureGroup, data, defaultUuid));
           template = template.replace(
             fullMatch,
             this.buildHostname({ host: data[captureGroup], suffix, rest, namespace: nsForDeploy })
