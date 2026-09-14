@@ -4738,6 +4738,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             podName: { type: 'string' },
+            podUid: { type: 'string', description: 'Kubernetes pod identity, changes when the pod is replaced.' },
             status: { type: 'string' },
             restarts: { type: 'integer' },
             ageSeconds: { type: 'integer' },
@@ -4748,7 +4749,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { $ref: '#/components/schemas/DeploymentPodContainerInfo' },
             },
           },
-          required: ['podName', 'status', 'restarts', 'ageSeconds', 'age', 'ready', 'containers'],
+          required: ['podUid', 'podName', 'status', 'restarts', 'ageSeconds', 'age', 'ready', 'containers'],
         },
 
         /**

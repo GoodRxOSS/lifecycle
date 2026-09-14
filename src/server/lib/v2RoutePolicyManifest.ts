@@ -191,6 +191,7 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'PUT', route: '/api/v2/builds/{uuid}/destroy', policy: 'principal', scope: 'env:write' },
   { method: 'GET', route: '/api/v2/builds/{uuid}/metadata', policy: 'principal', scope: 'env:read' },
   { method: 'GET', route: '/api/v2/builds/{uuid}/pods', policy: 'principal', scope: 'env:read' },
+  { method: 'GET', route: '/api/v2/builds/{uuid}/pods/{podName}/exec', policy: 'session' },
   { method: 'PUT', route: '/api/v2/builds/{uuid}/redeploy', policy: 'principal', scope: 'env:write' },
   { method: 'PATCH', route: '/api/v2/builds/{uuid}/services', policy: 'principal', scope: 'env:write' },
   { method: 'GET', route: '/api/v2/builds/{uuid}/services/{name}/build-jobs', policy: 'principal', scope: 'env:read' },
