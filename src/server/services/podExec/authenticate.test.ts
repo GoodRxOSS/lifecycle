@@ -76,4 +76,12 @@ describe('pod shell authentication', () => {
       )
     ).rejects.toMatchObject({ code: 'target_changed' });
   });
+  test('a disabled asynchronous flag blocks authorization and active-session revalidation', async () => {
+    const ports = createShellPorts(async () => false);
+    await expect(ports.authorize({ accessToken: 'token' } as any, 'uuid', 'pod')).rejects.toMatchObject({
+      code: 'exec_disabled',
+    });
+    await expect(ports.revalidate({} as any)).rejects.toMatchObject({ code: 'exec_disabled' });
+    expect(resolve).not.toHaveBeenCalled();
+  });
 });

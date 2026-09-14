@@ -95,6 +95,16 @@ describe('pod exec bridge', () => {
     jest.clearAllTimers();
     jest.useRealTimers();
   });
+  test('closes the Kubernetes session when revalidation observes the disabled feature', async () => {
+    ws.message(frame);
+    await flush();
+    (ports.revalidate as jest.Mock).mockRejectedValue(new ExecError('exec_disabled'));
+    jest.advanceTimersByTime(10000);
+    await flush();
+    expect(ws.frames.some((message) => message.code === 'exec_disabled')).toBe(true);
+    expect(upstream.close).toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalled();
+  });
   test('rejects input before authentication without opening Kubernetes', () => {
     ws.message({ type: 'input', data: 'id\n' });
     expect(open).not.toHaveBeenCalled();

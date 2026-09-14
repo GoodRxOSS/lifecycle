@@ -53,11 +53,11 @@ export async function authenticateAccessToken(token: string) {
   return { principal, tokenExpiresAt: exp * 1000 };
 }
 
-export function createShellPorts(isEnabled: () => boolean) {
+export function createShellPorts(isEnabled: () => boolean | Promise<boolean>) {
   return {
     async authorize(frame: AuthFrame, uuid: string, podName: string): Promise<ShellSession> {
-      if (!isEnabled()) throw new ExecError('exec_disabled');
       const { principal, tokenExpiresAt } = await authenticateAccessToken(frame.accessToken);
+      if (!(await isEnabled())) throw new ExecError('exec_disabled');
       const target = await resolveTarget(principal, uuid, podName, frame.container);
       if (target.podUid !== frame.podUid || target.restartCount !== frame.restartCount) {
         throw new ExecError('target_changed');
@@ -83,7 +83,7 @@ export function createShellPorts(isEnabled: () => boolean) {
       return session;
     },
     async revalidate(session: ShellSession) {
-      if (!isEnabled()) throw new ExecError('exec_disabled');
+      if (!(await isEnabled())) throw new ExecError('exec_disabled');
       const build = session.target;
       await resolveTarget(session.principal, build.uuid, build.podName, build.container, build);
     },

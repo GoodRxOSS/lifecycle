@@ -347,6 +347,45 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
+        FeaturesConfigInput: {
+          type: 'object',
+          description: 'Merge supplied flags into global_config.features; unspecified keys are preserved.',
+          properties: {
+            podShell: { type: 'boolean' },
+            envLens: { type: 'boolean' },
+            reconcileDeletedServices: { type: 'boolean' },
+          },
+          minProperties: 1,
+          additionalProperties: false,
+        },
+        FeatureFlag: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', enum: ['podShell', 'envLens', 'reconcileDeletedServices'] },
+            label: { type: 'string' },
+            description: { type: 'string' },
+            enabled: { type: 'boolean' },
+            available: { type: 'boolean', description: 'Whether this deployment supports the feature.' },
+            effectiveEnabled: { type: 'boolean' },
+          },
+          required: ['key', 'label', 'description', 'enabled', 'available', 'effectiveEnabled'],
+        },
+        FeaturesConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: { features: { type: 'array', items: { $ref: '#/components/schemas/FeatureFlag' } } },
+                  required: ['features'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
         SitesConfig: {
           type: 'object',
           description: 'Global Sites hosting configuration stored in global_config under the sites key.',

@@ -14,7 +14,15 @@ The existing Helm `global.env` or web component `deployment.extraEnv` accepts th
 
 For Tilt, set `POD_EXEC_ENABLED=true` in the core `.env` before `tilt up`; Tilt passes the local UI origin to the allowlist. The repository's setup uses `kind create cluster --config sysops/tilt/kind-config.yaml --name lfc`, then `tilt up`; there is no `tilt setup` command. See the README for GitHub App setup and ignored development secrets. Run the separate UI with its API URL pointing to the local core.
 
-To disable access, turn off the core flag and roll its deployment. Existing shells close on process shutdown; the UI flag removes entry points. Logs are unchanged. Authenticated V2 log migration is a follow-up after shell acceptance.
+After deploying, an administrator enables **Settings → Features → Pod shells** and chooses **Save changes**. This stores `features.podShell` in the existing `global_config` row. Missing flags default to off. Both deployment flags remain required; the Settings toggle cannot override a disabled deployment.
+
+To disable access without redeploying, turn off Pod shells and save. The UI hides shell actions and panels, and core rejects new sessions and closes active ones after observing the flag. Logs are unchanged. Saving force-refreshes Redis and the saving process's configuration, then refetches UI configuration. Other processes keep their existing 30-second memory-cache TTL; UI and active-shell checks run every 10 seconds, so propagation can take about 40 seconds. No additional cache invalidation infrastructure is needed. Authenticated V2 log migration remains a follow-up after shell acceptance.
+
+## Shared Features settings
+
+`GET /api/v2/config/features` returns registered feature flags to signed-in users, including whether deployment support allows each flag to take effect. `PUT` requires an administrator and accepts a nonempty partial object such as `{ "podShell": false }`. It merges only supported boolean keys under a transaction, preserves other stored keys, and awaits a forced configuration refresh before returning success. A refresh failure is reported even if the database write committed; reloading settings or retrying the idempotent update reconciles the result.
+
+The section also exposes the existing `envLens` service default and `reconcileDeletedServices` switch. Sites keeps its existing hosting configuration and Settings section. To add a feature, register its label and behavior in `FEATURE_DEFINITIONS`, extend the OpenAPI flag enum/input properties, regenerate UI types, and enforce the flag in the owning backend and UI. Add Settings search keywords where helpful. Registering a switch alone does not implement its enforcement.
 
 ## Authentication and target policy
 

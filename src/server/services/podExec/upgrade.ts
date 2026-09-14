@@ -19,9 +19,10 @@ import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { attachExec, type BridgePorts, type OpenExec } from './bridge';
 import { createShellPorts } from './authenticate';
+import { podExecDeploymentEnabled, podExecRuntimeEnabled } from './config';
 
 export function podExecEnabled() {
-  return process.env.POD_EXEC_ENABLED === 'true' && process.env.ENABLE_AUTH === 'true';
+  return podExecDeploymentEnabled();
 }
 export function podExecOrigins() {
   return new Set(
@@ -46,7 +47,7 @@ export function createExecUpgrade(
   const users = new Map<string, number>();
   let draining = false;
   const ports: BridgePorts = {
-    ...(options.ports ?? createShellPorts(enabled)),
+    ...(options.ports ?? createShellPorts(options.enabled ?? podExecRuntimeEnabled)),
     acquire(userId) {
       const count = users.get(userId) ?? 0;
       if (count >= 4) return false;
