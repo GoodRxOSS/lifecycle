@@ -572,3 +572,33 @@ it('keeps its timeout active until the response body is consumed', async () => {
     expect.objectContaining({ kind: 'unavailable' } satisfies Partial<KeycloakAdminError>)
   );
 });
+
+describe('OAuth access-token introspection', () => {
+  it('uses confidential client authentication directly with no admin token or client lookup', async () => {
+    const fetcher = jest.fn().mockResolvedValue(json({ active: true }));
+    await expect(client(fetcher).introspectAccessToken('user-access-token')).resolves.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, request] = fetcher.mock.calls[0];
+    expect(url).toBe('https://auth.example.com/realms/lifecycle/protocol/openid-connect/token/introspect');
+    const body = new URLSearchParams(request.body);
+    expect(body.get('token')).toBe('user-access-token');
+    expect(body.get('client_id')).toBe('management-client');
+    expect(body.get('client_secret')).toBe('management-secret');
+    expect(request.redirect).toBe('error');
+  });
+  it('accepts active=false as revoked, rather than transport failure', async () => {
+    await expect(
+      client(jest.fn().mockResolvedValue(json({ active: false }))).introspectAccessToken('token')
+    ).resolves.toBe(false);
+  });
+  it.each([{}, { active: 'true' }, [], null])('fails closed for malformed status %j', async (value) => {
+    await expect(client(jest.fn().mockResolvedValue(json(value))).introspectAccessToken('token')).rejects.toMatchObject(
+      { kind: 'invalid_response' }
+    );
+  });
+  it('fails closed on forbidden introspection transport', async () => {
+    await expect(
+      client(jest.fn().mockResolvedValue(json({}, 403))).introspectAccessToken('token')
+    ).rejects.toMatchObject({ kind: 'forbidden' });
+  });
+});

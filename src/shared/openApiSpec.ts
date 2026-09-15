@@ -149,8 +149,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           description:
             'JWT token issued by a Keycloak identity provider. ' +
             'Pass it in the Authorization header as "Bearer <token>". ' +
-            'Authentication is only enforced when the ENABLE_AUTH environment variable is set to "true". ' +
-            'When disabled, all requests are allowed without a token.',
+            'Operation-specific authorization still applies; Sites browser bridge operations require ' +
+            'their documented credentials even when general authentication is disabled.',
         },
         KeycloakBearer: {
           type: 'http',
@@ -167,8 +167,70 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'service keys "lfc_svc_<hex>", and legacy keys "lfc_<hex>". Authority is the owner authority ' +
             'intersected with the key scopes and repository constraint. Accepted only on programmatic routes.',
         },
+        SitesBrowserBridge: {
+          type: 'apiKey',
+          in: 'header',
+          name: 'x-lfc-sites-bridge',
+          description:
+            'Internal UI-to-core request signature, not a Lifecycle API key or the raw shared secret. ' +
+            'The header is <unix-seconds>.<43-character-base64url-nonce>.<hex-HMAC-SHA256>. ' +
+            'Sign the newline-separated values sites-v1, action (bind, mint, or revoke), timestamp, nonce, ' +
+            'and the hex SHA-256 of the exact request body using SITES_BROWSER_BRIDGE_SECRET. ' +
+            'Timestamps allow 30 seconds of skew; nonces are single-use. Keep the signing secret server-side.',
+        },
       },
       schemas: {
+        SitesBrowserLoginRequest: {
+          type: 'object',
+          required: ['loginId', 'loginExpiresAt'],
+          properties: {
+            loginId: {
+              type: 'string',
+              pattern: '^[A-Za-z0-9_-]{43}$',
+              description: 'Server-generated application-login nonce, distinct from the identity provider SSO session.',
+            },
+            loginExpiresAt: {
+              type: 'integer',
+              description:
+                'Absolute application-login expiry in Unix seconds. Binding and minting require a future expiry; ' +
+                'revocation also accepts an expired login. The server limits future expiry to its login lifetime.',
+            },
+          },
+        },
+        SitesBrowserBindRequest: {
+          allOf: [
+            { $ref: '#/components/schemas/SitesBrowserLoginRequest' },
+            {
+              type: 'object',
+              properties: {
+                createLogin: {
+                  type: 'boolean',
+                  default: false,
+                  description:
+                    'True only for an explicit OAuth sign-in with a newly generated login nonce. ' +
+                    'Refresh requests must omit this or send false and match an existing unrevoked login.',
+                },
+              },
+            },
+          ],
+        },
+        SitesBrowserMintRequest: {
+          allOf: [
+            { $ref: '#/components/schemas/SitesBrowserLoginRequest' },
+            {
+              type: 'object',
+              required: ['state', 'siteId'],
+              properties: {
+                state: {
+                  type: 'string',
+                  pattern: '^[A-Za-z0-9_-]{43}$',
+                  description: 'Opaque, unexpired bootstrap challenge issued by the content gateway.',
+                },
+                siteId: { type: 'string', description: 'Site identifier matching the bootstrap challenge.' },
+              },
+            },
+          ],
+        },
         // ===================================================================
         // Core Reusable Schemas
         // ===================================================================
@@ -236,6 +298,27 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             id: { type: 'string', example: 'abc123def4' },
             name: { type: 'string', example: 'sample-site' },
             url: { type: 'string', format: 'uri', example: 'http://site-abc123def4.localhost:5002' },
+            visibility: { type: 'string', enum: ['private', 'public'] },
+            contentUrl: { type: 'string', format: 'uri' },
+            openUrl: { type: 'string', format: 'uri' },
+            accessRevision: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                'Site mutation revision; advances on content replacement, visibility, expiry extension and deletion.',
+            },
+            contentRevision: { type: 'integer', minimum: 1 },
+            currentRole: { type: 'string', enum: ['owner'], nullable: true },
+            permissions: {
+              type: 'object',
+              properties: {
+                canView: { type: 'boolean' },
+                canEdit: { type: 'boolean' },
+                canDelete: { type: 'boolean' },
+                canChangeVisibility: { type: 'boolean' },
+              },
+              required: ['canView', 'canEdit', 'canDelete', 'canChangeVisibility'],
+            },
             status: { type: 'string', enum: ['active', 'deleted', 'expired'] },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
@@ -254,6 +337,13 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             },
           },
           required: [
+            'visibility',
+            'contentUrl',
+            'openUrl',
+            'accessRevision',
+            'contentRevision',
+            'currentRole',
+            'permissions',
             'id',
             'name',
             'url',
@@ -271,6 +361,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         SiteUploadRequest: {
           type: 'object',
           properties: {
+            visibility: {
+              type: 'string',
+              enum: ['private', 'public'],
+              description:
+                'Creation only; omitted defaults private for users. Service-key creation always remains public.',
+            },
+            expectedAccessRevision: { type: 'integer', minimum: 1, maximum: 2147483647 },
+            expectedContentRevision: { type: 'integer', minimum: 1, maximum: 2147483647 },
             file: {
               type: 'string',
               format: 'binary',
@@ -998,6 +1096,37 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             {
               type: 'object',
               properties: { data: { $ref: '#/components/schemas/EnvironmentConfigPreview' } },
+              required: ['data'],
+            },
+          ],
+        },
+
+        SitesCapabilities: {
+          type: 'object',
+          properties: {
+            enabled: { type: 'boolean' },
+            canCreate: { type: 'boolean' },
+            defaultVisibility: { type: 'string', enum: ['private', 'public'] },
+            allowedVisibilities: { type: 'array', items: { type: 'string', enum: ['private', 'public'] } },
+            upload: {
+              type: 'object',
+              properties: {
+                maxUploadBytes: { type: 'integer', minimum: 1 },
+                maxExtractedBytes: { type: 'integer', minimum: 1 },
+                maxFiles: { type: 'integer', minimum: 1 },
+                allowedExtensions: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['maxUploadBytes', 'maxExtractedBytes', 'maxFiles', 'allowedExtensions'],
+            },
+          },
+          required: ['enabled', 'canCreate', 'defaultVisibility', 'allowedVisibilities', 'upload'],
+        },
+        SitesCapabilitiesSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: { data: { $ref: '#/components/schemas/SitesCapabilities' } },
               required: ['data'],
             },
           ],

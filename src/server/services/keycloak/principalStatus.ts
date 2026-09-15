@@ -93,6 +93,19 @@ export class KeycloakPrincipalStatus {
     }
   }
 
+  async getOAuthTokenStatus(token: string): Promise<'active' | 'revoked' | 'unknown'> {
+    try {
+      return (await this.client.introspectAccessToken(token)) ? 'active' : 'revoked';
+    } catch (error) {
+      // Never log the introspection request, response claims, or bearer.
+      getLogger().warn(
+        { error: error instanceof Error ? error.name : 'unknown' },
+        'Keycloak token status lookup failed'
+      );
+      return 'unknown';
+    }
+  }
+
   private async resolveBaseRoleStatus(encodedSub: string): Promise<'active' | 'no_base_role' | 'unknown'> {
     // Composite endpoint: expands default-roles-<realm> and any other composite grants.
     const userRoles = await this.client.get<RoleRepresentation[]>(`/users/${encodedSub}/role-mappings/realm/composite`);
@@ -138,4 +151,8 @@ function configuredService(): KeycloakPrincipalStatus | null {
 
 export async function getUserStatus(sub: string): Promise<KeycloakUserStatus> {
   return (await configuredService()?.getUserStatus(sub)) ?? 'unknown';
+}
+
+export async function getOAuthTokenStatus(token: string): Promise<'active' | 'revoked' | 'unknown'> {
+  return (await configuredService()?.getOAuthTokenStatus(token)) ?? 'unknown';
 }

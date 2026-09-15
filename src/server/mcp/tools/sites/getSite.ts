@@ -19,7 +19,7 @@ import { getSiteInputSchema, getSiteOutputSchema } from './schemas';
 import { mapSiteServiceError, siteSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Gets one hosted site, including its public URL, status, size, and expiry. Use a `siteId` returned by list_sites.';
+  'Gets one hosted site, including its visibility and authenticated opening URL, status, size, and expiry. Use a `siteId` returned by list_sites.';
 
 export function createGetSiteToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {
@@ -36,9 +36,9 @@ export function createGetSiteToolDefinition(dependencies: ResolvedSiteToolDepend
     },
     capabilityId: 'view-hosted-sites',
     access: 'read',
-    async handler(input): Promise<McpJsonObject> {
+    async handler(input, context): Promise<McpJsonObject> {
       try {
-        const site = await dependencies.service().getSite(input.siteId as string);
+        const site = await dependencies.service().getSite(input.siteId as string, context.principal);
         return {
           site: siteSummary(site),
         };

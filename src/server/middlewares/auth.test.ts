@@ -23,6 +23,7 @@ jest.mock('server/lib/auth', () => ({
 }));
 
 import { authMiddleware } from './auth';
+import { requestIdMiddleware } from './requestId';
 
 const VALID_TOKEN = `lfc_${'a'.repeat(40)}`;
 const originalEnableAuth = process.env.ENABLE_AUTH;
@@ -51,6 +52,24 @@ afterAll(() => {
 });
 
 describe('authMiddleware x-user stripping', () => {
+  it('preserves a signed revoke POST through the real middleware chain and strips spoofed identity', async () => {
+    const body = '{"loginId":"signed-test-value"}';
+    const request = new NextRequest('https://example.test/api/v2/sites/browser/revoke', {
+      method: 'POST',
+      body,
+      headers: { 'x-user': 'spoofed', 'x-lfc-sites-bridge': 'bridge-signature' },
+    });
+    const next = jest.fn().mockResolvedValue(NextResponse.next());
+    await requestIdMiddleware(request, (forwarded) => authMiddleware(forwarded, next));
+    expect(mockVerifyAuth).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+    const forwarded = forwardedRequest(next);
+    expect(forwarded.method).toBe('POST');
+    expect(await forwarded.text()).toBe(body);
+    expect(forwarded.headers.get('x-user')).toBeNull();
+    expect(forwarded.headers.get('x-lfc-sites-bridge')).toBe('bridge-signature');
+    expect(forwarded.headers.has('x-request-id')).toBe(true);
+  });
   it('strips a crafted x-user when ENABLE_AUTH is off', async () => {
     process.env.ENABLE_AUTH = 'false';
     const req = makeRequest('http://localhost/api/v2/repositories', { 'x-user': 'spoofed' });

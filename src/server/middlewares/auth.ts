@@ -26,7 +26,7 @@ const MCP_OAUTH_CALLBACK_PATH = /^\/api\/v2\/ai\/agent\/mcp-connections\/[^/]+\/
 const MAX_AUTHORIZATION_HEADER_LENGTH = 16384;
 
 function authFailure(request: NextRequest, status: 401 | 500, message: string, code?: string): NextResponse {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
   if (status === 401) {
     headers['WWW-Authenticate'] = bearerChallenge(code);
   }
@@ -45,7 +45,9 @@ function forwardWithoutUser(request: NextRequest, next: NextMiddleware, mutate?:
   const headers = new Headers(request.headers);
   headers.delete('x-user'); // prevent spoofing
   mutate?.(headers);
-  return next(new NextRequest(request.url, { ...request, headers }));
+  return next(
+    new NextRequest(request, { method: request.method, body: request.body, signal: request.signal, headers })
+  );
 }
 
 export const authMiddleware: Middleware = async (request, next) => {
@@ -59,6 +61,15 @@ export const authMiddleware: Middleware = async (request, next) => {
   }
 
   if (process.env.ENABLE_AUTH !== 'true') {
+    return forwardWithoutUser(request, next);
+  }
+
+  if (request.method === 'GET' && /^\/api\/v2\/sites\/browser\/open\/[a-z0-9-]{1,64}$/.test(request.nextUrl.pathname)) {
+    return forwardWithoutUser(request, next);
+  }
+
+  // Sites logout uses a dedicated bridge signature and must work after OAuth expiry.
+  if (request.method === 'POST' && request.nextUrl.pathname === '/api/v2/sites/browser/revoke') {
     return forwardWithoutUser(request, next);
   }
 

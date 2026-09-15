@@ -17,8 +17,8 @@
 import { NextRequest } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
 import type { Principal } from 'server/lib/principal';
-import { successResponse } from 'server/lib/response';
-import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
+import { sitesSuccessResponse as successResponse } from 'server/lib/sites/routeHelpers';
+import { readSiteRevision, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
 
 type RouteContext = {
@@ -44,6 +44,10 @@ type RouteContext = {
  *         required: true
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: expectedAccessRevision
+ *         required: false
+ *         schema: { type: integer, minimum: 1, maximum: 2147483647 }
  *     responses:
  *       '200':
  *         description: Hosted static site expiration extended.
@@ -64,11 +68,15 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const postHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
+const postHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.extendSite(routeParams.siteId);
+    const site = await service.extendSite(
+      routeParams.siteId,
+      principal,
+      readSiteRevision(req.nextUrl.searchParams.get('expectedAccessRevision'))
+    );
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);

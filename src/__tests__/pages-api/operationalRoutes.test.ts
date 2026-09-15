@@ -1,6 +1,8 @@
 import { request, response } from 'src/test-utils/pagesApi';
 
 const mockGetAllConfigs = jest.fn();
+const mockVerifyBearerToken = jest.fn();
+jest.mock('server/lib/auth', () => ({ verifyBearerToken: (...args: unknown[]) => mockVerifyBearerToken(...args) }));
 const mockTTLQueueAdd = jest.fn();
 const mockWithLogContext = jest.fn((_context: unknown, callback: () => unknown) => callback());
 const mockNanoid = jest.fn(() => 'fixed-id');
@@ -124,20 +126,51 @@ describe('legacy operational API routes', () => {
   });
 
   describe('/config/cache', () => {
+    const priorAuth = process.env.ENABLE_AUTH;
+    const priorIssuer = process.env.KEYCLOAK_ISSUER;
+    const adminRequest = (overrides: Parameters<typeof request>[0] = {}) =>
+      request({ ...overrides, headers: { authorization: 'Bearer verified-test-token' } });
+    beforeEach(() => {
+      process.env.ENABLE_AUTH = 'true';
+      process.env.KEYCLOAK_ISSUER = 'https://idp.test/realms/lifecycle';
+      mockVerifyBearerToken.mockResolvedValue({
+        success: true,
+        payload: { sub: 'admin-1', iss: 'https://idp.test/realms/lifecycle', realm_access: { roles: ['admin'] } },
+      });
+    });
+    afterAll(() => {
+      if (priorAuth === undefined) delete process.env.ENABLE_AUTH;
+      else process.env.ENABLE_AUTH = priorAuth;
+      if (priorIssuer === undefined) delete process.env.KEYCLOAK_ISSUER;
+      else process.env.KEYCLOAK_ISSUER = priorIssuer;
+    });
+    it('denies ordinary/missing identity before loading configuration', async () => {
+      const res = response();
+      await cacheHandler(request(), res);
+      expect(res.statusCode).toBe(403);
+      expect(mockGetAllConfigs).not.toHaveBeenCalled();
+    });
+    it('denies auth-off even with cached admin claims', async () => {
+      process.env.ENABLE_AUTH = 'false';
+      const res = response();
+      await cacheHandler(adminRequest(), res);
+      expect(res.statusCode).toBe(403);
+      expect(mockGetAllConfigs).not.toHaveBeenCalled();
+    });
     it.each([
       ['GET', false],
       ['PUT', true],
     ])('%s returns cached configuration with the expected refresh flag', async (method, refresh) => {
       mockGetAllConfigs.mockResolvedValueOnce({ feature: 'value' });
       const res = response();
-      await cacheHandler(request({ method }), res);
+      await cacheHandler(adminRequest({ method }), res);
       expect(mockGetAllConfigs).toHaveBeenCalledWith(refresh);
       expect(res.body).toEqual({ configs: { feature: 'value' } });
     });
 
     it('advertises allowed methods', async () => {
       const res = response();
-      await cacheHandler(request({ method: 'POST' }), res);
+      await cacheHandler(adminRequest({ method: 'POST' }), res);
       expect(res.setHeader).toHaveBeenCalledWith('Allow', ['GET', 'PUT']);
       expect(res.statusCode).toBe(405);
     });
@@ -145,19 +178,38 @@ describe('legacy operational API routes', () => {
     it('maps config retrieval failures to the route-specific error', async () => {
       mockGetAllConfigs.mockRejectedValueOnce(new Error('config unavailable'));
       const res = response();
-      await cacheHandler(request(), res);
+      await cacheHandler(adminRequest(), res);
       expect(res.statusCode).toBe(500);
       expect(res.body).toEqual({ error: 'Unable to retrieve global config values' });
     });
 
-    it('maps response failures to the outer stable error', async () => {
+    it('ignores forged x-user admin claims even with an invalid bearer', async () => {
+      mockVerifyBearerToken.mockResolvedValue({ success: false });
       const res = response();
-      (res.setHeader as jest.Mock).mockImplementationOnce(() => {
-        throw new Error('response unavailable');
-      });
-      await cacheHandler(request({ method: 'POST' }), res);
-      expect(res.statusCode).toBe(500);
-      expect(res.body).toEqual({ error: 'An unexpected error occurred.' });
+      await cacheHandler(
+        request({
+          headers: {
+            authorization: 'Bearer forged',
+            'x-user': Buffer.from(
+              JSON.stringify({
+                sub: 'admin-1',
+                iss: 'https://idp.test/realms/lifecycle',
+                realm_access: { roles: ['admin'] },
+              })
+            ).toString('base64'),
+          },
+        }),
+        res
+      );
+      expect(res.statusCode).toBe(403);
+      expect(mockGetAllConfigs).not.toHaveBeenCalled();
+      expect(mockVerifyBearerToken).toHaveBeenCalledWith('forged');
+    });
+    it('denies malformed claims before configuration reads', async () => {
+      const res = response();
+      await cacheHandler(request({ headers: { 'x-user': 'malformed' } }), res);
+      expect(res.statusCode).toBe(403);
+      expect(mockGetAllConfigs).not.toHaveBeenCalled();
     });
   });
 });

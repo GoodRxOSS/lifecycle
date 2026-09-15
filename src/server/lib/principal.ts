@@ -21,14 +21,24 @@ import type ApiToken from 'server/models/ApiToken';
 import type { ApiTokenScope } from 'server/models/ApiToken';
 import { AppError } from './appError';
 import { bearerApiKey } from './apiTokenShape';
-import { getRequestUserIdentity, type RequestUserIdentity } from './get-user';
+import {
+  getRequestUserIdentity,
+  getUser,
+  getOAuthCredentialFromClaims,
+  type OAuthCredential,
+  type RequestUserIdentity,
+} from './get-user';
 import type { LifecycleRole } from './roles';
+import { rememberVerifiedOAuthBearer } from './verifiedOAuthBearer';
 
 export type PrincipalKind = 'user' | 'personal_key' | 'service_key';
 
 export interface Principal {
+  issuer?: string | null;
+  /** Verified OAuth token/session identity; absent on API keys and legacy claims. */
+  oauth?: OAuthCredential;
   kind: PrincipalKind;
-  authMethod: 'session' | 'oauth' | 'api_key';
+  authMethod: 'session' | 'oauth' | 'api_key' | 'sites_viewer';
   /** OAuth subject; owner subject for personal keys; null for service keys. */
   userId: string | null;
   /** Subject, or `token:<name>` for service keys — audit/attribution string. */
@@ -62,6 +72,7 @@ function personalKeyIdentity(record: ApiToken, ownerUserId: string): RequestUser
     record.ownerDisplayName ?? record.ownerGithubUsername ?? record.ownerPreferredUsername ?? ownerUserId;
   return {
     userId: ownerUserId,
+    issuer: record.ownerIssuer ?? null,
     githubUsername: record.ownerGithubUsername ?? null,
     preferredUsername: record.ownerPreferredUsername ?? null,
     email: record.ownerEmail ?? null,
@@ -106,6 +117,7 @@ async function resolveKeyPrincipal(token: string): Promise<Principal> {
       kind: 'personal_key',
       authMethod: 'api_key',
       userId: ownerUserId,
+      issuer: record.ownerIssuer ?? null,
       actor: ownerUserId,
       roles: [],
       scopes: record.scopes,
@@ -140,10 +152,12 @@ export async function resolvePrincipal(req: NextRequest): Promise<Principal> {
 
   const identity = getRequestUserIdentity(req);
   if (identity) {
-    return {
+    const principal: Principal = {
       kind: 'user',
       authMethod: 'session',
       userId: identity.userId,
+      issuer: identity.issuer ?? null,
+      oauth: getOAuthCredentialFromClaims(getUser(req)),
       actor: identity.userId,
       roles: identity.roles,
       scopes: null,
@@ -152,6 +166,9 @@ export async function resolvePrincipal(req: NextRequest): Promise<Principal> {
       repositoryAllowlistRepoIds: null,
       identity,
     };
+    const bearer = /^Bearer\s+(\S+)$/i.exec(req.headers.get('authorization') || '')?.[1];
+    if (bearer) rememberVerifiedOAuthBearer(principal, bearer);
+    return principal;
   }
 
   throw new AppError({ httpStatus: 401, code: 'authentication_required', message: 'Authentication is required.' });

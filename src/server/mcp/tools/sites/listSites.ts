@@ -20,7 +20,7 @@ import { listSitesInputSchema, listSitesOutputSchema } from './schemas';
 import { mapSiteServiceError, siteSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Lists hosted sites in Lifecycle. Use `mineOnly` to return only sites created or updated by the authenticated user.';
+  'Lists hosted sites in Lifecycle. Use `mineOnly` to return only sites owned by the authenticated principal.';
 
 export function createListSitesToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {
@@ -46,15 +46,14 @@ export function createListSitesToolDefinition(dependencies: ResolvedSiteToolDepe
           typeof input.cursor === 'string'
             ? decodeListCursor(input.cursor, cursorFilters, limit, dependencies.nowSeconds())
             : null;
-        const user = mineOnly ? context.principal.identity?.email : undefined;
-        if (mineOnly && !user) {
-          return { sites: [] };
-        }
-        const result = await dependencies.service().listSites({
-          ...(user ? { user } : {}),
-          page: cursor ? cursor.position + 1 : 1,
-          limit,
-        });
+        const result = await dependencies.service().listSites(
+          {
+            view: mineOnly ? 'mine' : 'all',
+            page: cursor ? cursor.position + 1 : 1,
+            limit,
+          },
+          context.principal
+        );
         const nextCursor =
           result.pagination.current < result.pagination.total
             ? encodeListCursor(
