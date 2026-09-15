@@ -19,7 +19,7 @@ import { EnvironmentVariables } from '../envVariables';
 import GlobalConfigService from 'server/services/globalConfig';
 import { IServices } from 'server/services/types';
 import * as models from 'server/models';
-import { DeployTypes } from 'shared/constants';
+import { DeployTypes, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import { Deploy } from 'server/models';
 
 jest.mock('server/database');
@@ -339,6 +339,137 @@ describe('EnvironmentVariables library', () => {
     await expect(envVariables.customRender('{}', {}, true, 'build-ns')).rejects.toThrow(
       '[BUILD dev-0] Build not found when looking for namespace'
     );
+  });
+
+  describe('per service defaultUUID', () => {
+    const mockNamespacesByUuid = (namespaces: Record<string, string>) => {
+      const findOne = jest.fn(({ uuid }: { uuid: string }) => ({
+        select: jest.fn().mockResolvedValue(namespaces[uuid] ? { namespace: namespaces[uuid] } : undefined),
+      }));
+      jest.spyOn(models.Build, 'query').mockReturnValue({ findOne } as any);
+      return findOne;
+    };
+
+    test('renders an inactive service in the namespace of the static env it pins', async () => {
+      mockNamespacesByUuid({ 'dev-0': 'env-dev-0', 'staging-0': 'env-staging-0' });
+
+      const template = JSON.stringify({
+        PINNED: '{{{my______service_internalHostname}}}',
+        PINNED_URL: '{{{my______service_internalHostname}}}:8080',
+        PINNED_SUFFIX: '{{{my______service_internalHostname}}}-master:6379',
+        GLOBAL: '{{{other______service_internalHostname}}}',
+      });
+
+      const data = {
+        my______service_internalHostname: 'my-service-staging-0',
+        my______service_UUID: 'staging-0',
+        other______service_internalHostname: 'other-service-dev-0',
+        other______service_UUID: 'dev-0',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      const customRenderResult = JSON.parse(
+        await envVariables.customRender(template, data, true, 'env-twilight-mouse-849168')
+      );
+
+      expect(customRenderResult).toEqual({
+        PINNED: 'my-service-staging-0.env-staging-0.svc.cluster.local',
+        PINNED_URL: 'my-service-staging-0.env-staging-0.svc.cluster.local:8080',
+        PINNED_SUFFIX: 'my-service-staging-0-master.env-staging-0.svc.cluster.local:6379',
+        GLOBAL: 'other-service-dev-0.env-dev-0.svc.cluster.local',
+      });
+    });
+
+    test('renders an active service in the build namespace regardless of the pinned uuid', async () => {
+      mockNamespacesByUuid({ 'dev-0': 'env-dev-0', 'staging-0': 'env-staging-0' });
+
+      const template = JSON.stringify({ ACTIVE: '{{{my______service_internalHostname}}}' });
+      const data = {
+        my______service_internalHostname: 'my-service-twilight-mouse-849168',
+        my______service_UUID: 'twilight-mouse-849168',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      const customRenderResult = JSON.parse(
+        await envVariables.customRender(template, data, true, 'env-twilight-mouse-849168')
+      );
+
+      expect(customRenderResult).toEqual({
+        ACTIVE: 'my-service-twilight-mouse-849168.env-twilight-mouse-849168.svc.cluster.local',
+      });
+    });
+
+    test('falls back to the global default uuid when a service publishes no uuid', async () => {
+      mockNamespacesByUuid({ 'dev-0': 'env-dev-0' });
+
+      const template = JSON.stringify({ NO_UUID: '{{{my______service_internalHostname}}}' });
+      const data = {
+        my______service_internalHostname: 'my-service-dev-0',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      const customRenderResult = JSON.parse(
+        await envVariables.customRender(template, data, true, 'env-twilight-mouse-849168')
+      );
+
+      expect(customRenderResult).toEqual({ NO_UUID: 'my-service-dev-0.env-dev-0.svc.cluster.local' });
+    });
+
+    test('looks the namespace up once per uuid', async () => {
+      const findOne = mockNamespacesByUuid({ 'dev-0': 'env-dev-0', 'staging-0': 'env-staging-0' });
+
+      const template = JSON.stringify({
+        ONE: '{{{my______service_internalHostname}}}',
+        TWO: '{{{my______service_internalHostname}}}:8080',
+        THREE: '{{{my______other_internalHostname}}}',
+      });
+      const data = {
+        my______service_internalHostname: 'my-service-staging-0',
+        my______service_UUID: 'staging-0',
+        my______other_internalHostname: 'my-other-staging-0',
+        my______other_UUID: 'staging-0',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      await envVariables.customRender(template, data, true, 'env-twilight-mouse-849168');
+
+      // once for the global default, once for the pinned env
+      expect(findOne).toHaveBeenCalledTimes(2);
+    });
+
+    test('throws when the pinned static env has no build', async () => {
+      mockNamespacesByUuid({ 'dev-0': 'env-dev-0' });
+
+      const template = JSON.stringify({ PINNED: '{{{my______service_internalHostname}}}' });
+      const data = {
+        my______service_internalHostname: 'my-service-missing',
+        my______service_UUID: 'missing',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      await expect(envVariables.customRender(template, data, true, 'env-twilight-mouse-849168')).rejects.toThrow(
+        '[BUILD missing] Build not found when looking for namespace'
+      );
+    });
+
+    test('keeps every hostname unresolved when default env resolution is disabled', async () => {
+      mockNamespacesByUuid({ 'dev-0': 'env-dev-0', 'staging-0': 'env-staging-0' });
+
+      const template = JSON.stringify({ PINNED: '{{{my______service_internalHostname}}}' });
+      const data = {
+        my______service_internalHostname: NO_DEFAULT_ENV_UUID,
+        my______service_UUID: 'staging-0',
+        buildUUID: 'twilight-mouse-849168',
+      };
+
+      const customRenderResult = JSON.parse(
+        await envVariables.customRender(template, data, false, 'env-twilight-mouse-849168')
+      );
+
+      expect(customRenderResult).toEqual({
+        PINNED: `${NO_DEFAULT_ENV_UUID}.no-namespace.svc.cluster.local`,
+      });
+    });
   });
 
   describe('configurationServiceEnvironments', () => {
