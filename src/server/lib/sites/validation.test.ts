@@ -413,3 +413,21 @@ describe('normalizeGatewayPath', () => {
     expect(normalizeGatewayPath('///docs/My%20Page.html?preview=true')).toBe('docs/My Page.html');
   });
 });
+
+describe('reserved Sites authentication paths', () => {
+  it.each(['_lfc-sites/consume.html', 'folder/../_lfc-sites/consume.html'])('rejects archive entry %s', (entry) => {
+    expect(() =>
+      validateSiteUpload({
+        ...DEFAULT_OPTIONS,
+        fileName: 'site.zip',
+        content: zip({ 'index.html': 'ok', [entry]: 'bad' }),
+      })
+    ).toThrow('reserved for site authentication');
+  });
+  it.each(['/_lfc-sites/consume', '/%5flfc-sites/consume', '/_lfc-sites%2fconsume'])(
+    'rejects normalized object lookup %s',
+    (path) => {
+      expect(() => normalizeGatewayPath(path)).toThrow('reserved for site authentication');
+    }
+  );
+});

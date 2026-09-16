@@ -56,6 +56,23 @@ describe('get-user helpers', () => {
     restoreEnv();
   });
 
+  it('retains only the configured external issuer from verified claims', () => {
+    const previous = process.env.KEYCLOAK_ISSUER;
+    try {
+      process.env.KEYCLOAK_ISSUER = 'https://idp.test/realms/lifecycle';
+      expect(getIdentityFromClaims({ sub: 'owner', iss: process.env.KEYCLOAK_ISSUER })?.issuer).toBe(
+        process.env.KEYCLOAK_ISSUER
+      );
+      expect(
+        getIdentityFromClaims({ sub: 'owner', iss: 'http://internal-idp/realms/lifecycle' })?.issuer
+      ).toBeUndefined();
+      expect(getIdentityFromClaims({ sub: 'owner' })?.issuer).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.KEYCLOAK_ISSUER;
+      else process.env.KEYCLOAK_ISSUER = previous;
+    }
+  });
+
   it('decodes x-user payloads', () => {
     const payload = getUser(makeRequest({ sub: 'user-123', github_username: 'sample-user' }));
     expect(payload?.sub).toBe('user-123');
@@ -202,5 +219,29 @@ describe('get-user helpers', () => {
         displayName: 'Required User',
       })
     );
+  });
+});
+
+describe('verified OAuth credential metadata', () => {
+  const claims = { sid: 'sid', session_state: 'legacy-sid', jti: 'jti', azp: 'cli', exp: 2000000000 };
+  test('uses sid, with legacy session_state compatibility', () => {
+    const { getOAuthCredentialFromClaims } = require('../get-user');
+    expect(getOAuthCredentialFromClaims(claims)).toEqual({
+      sessionId: 'sid',
+      tokenId: 'jti',
+      clientId: 'cli',
+      expiresAt: 2000000000,
+    });
+    expect(getOAuthCredentialFromClaims({ ...claims, sid: undefined }).sessionId).toBe('legacy-sid');
+  });
+  test.each([
+    { jti: undefined },
+    { azp: undefined },
+    { sid: undefined, session_state: undefined },
+    { exp: Infinity },
+    { exp: '2000000000' },
+  ])('fails closed for missing/malformed metadata %j', (overrides) => {
+    const { getOAuthCredentialFromClaims } = require('../get-user');
+    expect(getOAuthCredentialFromClaims({ ...claims, ...overrides })).toBeUndefined();
   });
 });

@@ -17,8 +17,9 @@
 import { NextRequest } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
 import type { Principal } from 'server/lib/principal';
-import { successResponse } from 'server/lib/response';
+import { sitesSuccessResponse as successResponse } from 'server/lib/sites/routeHelpers';
 import { readSitesListFilters, readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
+import { SitesServiceError } from 'server/services/sites';
 import SitesService from 'server/services/sites';
 
 export const runtime = 'nodejs';
@@ -31,18 +32,17 @@ export const runtime = 'nodejs';
  *     security:
  *       - BearerAuth: []
  *       - LifecycleApiKey: []
- *     description: Returns all non-deleted hosted static sites.
+ *     description: Returns only authorized hosted sites; private metadata is visible only to its owner.
  *     tags:
  *       - Sites
  *     operationId: listSites
  *     parameters:
- *       - name: user
+ *       - name: view
  *         in: query
- *         required: false
- *         description: Filters to sites created or last updated by the supplied user email.
- *         schema:
- *           type: string
- *         example: user@example.com
+ *         schema: { type: string, enum: [mine, public, all] }
+ *       - name: q
+ *         in: query
+ *         schema: { type: string, maxLength: 200 }
  *       - name: page
  *         in: query
  *         required: false
@@ -108,10 +108,10 @@ export const runtime = 'nodejs';
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest) => {
+const getHandler = async (req: NextRequest, principal: Principal) => {
   try {
     const service = new SitesService();
-    const result = await service.listSites(readSitesListFilters(req.nextUrl.searchParams));
+    const result = await service.listSites(readSitesListFilters(req.nextUrl.searchParams), principal);
     return successResponse({ sites: result.sites }, { status: 200, metadata: { pagination: result.pagination } }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);
@@ -120,11 +120,13 @@ const getHandler = async (req: NextRequest) => {
 
 const postHandler = async (req: NextRequest, principal: Principal) => {
   try {
-    const upload = await readUploadFile(req);
     const service = new SitesService();
+    const capabilities = await service.getCapabilities(principal);
+    if (!capabilities.canCreate) throw new SitesServiceError('Site creation is unavailable for this credential.', 403);
+    const upload = await readUploadFile(req, capabilities.upload.maxUploadBytes);
     const site = await service.createSite({
       ...upload,
-      user: principal.identity,
+      principal,
     });
     return successResponse({ site }, { status: 201 }, req);
   } catch (error) {

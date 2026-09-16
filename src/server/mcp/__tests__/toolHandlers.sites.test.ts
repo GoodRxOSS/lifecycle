@@ -26,6 +26,13 @@ const SITE: SiteResponse = {
   name: 'launch-page',
   url: 'https://sites.example.com/launch-page',
   status: 'active',
+  visibility: 'public',
+  contentUrl: 'https://sites.example.com/launch-page',
+  openUrl: 'https://ui.example.com/sites/site_abc123',
+  accessRevision: 1,
+  contentRevision: 1,
+  currentRole: 'owner',
+  permissions: { canView: true, canEdit: true, canDelete: true, canChangeVisibility: true },
   createdAt: '2026-07-01T00:00:00.000Z',
   updatedAt: '2026-07-02T00:00:00.000Z',
   expiresAt: '2026-08-01T00:00:00.000Z',
@@ -108,7 +115,8 @@ describe('list_sites', () => {
       }),
     ]);
     expect(typeof output!.nextCursor).toBe('string');
-    expect(listSites.mock.calls[0][0]).toEqual({ page: 1, limit: 25 });
+    expect(listSites.mock.calls[0][1]).toBe(PRINCIPAL);
+    expect(listSites.mock.calls[0][0]).toEqual({ view: 'all', page: 1, limit: 25 });
   });
 
   it('filters to the signed-in user for mineOnly', async () => {
@@ -118,18 +126,23 @@ describe('list_sites', () => {
     });
     const { call } = harness({ listSites });
     await call('list_sites', { mineOnly: true });
-    expect(listSites.mock.calls[0][0]).toMatchObject({ user: 'user@example.com' });
+    expect(listSites.mock.calls[0][0]).toMatchObject({ view: 'mine' });
   });
 
-  it('returns nothing for mineOnly without a known email', async () => {
-    const listSites = jest.fn();
+  it('delegates immutable ownership even without an email', async () => {
+    const listSites = jest
+      .fn()
+      .mockResolvedValue({ sites: [], pagination: { current: 1, total: 1, items: 0, limit: 25 } });
     const { call } = harness({ listSites });
     const { output } = await call('list_sites', { mineOnly: true }, {
       ...PRINCIPAL,
       identity: null,
     } as unknown as Principal);
     expect(output).toMatchObject({ sites: [] });
-    expect(listSites.mock.calls).toHaveLength(0);
+    expect(listSites).toHaveBeenCalledWith(
+      { view: 'mine', page: 1, limit: 25 },
+      expect.objectContaining({ userId: 'user-1', identity: null })
+    );
   });
 
   it('reports storage outages as retryable', async () => {
@@ -143,9 +156,11 @@ describe('list_sites', () => {
 
 describe('get_site', () => {
   it('returns one site', async () => {
-    const { call } = harness({ getSite: async () => SITE });
+    const getSite = jest.fn().mockResolvedValue(SITE);
+    const { call } = harness({ getSite });
     const { output } = await call('get_site', { siteId: 'site_abc123' });
     expect(output!.site).toMatchObject({ siteId: 'site_abc123', status: 'active' });
+    expect(getSite).toHaveBeenCalledWith('site_abc123', PRINCIPAL);
   });
 
   it('normalizes Date-backed site timestamps before output validation', async () => {

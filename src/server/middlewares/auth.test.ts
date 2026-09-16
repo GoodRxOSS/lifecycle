@@ -51,6 +51,18 @@ afterAll(() => {
 });
 
 describe('authMiddleware x-user stripping', () => {
+  it('does not bypass normal JWT authentication for the retired revoke route', async () => {
+    mockVerifyAuth.mockResolvedValue({ success: false, error: { status: 401, message: 'Unauthorized' } });
+    const request = new NextRequest('https://example.test/api/v2/sites/browser/revoke', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'x-user': 'spoofed' },
+    });
+    const { next, result } = await runMiddleware(request);
+    expect(mockVerifyAuth).toHaveBeenCalledTimes(1);
+    expect(next).not.toHaveBeenCalled();
+    expect(result.status).toBe(401);
+  });
   it('strips a crafted x-user when ENABLE_AUTH is off', async () => {
     process.env.ENABLE_AUTH = 'false';
     const req = makeRequest('http://localhost/api/v2/repositories', { 'x-user': 'spoofed' });

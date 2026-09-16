@@ -66,7 +66,30 @@ function buildGitFallbackEmail(identifier: string): string {
   return `${identifier.replace(/[^A-Za-z0-9._-]+/g, '-') || 'local-dev-user'}@local.lifecycle`;
 }
 
+/** Revocation metadata extracted only from middleware/JWKS-verified OAuth claims. */
+export interface OAuthCredential {
+  sessionId: string;
+  tokenId: string;
+  clientId: string;
+  expiresAt: number;
+}
+
+export function getOAuthCredentialFromClaims(payload: JWTPayload | null): OAuthCredential | undefined {
+  const sessionId = normalizeClaim(payload?.sid) || normalizeClaim(payload?.session_state);
+  const tokenId = normalizeClaim(payload?.jti);
+  const clientId = normalizeClaim(payload?.azp);
+  if (!sessionId || !tokenId || !clientId || !Number.isSafeInteger(payload?.exp)) return undefined;
+  return {
+    sessionId,
+    tokenId,
+    clientId,
+    expiresAt: Number(payload!.exp),
+  };
+}
+
 export interface RequestUserIdentity {
+  /** Verified external identity issuer; never an internal transport URL. */
+  issuer?: string | null;
   userId: string;
   githubUsername: string | null;
   preferredUsername: string | null;
@@ -102,6 +125,9 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
 
   return {
     userId,
+    ...(normalizeClaim(claims.iss) && normalizeClaim(claims.iss) === process.env.KEYCLOAK_ISSUER?.trim()
+      ? { issuer: normalizeClaim(claims.iss) }
+      : {}),
     githubUsername,
     preferredUsername,
     email,

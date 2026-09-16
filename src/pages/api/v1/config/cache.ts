@@ -16,6 +16,8 @@
 
 import { NextApiRequest, NextApiResponse } from 'next';
 import { getLogger } from 'server/lib/logger';
+import { verifyBearerToken } from 'server/lib/auth';
+import { getIdentityFromClaims } from 'server/lib/get-user';
 import GlobalConfigService from 'server/services/globalConfig';
 
 /**
@@ -96,6 +98,18 @@ import GlobalConfigService from 'server/services/globalConfig';
  */
 // eslint-disable-next-line import/no-anonymous-default-export
 export default async (req: NextApiRequest, res: NextApiResponse) => {
+  res.setHeader('Cache-Control', 'no-store');
+  // V1 bypasses auth middleware: verify bearer cryptographically here; x-user is attacker-controlled.
+  if (process.env.ENABLE_AUTH !== 'true') return res.status(403).json({ error: 'Administrator session required.' });
+  const authorization = req.headers.authorization;
+  const bearer =
+    typeof authorization === 'string' && authorization.length <= 16384 ? /^Bearer\s+(\S+)$/i.exec(authorization) : null;
+  if (!bearer) return res.status(403).json({ error: 'Administrator session required.' });
+  const verified = await verifyBearerToken(bearer[1]);
+  const identity = verified.success ? getIdentityFromClaims(verified.payload ?? null) : null;
+  if (!identity?.issuer || !identity.roles.includes('admin')) {
+    return res.status(403).json({ error: 'Administrator session required.' });
+  }
   try {
     switch (req.method) {
       case 'GET':

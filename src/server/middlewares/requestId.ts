@@ -40,8 +40,12 @@ export const requestIdMiddleware: Middleware = async (request, next) => {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-request-id', xRequestId);
 
-  const newRequest = new NextRequest(request.url, {
-    ...request,
+  // Request properties are native getters, so object spread loses method/body.
+  // Pass them explicitly too: Edge Request instances can cross constructor realms.
+  const newRequest = new NextRequest(request, {
+    method: request.method,
+    body: request.body,
+    signal: request.signal,
     headers: requestHeaders,
   });
 

@@ -158,3 +158,15 @@ describe('sites storage configuration', () => {
     expect(config.storage.secretAccessKey).toBeUndefined();
   });
 });
+
+describe('serving generations', () => {
+  it('preserves legacy URLs and extracts a generation without changing the site id', () => {
+    const config = resolveSitesConfig({ domain: 'sites.example.net' });
+    const generated = buildSiteUrl('abc123', config, 'abcdef012345');
+    expect(generated).toBe('https://site-abc123--g-abcdef012345.sites.example.net');
+    expect(parseSiteIdFromHost(new URL(generated).host, config)).toBe('abc123');
+    expect(parseSiteIdFromHost('site-abc123--g-x.sites.example.net', config)).toBeNull();
+    expect(parseSiteIdFromHost('site-abc123--g-abcdef012345--g-abcdef012345.sites.example.net', config)).toBeNull();
+    expect(parseSiteIdFromHost('site-abc123.sites.example.net@evil.test', config)).toBeNull();
+  });
+});

@@ -183,6 +183,30 @@ export class KeycloakAdminClient {
     await this.requestJson('DELETE', path, body);
   }
 
+  /** RFC 7662, authenticated as this confidential client; no Admin API role expansion. */
+  async introspectAccessToken(token: string): Promise<boolean> {
+    return this.fetchWithTimeout(
+      `${this.issuer}/protocol/openid-connect/token/introspect`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: new URLSearchParams({
+          token,
+          token_type_hint: 'access_token',
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+        }).toString(),
+      },
+      async (response) => {
+        if (!response.ok) throw errorForStatus(response.status);
+        const result = await this.readJson(response);
+        if (!isRecord(result) || typeof result.active !== 'boolean')
+          throw new KeycloakAdminError('invalid_response', response.status, 'Keycloak returned invalid token status.');
+        return result.active;
+      }
+    );
+  }
+
   private async accessToken(): Promise<string> {
     const now = Date.now();
     if (this.token && now < this.token.expiresAtMs - TOKEN_EXPIRY_MARGIN_MS) {

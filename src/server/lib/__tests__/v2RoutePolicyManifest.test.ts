@@ -43,9 +43,12 @@ describe('v2 route policy manifest', () => {
     expect({ unclassified, stale }).toEqual({ unclassified: [], stale: [] });
   });
 
-  it('declares the OAuth callback as the only public method', () => {
+  it('declares only the OAuth callback anonymous public-Site locator and internally HMAC-authenticated browser revocation outside platform auth', () => {
     const publicKeys = V2_ROUTE_POLICY_MANIFEST.filter((e) => e.policy === 'public').map(keyOf);
-    expect(publicKeys).toEqual(['GET /api/v2/ai/agent/mcp-connections/{slug}/oauth/callback']);
+    expect(publicKeys).toEqual([
+      'GET /api/v2/ai/agent/mcp-connections/{slug}/oauth/callback',
+      'GET /api/v2/sites/browser/open/{siteId}',
+    ]);
   });
 
   it('keeps every admin-guarded method session-only with the admin role', () => {

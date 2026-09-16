@@ -23,11 +23,12 @@ import SitesService, {
   type ListSitesResult,
   type SiteResponse,
 } from 'server/services/sites';
+import type { Principal } from 'server/lib/principal';
 import { safeCoreText } from '../core/listRepositories';
 
 export interface SiteToolService {
-  listSites(filters?: ListSitesFilters): Promise<ListSitesResult>;
-  getSite(siteId: string): Promise<SiteResponse>;
+  listSites(filters: ListSitesFilters, principal: Principal): Promise<ListSitesResult>;
+  getSite(siteId: string, principal: Principal): Promise<SiteResponse>;
 }
 
 export interface SiteToolDependencies {
@@ -95,6 +96,13 @@ export function siteSummary(site: SiteResponse): McpJsonObject {
     name: requiredString(site.name, 200),
     url: requiredString(site.url, 2048),
     status: requiredString(site.status, 50),
+    visibility: site.visibility,
+    contentUrl: requiredString(site.contentUrl, 2048),
+    openUrl: requiredString(site.openUrl, 2048),
+    accessRevision: site.accessRevision,
+    contentRevision: site.contentRevision,
+    currentRole: site.currentRole,
+    permissions: { ...site.permissions },
     createdAt: requiredDateTime(site.createdAt),
     updatedAt: requiredDateTime(site.updatedAt),
     ...(expiresAt ? { expiresAt } : {}),

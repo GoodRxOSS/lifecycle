@@ -180,33 +180,35 @@ export function resolveSitesConfig(config?: SitesConfig | null): ResolvedSitesCo
   };
 }
 
-export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig): string {
-  const protocol = config.domain === 'localhost' || config.domain.endsWith('.localhost') ? 'http' : 'https';
+export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig, generation?: string | null): string {
+  const protocol =
+    process.env.SITES_GATEWAY_HTTPS === 'true'
+      ? 'https'
+      : config.domain === 'localhost' || config.domain.endsWith('.localhost')
+      ? 'http'
+      : 'https';
   const port = config.port ? `:${config.port}` : '';
-  return `${protocol}://${config.hostPrefix}-${siteId}.${config.domain}${port}`;
+  return `${protocol}://${config.hostPrefix}-${siteId}${generation ? `--g-${generation}` : ''}.${config.domain}${port}`;
+}
+
+export function parseSiteHost(
+  hostHeader: string | undefined,
+  config: ResolvedSitesConfig
+): { siteId: string; generation: string | null } | null {
+  if (!hostHeader || !/^[a-z0-9.-]+(?::[0-9]+)?$/i.test(hostHeader)) return null;
+  const host = hostHeader.split(':')[0].toLowerCase();
+  const suffix = `.${config.domain.toLowerCase()}`;
+  if (!host.endsWith(suffix)) return null;
+  const label = host.slice(0, -suffix.length);
+  const prefix = `${config.hostPrefix}-`;
+  if (!label.startsWith(prefix)) return null;
+  const locator = label.slice(prefix.length);
+  const parts = locator.split('--g-');
+  if (parts.length > 2 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(parts[0])) return null;
+  if (parts.length === 2 && !/^[a-z0-9]{12,40}$/.test(parts[1])) return null;
+  return { siteId: parts[0], generation: parts[1] || null };
 }
 
 export function parseSiteIdFromHost(hostHeader: string | undefined, config: ResolvedSitesConfig): string | null {
-  if (!hostHeader) {
-    return null;
-  }
-
-  const host = hostHeader.split(':')[0]?.toLowerCase();
-  if (!host) {
-    return null;
-  }
-
-  const suffix = `.${config.domain.toLowerCase()}`;
-  if (!host.endsWith(suffix)) {
-    return null;
-  }
-
-  const label = host.slice(0, -suffix.length);
-  const prefix = `${config.hostPrefix}-`;
-  if (!label.startsWith(prefix)) {
-    return null;
-  }
-
-  const siteId = label.slice(prefix.length);
-  return /^[a-z0-9-]+$/.test(siteId) ? siteId : null;
+  return parseSiteHost(hostHeader, config)?.siteId ?? null;
 }

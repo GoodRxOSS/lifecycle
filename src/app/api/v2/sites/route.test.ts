@@ -11,6 +11,8 @@ const mockGetSite = jest.fn();
 const mockDeleteSite = jest.fn();
 const mockReplaceSiteContent = jest.fn();
 const mockExtendSite = jest.fn();
+const mockGetCapabilities = jest.fn();
+const mockSetVisibility = jest.fn();
 const mockLogger = { error: jest.fn(), info: jest.fn() };
 
 jest.mock('server/lib/principal', () => ({
@@ -43,6 +45,8 @@ jest.mock('server/services/sites', () => {
     __esModule: true,
     SitesServiceError,
     default: jest.fn(() => ({
+      getCapabilities: (...args: unknown[]) => mockGetCapabilities(...args),
+      setVisibility: (...args: unknown[]) => mockSetVisibility(...args),
       listSites: (...args: unknown[]) => mockListSites(...args),
       createSite: (...args: unknown[]) => mockCreateSite(...args),
       getSite: (...args: unknown[]) => mockGetSite(...args),
@@ -58,6 +62,8 @@ import { GET as listSites, POST as createSite } from './route';
 import { DELETE as deleteSite, GET as getSite } from './[siteId]/route';
 import { PUT as replaceContent } from './[siteId]/content/route';
 import { POST as extendSite } from './[siteId]/extend/route';
+import { GET as capabilities } from './capabilities/route';
+import { PATCH as visibility } from './[siteId]/access/route';
 
 const identity: NonNullable<Principal['identity']> = {
   userId: 'user-1',
@@ -103,15 +109,28 @@ const site = {
   name: 'Docs',
   url: 'https://docs-abc123.sites.example.com',
   createdBy: 'octo@example.com',
+  permissions: { canView: true, canEdit: true, canDelete: true, canChangeVisibility: true },
 };
 
-function request(url: string, options: { method?: string; file?: unknown; name?: unknown } = {}): NextRequest {
+function request(
+  url: string,
+  options: {
+    method?: string;
+    file?: unknown;
+    name?: unknown;
+    body?: unknown;
+    expectedAccessRevision?: string;
+    expectedContentRevision?: string;
+  } = {}
+): NextRequest {
   const values: Record<string, unknown> = {
+    ...options,
     ...(options.file === undefined ? {} : { file: options.file }),
     ...(options.name === undefined ? {} : { name: options.name }),
   };
   return {
     method: options.method ?? 'GET',
+    json: jest.fn().mockResolvedValue(options.body),
     headers: new Headers([['x-request-id', 'req-sites']]),
     nextUrl: new URL(url),
     formData: jest.fn().mockResolvedValue({
@@ -138,6 +157,14 @@ describe('hosted sites API routes', () => {
       sites: [site],
       pagination: { page: 2, limit: 10, total: 21, totalPages: 3 },
     });
+    mockGetCapabilities.mockResolvedValue({
+      enabled: true,
+      canCreate: true,
+      defaultVisibility: 'private',
+      allowedVisibilities: ['private', 'public'],
+      upload: { maxUploadBytes: 1024, maxExtractedBytes: 1024, maxFiles: 10, allowedExtensions: ['html', 'zip'] },
+    });
+    mockSetVisibility.mockResolvedValue(site);
     mockCreateSite.mockResolvedValue(site);
     mockGetSite.mockResolvedValue(site);
     mockDeleteSite.mockResolvedValue({ ...site, deletedAt: '2026-08-27T00:00:00.000Z' });
@@ -146,6 +173,8 @@ describe('hosted sites API routes', () => {
   });
 
   it.each([
+    ['capabilities', capabilities, 'sites:read', undefined],
+    ['visibility', visibility, 'sites:write', context()],
     ['list', listSites, 'sites:read', undefined],
     ['create', createSite, 'sites:write', undefined],
     ['get', getSite, 'sites:read', context()],
@@ -180,7 +209,7 @@ describe('hosted sites API routes', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mockListSites).toHaveBeenCalledWith({ user: 'octo@example.com', page: 2, limit: 10 });
+    expect(mockListSites).toHaveBeenCalledWith({ view: 'mine', page: 2, limit: 10 }, sessionPrincipal);
     expect(body.data).toEqual({ sites: [site] });
     expect(body.metadata).toEqual({ pagination: { page: 2, limit: 10, total: 21, totalPages: 3 } });
   });
@@ -188,8 +217,8 @@ describe('hosted sites API routes', () => {
   it('omits blank and invalid list filters instead of forwarding sentinel values', async () => {
     const response = await listSites(request('http://localhost/api/v2/sites?user=%20%20&page=nope&limit='));
 
-    expect(response.status).toBe(200);
-    expect(mockListSites).toHaveBeenCalledWith({});
+    expect(response.status).toBe(400);
+    expect(mockListSites).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -216,7 +245,7 @@ describe('hosted sites API routes', () => {
       fileName: 'site.zip',
       content: Buffer.from([80, 75, 3, 4]),
       name: 'Docs',
-      user: identity,
+      principal: sessionPrincipal,
     });
   });
 
@@ -242,7 +271,7 @@ describe('hosted sites API routes', () => {
 
     expect(response.status).toBe(200);
     expect((await response.json()).data).toEqual({ site });
-    expect(mockGetSite).toHaveBeenCalledWith('docs-abc123');
+    expect(mockGetSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal);
   });
 
   it('deletes a site by route id and returns its tombstoned representation', async () => {
@@ -255,7 +284,7 @@ describe('hosted sites API routes', () => {
     expect((await response.json()).data.site).toEqual(
       expect.objectContaining({ id: site.id, deletedAt: expect.any(String) })
     );
-    expect(mockDeleteSite).toHaveBeenCalledWith('docs-abc123');
+    expect(mockDeleteSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal, undefined);
   });
 
   it.each([
@@ -284,7 +313,7 @@ describe('hosted sites API routes', () => {
       fileName: 'index.html',
       content: Buffer.from('<h1>Docs</h1>'),
       name: undefined,
-      user: identity,
+      principal: sessionPrincipal,
     });
   });
 
@@ -321,7 +350,7 @@ describe('hosted sites API routes', () => {
     expect((await response.json()).data.site).toEqual(
       expect.objectContaining({ id: site.id, expiresAt: expect.any(String) })
     );
-    expect(mockExtendSite).toHaveBeenCalledWith('docs-abc123');
+    expect(mockExtendSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal, undefined);
   });
 
   it('maps an extension failure when TTL is disabled', async () => {
@@ -334,5 +363,57 @@ describe('hosted sites API routes', () => {
 
     expect(response.status).toBe(400);
     expect((await response.json()).error.message).toBe('TTL is disabled for hosted sites.');
+  });
+  it('denies replacement before reading an unauthorized upload', async () => {
+    mockGetSite.mockResolvedValue({ ...site, permissions: { canEdit: false } });
+    const req = request('http://localhost/api/v2/sites/docs-abc123/content', { method: 'PUT', file: uploadFile() });
+    expect((await replaceContent(req, context())).status).toBe(403);
+    expect(req.formData).not.toHaveBeenCalled();
+    expect(mockReplaceSiteContent).not.toHaveBeenCalled();
+  });
+  it('returns sanitized capabilities with no-store', async () => {
+    const res = await capabilities(request('http://localhost/api/v2/sites/capabilities'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect((await res.json()).data).toMatchObject({ defaultVisibility: 'private', canCreate: true });
+    expect(mockGetCapabilities).toHaveBeenCalledWith(sessionPrincipal);
+  });
+  it.each([
+    {},
+    { visibility: 'private' },
+    { visibility: 'public', expectedAccessRevision: 0 },
+    { visibility: 'public', expectedAccessRevision: 1, ownerSubject: 'attacker' },
+  ])('rejects invalid access body %p before the service', async (body) => {
+    expect(
+      (
+        await visibility(
+          request('http://localhost/api/v2/sites/docs-abc123/access', { method: 'PATCH', body }),
+          context()
+        )
+      ).status
+    ).toBe(400);
+    expect(mockSetVisibility).not.toHaveBeenCalled();
+  });
+  it('passes visibility and required revision together with the verified principal', async () => {
+    const body = { visibility: 'private', expectedAccessRevision: 7 };
+    const res = await visibility(
+      request('http://localhost/api/v2/sites/docs-abc123/access', { method: 'PATCH', body }),
+      context()
+    );
+    expect(res.status).toBe(200);
+    expect(mockSetVisibility).toHaveBeenCalledWith('docs-abc123', 'private', sessionPrincipal, 7);
+  });
+  it('passes deletion revision and rejects malformed revisions', async () => {
+    expect(
+      (await deleteSite(request('http://localhost/api/v2/sites/docs-abc123?expectedAccessRevision=3'), context()))
+        .status
+    ).toBe(200);
+    expect(mockDeleteSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal, 3);
+    mockDeleteSite.mockClear();
+    expect(
+      (await deleteSite(request('http://localhost/api/v2/sites/docs-abc123?expectedAccessRevision=3oops'), context()))
+        .status
+    ).toBe(400);
+    expect(mockDeleteSite).not.toHaveBeenCalled();
   });
 });

@@ -39,6 +39,7 @@ export default class ApiToken extends Model {
 
   /* Identity binding for user-provisioned tokens; all null for admin-minted org tokens. */
   ownerUserId!: string | null;
+  ownerIssuer!: string | null;
   ownerGithubUsername!: string | null;
   ownerEmail!: string | null;
   ownerPreferredUsername!: string | null;
@@ -79,6 +80,7 @@ export default class ApiToken extends Model {
       expiresAt: { type: ['string', 'null'] },
       revokedAt: { type: ['string', 'null'] },
       ownerUserId: { type: ['string', 'null'] },
+      ownerIssuer: { type: ['string', 'null'], maxLength: 2048 },
       ownerGithubUsername: { type: ['string', 'null'] },
       ownerEmail: { type: ['string', 'null'] },
       ownerPreferredUsername: { type: ['string', 'null'] },
