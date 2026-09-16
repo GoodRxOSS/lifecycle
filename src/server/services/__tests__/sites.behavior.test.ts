@@ -141,7 +141,6 @@ jest.mock('server/services/keycloak/principalStatus', () => ({
 jest.mock('server/lib/verifiedOAuthBearer', () => ({ getVerifiedOAuthBearer: jest.fn(() => 'fixture-bearer') }));
 jest.mock('server/lib/sites/browserAuth', () => ({
   ...jest.requireActual('server/lib/sites/browserAuth'),
-  getSitesBrowserAuth: () => ({ assertOAuthLogin: async () => undefined }),
 }));
 const originalSitesEnv = { ...process.env };
 beforeEach(() => {
@@ -149,7 +148,6 @@ beforeEach(() => {
   process.env.KEYCLOAK_ISSUER = principal.issuer!;
   process.env.SITES_PRIVATE_ENABLED = 'true';
   process.env.SITES_UI_ORIGIN = 'https://lifecycle.example.net';
-  process.env.SITES_BROWSER_BRIDGE_SECRET = 'fixture-bridge-secret-at-least-thirty-two-bytes';
 });
 afterEach(() => {
   process.env = { ...originalSitesEnv };

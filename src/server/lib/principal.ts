@@ -38,7 +38,7 @@ export interface Principal {
   /** Verified OAuth token/session identity; absent on API keys and legacy claims. */
   oauth?: OAuthCredential;
   kind: PrincipalKind;
-  authMethod: 'session' | 'oauth' | 'api_key' | 'sites_viewer';
+  authMethod: 'session' | 'oauth' | 'api_key';
   /** OAuth subject; owner subject for personal keys; null for service keys. */
   userId: string | null;
   /** Subject, or `token:<name>` for service keys — audit/attribution string. */

@@ -167,69 +167,24 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'service keys "lfc_svc_<hex>", and legacy keys "lfc_<hex>". Authority is the owner authority ' +
             'intersected with the key scopes and repository constraint. Accepted only on programmatic routes.',
         },
-        SitesBrowserBridge: {
-          type: 'apiKey',
-          in: 'header',
-          name: 'x-lfc-sites-bridge',
-          description:
-            'Internal UI-to-core request signature, not a Lifecycle API key or the raw shared secret. ' +
-            'The header is <unix-seconds>.<43-character-base64url-nonce>.<hex-HMAC-SHA256>. ' +
-            'Sign the newline-separated values sites-v1, action (bind, mint, or revoke), timestamp, nonce, ' +
-            'and the hex SHA-256 of the exact request body using SITES_BROWSER_BRIDGE_SECRET. ' +
-            'Timestamps allow 30 seconds of skew; nonces are single-use. Keep the signing secret server-side.',
-        },
       },
       schemas: {
-        SitesBrowserLoginRequest: {
+        SitesBrowserMintRequest: {
           type: 'object',
-          required: ['loginId', 'loginExpiresAt'],
+          additionalProperties: false,
+          required: ['siteId', 'state'],
           properties: {
-            loginId: {
+            siteId: {
+              type: 'string',
+              pattern: '^[a-z0-9-]{1,64}$',
+              description: 'Site identifier matching the bootstrap challenge.',
+            },
+            state: {
               type: 'string',
               pattern: '^[A-Za-z0-9_-]{43}$',
-              description: 'Server-generated application-login nonce, distinct from the identity provider SSO session.',
-            },
-            loginExpiresAt: {
-              type: 'integer',
-              description:
-                'Absolute application-login expiry in Unix seconds. Binding and minting require a future expiry; ' +
-                'revocation also accepts an expired login. The server limits future expiry to its login lifetime.',
+              description: 'Opaque, unexpired bootstrap challenge issued by the content gateway.',
             },
           },
-        },
-        SitesBrowserBindRequest: {
-          allOf: [
-            { $ref: '#/components/schemas/SitesBrowserLoginRequest' },
-            {
-              type: 'object',
-              properties: {
-                createLogin: {
-                  type: 'boolean',
-                  default: false,
-                  description:
-                    'True only for an explicit OAuth sign-in with a newly generated login nonce. ' +
-                    'Refresh requests must omit this or send false and match an existing unrevoked login.',
-                },
-              },
-            },
-          ],
-        },
-        SitesBrowserMintRequest: {
-          allOf: [
-            { $ref: '#/components/schemas/SitesBrowserLoginRequest' },
-            {
-              type: 'object',
-              required: ['state', 'siteId'],
-              properties: {
-                state: {
-                  type: 'string',
-                  pattern: '^[A-Za-z0-9_-]{43}$',
-                  description: 'Opaque, unexpired bootstrap challenge issued by the content gateway.',
-                },
-                siteId: { type: 'string', description: 'Site identifier matching the bootstrap challenge.' },
-              },
-            },
-          ],
         },
         // ===================================================================
         // Core Reusable Schemas

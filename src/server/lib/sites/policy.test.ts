@@ -5,13 +5,6 @@ import { rememberVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 const mockStatus = jest.fn();
 const mockToken = jest.fn();
 const mockSession = jest.fn();
-const mockOAuthLogin = jest.fn();
-jest.mock('./browserAuth', () => ({
-  getSitesBrowserAuth: () => ({
-    assertOAuthLogin: (...args: unknown[]) => mockOAuthLogin(...args),
-    getViewerOAuthTokenStatus: (...args: unknown[]) => mockSession(...args),
-  }),
-}));
 jest.mock('server/models/ApiToken', () => ({
   __esModule: true,
   default: { query: () => ({ findById: (...args: unknown[]) => mockToken(...args) }) },
@@ -27,21 +20,25 @@ jest.mock('server/services/keycloak/principalStatus', () => ({
   getOAuthTokenStatus: (...args: unknown[]) => mockSession(...args),
 }));
 const issuer = 'https://identity.example/realms/lifecycle';
-const human = (overrides: Partial<Principal> = {}): Principal => ({
-  kind: 'user',
-  authMethod: 'sites_viewer',
-  issuer,
-  oauth: { sessionId: 'sid', tokenId: 'jti', clientId: 'ui', expiresAt: Math.floor(Date.now() / 1000) + 300 },
-  userId: 'alice',
-  actor: 'alice',
-  roles: ['admin'],
-  scopes: null,
-  tokenId: null,
-  repositoryAllowlist: null,
-  repositoryAllowlistRepoIds: null,
-  identity: null,
-  ...overrides,
-});
+const human = (overrides: Partial<Principal> = {}): Principal => {
+  const principal: Principal = {
+    kind: 'user',
+    authMethod: 'session',
+    issuer,
+    oauth: { sessionId: 'sid', tokenId: 'jti', clientId: 'ui', expiresAt: Math.floor(Date.now() / 1000) + 300 },
+    userId: 'alice',
+    actor: 'alice',
+    roles: ['admin'],
+    scopes: null,
+    tokenId: null,
+    repositoryAllowlist: null,
+    repositoryAllowlistRepoIds: null,
+    identity: null,
+    ...overrides,
+  };
+  rememberVerifiedOAuthBearer(principal, 'test-bearer');
+  return principal;
+};
 const site = { ownerKind: 'user', ownerIssuer: issuer, ownerSubject: 'alice', creatorTokenId: null } as Site;
 const previousEnv = { ...process.env };
 beforeEach(() => {
@@ -49,7 +46,6 @@ beforeEach(() => {
   process.env.KEYCLOAK_ISSUER = issuer;
   mockStatus.mockReset().mockResolvedValue('active');
   mockSession.mockReset().mockResolvedValue('active');
-  mockOAuthLogin.mockReset().mockResolvedValue(undefined);
   mockToken
     .mockReset()
     .mockResolvedValue({ kind: 'personal', ownerUserId: 'alice', ownerIssuer: issuer, scopes: ['sites:write'] });
@@ -133,23 +129,15 @@ test.each(['revoked', 'unknown'])('a %s OAuth session fails closed despite an en
 test('a legacy OAuth token missing revocation claims cannot access Sites', async () => {
   await expect(assertSitesPrincipal(human({ oauth: undefined }))).rejects.toMatchObject({ httpStatus: 401 });
 });
-test('application logout prevents REST and MCP write authorization even with a live IdP session', async () => {
-  mockOAuthLogin.mockRejectedValue(new Error('revoked application login'));
-  for (const authMethod of ['session', 'oauth'] as const) {
-    const principal = human({ authMethod });
-    rememberVerifiedOAuthBearer(principal, 'test-bearer');
-    await expect(assertSitesPrincipal(principal, 'write')).rejects.toThrow('revoked application login');
-  }
-});
 test('personal API keys keep their independent lifetime after application or IdP logout', async () => {
   mockSession.mockResolvedValue('revoked');
-  mockOAuthLogin.mockRejectedValue(new Error('revoked application login'));
   await expect(assertSitesPrincipal(human({ kind: 'personal_key', tokenId: 7 }))).resolves.toBeUndefined();
   expect(mockSession).not.toHaveBeenCalled();
-  expect(mockOAuthLogin).not.toHaveBeenCalled();
 });
 
 test('REST/MCP principals missing their request-only bearer association fail closed', async () => {
-  await expect(assertSitesPrincipal(human({ authMethod: 'oauth' }))).rejects.toMatchObject({ httpStatus: 401 });
-  await expect(assertSitesPrincipal(human({ authMethod: 'session' }))).rejects.toMatchObject({ httpStatus: 401 });
+  await expect(assertSitesPrincipal({ ...human({ authMethod: 'oauth' }) })).rejects.toMatchObject({ httpStatus: 401 });
+  await expect(assertSitesPrincipal({ ...human({ authMethod: 'session' }) })).rejects.toMatchObject({
+    httpStatus: 401,
+  });
 });

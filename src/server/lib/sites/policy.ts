@@ -7,7 +7,6 @@ import type { Principal } from 'server/lib/principal';
 import { AppError } from 'server/lib/appError';
 import { scopeSatisfies } from 'server/lib/apiTokenScopes';
 import { getUserStatus, getOAuthTokenStatus } from 'server/services/keycloak/principalStatus';
-import { getSitesBrowserAuth } from './browserAuth';
 import { getVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 
 export function hasSitesScope(principal: Principal, operation: 'read' | 'write'): boolean {
@@ -77,16 +76,7 @@ export async function assertSitesPrincipal(
       throw new AppError({ httpStatus: 401, code: 'invalid_credential', message: 'A live OAuth session is required.' });
     }
     const bearer = getVerifiedOAuthBearer(principal);
-    const session =
-      principal.authMethod === 'sites_viewer'
-        ? await getSitesBrowserAuth().getViewerOAuthTokenStatus({
-            issuer: principal.issuer,
-            subject: principal.userId,
-            oauth,
-          })
-        : bearer
-        ? await getOAuthTokenStatus(bearer)
-        : 'revoked';
+    const session = bearer ? await getOAuthTokenStatus(bearer) : 'revoked';
     if (session !== 'active') {
       throw new AppError({
         httpStatus: session === 'unknown' ? 503 : 401,
@@ -95,7 +85,6 @@ export async function assertSitesPrincipal(
         retryable: session === 'unknown',
       });
     }
-    await getSitesBrowserAuth().assertOAuthLogin({ issuer: principal.issuer, subject: principal.userId, oauth });
   }
   const status = await getUserStatus(principal.userId);
   if (status !== 'active') {

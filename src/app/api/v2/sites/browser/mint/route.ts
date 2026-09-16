@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
-import { getUser } from 'server/lib/get-user';
-import { getVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 import {
   getSitesBrowserAuth,
-  readSitesBridgeBody,
+  readSitesMintBody,
   assertPrivateSitesReady,
   SitesBrowserError,
 } from 'server/lib/sites/browserAuth';
@@ -15,13 +13,12 @@ import SitesService from 'server/services/sites';
  * @openapi
  * /api/v2/sites/browser/mint:
  *   post:
- *     operationId: mintSitesBrowserLogin
+ *     operationId: mintSitesBrowserTicket
  *     summary: Mint a private-site browser bootstrap ticket
- *     description: Internal server-to-server operation for the Lifecycle UI. Requires a live owner OAuth bearer AND the signed mint request header, an existing bound application login, and a matching gateway challenge. Lifecycle API keys and browser cookies are not accepted. Returns a single-use ticket valid for at most 60 seconds for POST consumption at the supplied content-host URL; it is not an OAuth token.
+ *     description: Requires a live owner user JWT and a matching gateway challenge. Lifecycle API keys and browser cookies are not accepted. Returns a single-use ticket valid for at most 60 seconds for POST consumption at the supplied content-host URL. The resulting Site-only grant expires at the earlier of JWT expiry and 300 seconds after mint. Renewal requires another authenticated mint.
  *     tags: [Sites]
  *     security:
  *       - BearerAuth: []
- *         SitesBrowserBridge: []
  *     requestBody:
  *       required: true
  *       content:
@@ -47,15 +44,15 @@ import SitesService from 'server/services/sites';
  *                       type: string
  *                       format: uri
  *       '400':
- *         description: Invalid signed request body.
+ *         description: Invalid request body.
  *       '401':
- *         description: Missing, invalid, expired, or replayed credentials, or an invalid application login.
+ *         description: Missing, invalid or expired credentials or gateway challenge.
  *       '403':
  *         description: The authenticated principal is not permitted to use this operation.
  *       '404':
  *         description: Site is unavailable to this owner.
  *       '413':
- *         description: Signed request body exceeds 4096 bytes.
+ *         description: Request body exceeds 4096 bytes.
  *       '500':
  *         description: Unexpected server or storage dependency failure; completion could not be confirmed.
  *       '503':
@@ -66,20 +63,17 @@ import SitesService from 'server/services/sites';
 export const POST = createPrincipalApiHandler({ scope: 'sites:read', kinds: ['user'] }, async (request, principal) => {
   assertPrivateSitesReady();
   await assertSitesPrincipal(principal);
-  const raw = await readSitesBridgeBody(request);
+  const body = await readSitesMintBody(request);
   const auth = getSitesBrowserAuth();
-  const body = await auth.verifyBridge('mint', raw, request.headers.get('x-lfc-sites-bridge'));
-  const challenge = await auth.readChallenge(body.state || '');
-  const { site } = await new SitesService().getGatewaySite(challenge.host);
-  const bearer = getVerifiedOAuthBearer(principal);
-  if (!principal.issuer || !principal.userId || !bearer) throw new SitesBrowserError(401);
+  if (!principal.issuer || !principal.userId || !principal.oauth) throw new SitesBrowserError(401);
   await auth.rateLimit(`mint:${principal.issuer}:${principal.userId}`);
+  const challenge = await auth.readChallenge(body.state);
+  const { site } = await new SitesService().getGatewaySite(challenge.host);
   const result = await auth.mint(
     site,
-    { issuer: principal.issuer, subject: principal.userId, oauth: principal.oauth },
+    { issuer: principal.issuer, subject: principal.userId },
     body,
-    Number(getUser(request)?.exp),
-    bearer
+    principal.oauth.expiresAt
   );
   return NextResponse.json({ data: result }, { headers: { 'Cache-Control': 'no-store' } });
 });

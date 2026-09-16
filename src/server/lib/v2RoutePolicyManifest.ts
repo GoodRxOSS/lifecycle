@@ -257,8 +257,6 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'DELETE', route: '/api/v2/repositories/{fullName+}', policy: 'principal', scope: 'repos:write' },
   { method: 'GET', route: '/api/v2/schema/validate', policy: 'principal', scope: 'repos:read' },
   { method: 'POST', route: '/api/v2/sites/browser/mint', policy: 'principal', scope: 'sites:read', kinds: ['user'] },
-  { method: 'POST', route: '/api/v2/sites/browser/bind', policy: 'principal', scope: 'sites:read', kinds: ['user'] },
-  { method: 'POST', route: '/api/v2/sites/browser/revoke', policy: 'public' },
   { method: 'GET', route: '/api/v2/sites/browser/open/{siteId}', policy: 'public' },
   { method: 'GET', route: '/api/v2/sites/capabilities', policy: 'principal', scope: 'sites:read' },
   { method: 'PATCH', route: '/api/v2/sites/{siteId}/access', policy: 'principal', scope: 'sites:write' },

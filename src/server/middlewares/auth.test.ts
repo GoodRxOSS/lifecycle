@@ -23,7 +23,6 @@ jest.mock('server/lib/auth', () => ({
 }));
 
 import { authMiddleware } from './auth';
-import { requestIdMiddleware } from './requestId';
 
 const VALID_TOKEN = `lfc_${'a'.repeat(40)}`;
 const originalEnableAuth = process.env.ENABLE_AUTH;
@@ -52,23 +51,17 @@ afterAll(() => {
 });
 
 describe('authMiddleware x-user stripping', () => {
-  it('preserves a signed revoke POST through the real middleware chain and strips spoofed identity', async () => {
-    const body = '{"loginId":"signed-test-value"}';
+  it('does not bypass normal JWT authentication for the retired revoke route', async () => {
+    mockVerifyAuth.mockResolvedValue({ success: false, error: { status: 401, message: 'Unauthorized' } });
     const request = new NextRequest('https://example.test/api/v2/sites/browser/revoke', {
       method: 'POST',
-      body,
-      headers: { 'x-user': 'spoofed', 'x-lfc-sites-bridge': 'bridge-signature' },
+      body: '{}',
+      headers: { 'x-user': 'spoofed' },
     });
-    const next = jest.fn().mockResolvedValue(NextResponse.next());
-    await requestIdMiddleware(request, (forwarded) => authMiddleware(forwarded, next));
-    expect(mockVerifyAuth).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledTimes(1);
-    const forwarded = forwardedRequest(next);
-    expect(forwarded.method).toBe('POST');
-    expect(await forwarded.text()).toBe(body);
-    expect(forwarded.headers.get('x-user')).toBeNull();
-    expect(forwarded.headers.get('x-lfc-sites-bridge')).toBe('bridge-signature');
-    expect(forwarded.headers.has('x-request-id')).toBe(true);
+    const { next, result } = await runMiddleware(request);
+    expect(mockVerifyAuth).toHaveBeenCalledTimes(1);
+    expect(next).not.toHaveBeenCalled();
+    expect(result.status).toBe(401);
   });
   it('strips a crafted x-user when ENABLE_AUTH is off', async () => {
     process.env.ENABLE_AUTH = 'false';

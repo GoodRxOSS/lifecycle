@@ -1,10 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { isIP } from 'net';
 import type Site from 'server/models/Site';
-import type { Principal } from 'server/lib/principal';
-import { assertSitesPrincipal } from './policy';
 import {
   assertViewerOwns,
+  assertViewerActive,
   challengeCookieName,
   getSitesBrowserAuth,
   parseSitesCookies,
@@ -35,25 +34,8 @@ export function sitesClientAddress(req: Pick<IncomingMessage, 'headers' | 'socke
   return peer;
 }
 
-export function sitesViewerPrincipal(viewer: Pick<Viewer, 'issuer' | 'subject' | 'oauth'>): Principal {
-  // The caller supplies only a viewer recovered from a server-side session originally minted
-  // from a verified JWT. This is never built from browser headers or unsigned claim input.
-  return {
-    kind: 'user',
-    authMethod: 'sites_viewer',
-    userId: viewer.subject,
-    issuer: viewer.issuer,
-    actor: viewer.subject,
-    roles: ['user'],
-    scopes: null,
-    tokenId: null,
-    repositoryAllowlist: null,
-    repositoryAllowlistRepoIds: null,
-    identity: null,
-    oauth: viewer.oauth,
-  };
-}
 export async function authorizeSitesViewer(site: Site, viewer: Viewer): Promise<void> {
+  assertViewerActive(viewer);
   assertViewerOwns(site, viewer);
   if (
     site.siteId !== viewer.siteId ||
@@ -61,7 +43,6 @@ export async function authorizeSitesViewer(site: Site, viewer: Viewer): Promise<
     site.accessRevision !== viewer.accessRevision
   )
     throw new SitesBrowserError(401);
-  await assertSitesPrincipal(sitesViewerPrincipal(viewer));
 }
 function securityHeaders(res: ServerResponse) {
   res.setHeader('Cache-Control', 'no-store');
@@ -178,8 +159,7 @@ export async function handleSitesRequest(
     }
     const object = await service.getGatewayObject(host, url.pathname, async (currentSite) => {
       if (!viewer) throw new SitesBrowserError(401);
-      // Check login again immediately before storage, including a concurrent logout.
-      await auth!.assertLogin(viewer);
+      // Recheck the fixed deadline and current Site immediately before storage.
       await authorizeSitesViewer(currentSite, viewer);
     });
     if (site.visibility === 'private') {

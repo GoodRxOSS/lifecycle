@@ -61,49 +61,24 @@ function isBearerAuthOrLifecycleKey(security: unknown): boolean {
   );
 }
 
-// A public wrapper removes platform authentication, not any authentication performed by the handler.
-// Each listed bridge requirement is mandatory in the SAME object as any allowed principal scheme (AND).
-const HANDLER_SECURITY: Record<string, Record<string, never[]>> = {
-  'POST /api/v2/sites/browser/bind': { SitesBrowserBridge: [] },
-  'POST /api/v2/sites/browser/mint': { SitesBrowserBridge: [] },
-  'POST /api/v2/sites/browser/revoke': { SitesBrowserBridge: [] },
-};
-
 function principalSecurity(entry: Extract<V2RoutePolicyEntry, { policy: 'principal' }>) {
   const kinds = entry.kinds ?? ['user', 'personal_key', 'service_key'];
-  const handlerSecurity = HANDLER_SECURITY[keyOf(entry)] ?? {};
   return [
-    ...(kinds.includes('user') ? [{ BearerAuth: [], ...handlerSecurity }] : []),
-    ...(kinds.some((kind) => kind === 'personal_key' || kind === 'service_key')
-      ? [{ LifecycleApiKey: [], ...handlerSecurity }]
-      : []),
+    ...(kinds.includes('user') ? [{ BearerAuth: [] }] : []),
+    ...(kinds.some((kind) => kind === 'personal_key' || kind === 'service_key') ? [{ LifecycleApiKey: [] }] : []),
   ];
 }
 
 describe('OpenAPI v2 security contract', () => {
   it('preserves BearerAuth while declaring descriptive session and Lifecycle API-key schemes', () => {
     const schemes = spec.components.securitySchemes;
-    expect(Object.keys(schemes).sort()).toEqual([
-      'BearerAuth',
-      'KeycloakBearer',
-      'LifecycleApiKey',
-      'SitesBrowserBridge',
-    ]);
+    expect(Object.keys(schemes).sort()).toEqual(['BearerAuth', 'KeycloakBearer', 'LifecycleApiKey']);
     expect(schemes.BearerAuth).toMatchObject({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' });
     expect(schemes.KeycloakBearer).toMatchObject({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' });
     expect(schemes.LifecycleApiKey).toMatchObject({ type: 'http', scheme: 'bearer' });
     expect(schemes.LifecycleApiKey.description).toMatch(/lfc_pat_/);
     expect(schemes.LifecycleApiKey.description).toMatch(/lfc_svc_/);
-    expect(schemes.SitesBrowserBridge).toMatchObject({
-      type: 'apiKey',
-      in: 'header',
-      name: 'x-lfc-sites-bridge',
-    });
-    expect(schemes.SitesBrowserBridge.description).toContain('single-use');
-    expect(schemes.SitesBrowserBridge.description).toContain('SITES_BROWSER_BRIDGE_SECRET');
-    expect(schemes.SitesBrowserBridge.description).not.toContain('SITES_UI_BRIDGE_SECRET');
   });
-
   it('defaults globally to the Keycloak session only', () => {
     expect(spec.security).toEqual([{ BearerAuth: [] }]);
   });
@@ -149,55 +124,33 @@ describe('OpenAPI v2 security contract', () => {
     expect(leaked).toEqual([]);
   });
 
-  it('covers every public operation, including signature-only logout and anonymous public-link resolution', () => {
+  it('covers every public operation, including anonymous public-link resolution', () => {
     for (const entry of V2_ROUTE_POLICY_MANIFEST) {
       if (entry.policy !== 'public') continue;
-      const extra = HANDLER_SECURITY[keyOf(entry)];
       expect({ operation: keyOf(entry), security: operationFor(entry)?.security }).toEqual({
         operation: keyOf(entry),
-        security: extra ? [extra] : [],
+        security: [],
       });
     }
   });
 
-  it('documents OAuth AND the bridge signature for bind/mint, but only the signature for revoke', () => {
-    for (const action of ['bind', 'mint']) {
-      const route = `/api/v2/sites/browser/${action}`;
-      expect(V2_ROUTE_POLICY_MANIFEST.find((entry) => entry.route === route)).toMatchObject({
-        method: 'POST',
-        policy: 'principal',
-        kinds: ['user'],
-      });
-      expect(spec.paths[route].post.security).toEqual([{ BearerAuth: [], SitesBrowserBridge: [] }]);
-    }
-    expect(spec.paths['/api/v2/sites/browser/revoke'].post.security).toEqual([{ SitesBrowserBridge: [] }]);
+  it('documents only JWT-authenticated mint and its minimal body', () => {
+    const op = spec.paths['/api/v2/sites/browser/mint'].post;
+    expect(op.security).toEqual([{ BearerAuth: [] }]);
+    expect(op.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/SitesBrowserMintRequest',
+    });
+    expect(spec.components.schemas.SitesBrowserMintRequest.required).toEqual(['siteId', 'state']);
+    expect(spec.components.schemas.SitesBrowserMintRequest.additionalProperties).toBe(false);
+    expect(
+      Object.keys(op.responses['200'].content['application/json'].schema.properties.data.properties).sort()
+    ).toEqual(['consumeUrl', 'ticket']);
     expect(spec.paths['/api/v2/sites/browser/open/{siteId}'].get.security).toEqual([]);
-    for (const key of Object.keys(HANDLER_SECURITY)) {
-      expect(V2_ROUTE_POLICY_MANIFEST.some((entry) => keyOf(entry) === key)).toBe(true);
+    for (const action of ['bind', 'revoke']) {
+      expect(spec.paths[`/api/v2/sites/browser/${action}`]).toBeUndefined();
     }
-  });
-
-  it('documents concrete signed request bodies and success results without exposing OAuth credentials', () => {
-    const requests = {
-      bind: 'SitesBrowserBindRequest',
-      mint: 'SitesBrowserMintRequest',
-      revoke: 'SitesBrowserLoginRequest',
-    };
-    const results = { bind: ['bound'], mint: ['consumeUrl', 'ticket'], revoke: ['revoked'] };
-    for (const action of ['bind', 'mint', 'revoke'] as const) {
-      const op = spec.paths[`/api/v2/sites/browser/${action}`].post;
-      expect(op.requestBody.required).toBe(true);
-      expect(op.requestBody.content['application/json'].schema).toEqual({
-        $ref: `#/components/schemas/${requests[action]}`,
-      });
-      const response = op.responses['200'].content['application/json'].schema;
-      expect(response.required).toEqual(['data']);
-      expect(Object.keys(response.properties.data.properties).sort()).toEqual(results[action]);
-      expect([...response.properties.data.required].sort()).toEqual(results[action]);
-    }
-    expect(spec.components.schemas.SitesBrowserLoginRequest.required).toEqual(['loginId', 'loginExpiresAt']);
-    expect(spec.components.schemas.SitesBrowserBindRequest.allOf[1].properties.createLogin.default).toBe(false);
-    expect(spec.components.schemas.SitesBrowserMintRequest.allOf[1].required).toEqual(['state', 'siteId']);
+    expect(spec.components.schemas.SitesBrowserLoginRequest).toBeUndefined();
+    expect(spec.components.schemas.SitesBrowserBindRequest).toBeUndefined();
   });
 
   it('documents auth/context with the OR form under operationId getAuthContext', () => {

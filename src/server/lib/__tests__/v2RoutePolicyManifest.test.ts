@@ -47,7 +47,6 @@ describe('v2 route policy manifest', () => {
     const publicKeys = V2_ROUTE_POLICY_MANIFEST.filter((e) => e.policy === 'public').map(keyOf);
     expect(publicKeys).toEqual([
       'GET /api/v2/ai/agent/mcp-connections/{slug}/oauth/callback',
-      'POST /api/v2/sites/browser/revoke',
       'GET /api/v2/sites/browser/open/{siteId}',
     ]);
   });

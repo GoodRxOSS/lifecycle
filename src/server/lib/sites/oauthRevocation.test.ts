@@ -6,8 +6,9 @@ import { verifyBearerToken } from 'server/lib/auth';
 import { resolvePrincipal } from 'server/lib/principal';
 import { getVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 import { authenticateMcpRequest } from 'server/mcp/auth';
-import { SitesBrowserAuth, randomSiteToken, challengeCookieName } from './browserAuth';
+import { SitesBrowserAuth, challengeCookieName } from './browserAuth';
 import { assertSitesPrincipal } from './policy';
+import { authorizeSitesViewer } from './gateway';
 
 jest.mock('jose', () => ({ ...jest.requireActual('jose'), createRemoteJWKSet: jest.fn() }));
 jest.mock('server/services/apiToken', () => ({ __esModule: true, default: {} }));
@@ -17,7 +18,6 @@ jest.mock('server/lib/logger', () => ({ getLogger: () => ({ warn: jest.fn(), err
 const mockDirectorySession = jest.fn();
 jest.mock('server/services/keycloak/principalStatus', () => ({
   getUserStatus: async () => 'active',
-  getUserSessionStatus: (...args: unknown[]) => mockDirectorySession(...args),
   getOAuthTokenStatus: (...args: unknown[]) => mockDirectorySession(...args),
 }));
 const mockRows = new Map<string, string>();
@@ -28,15 +28,12 @@ const mockRedis = {
     mockRows.set(key, value);
     return 'OK';
   },
-  eval: async (_script: string, _count: number, key: string, value: string, _ttl: number, mode?: string) => {
-    const current = mockRows.get(key);
-    if (_script.includes('sites-consume')) {
+  eval: async (script: string, _count: number, key: string) => {
+    if (script.includes('sites-consume')) {
+      const current = mockRows.get(key);
       mockRows.delete(key);
       return current ?? null;
     }
-    if (mode === 'existing' && !current) return 0;
-    if (current && current !== value) return 0;
-    mockRows.set(key, value);
     return 1;
   },
 };
@@ -55,10 +52,8 @@ beforeAll(async () => {
   process.env.KEYCLOAK_ISSUER = issuer;
   process.env.KEYCLOAK_CLIENT_ID = 'lifecycle-api';
   process.env.KEYCLOAK_JWKS_URL = 'https://identity.example/test-jwks';
-  process.env.SITES_UI_OAUTH_CLIENT_ID = 'lifecycle-ui';
   process.env.SITES_PRIVATE_ENABLED = 'true';
   process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
-  process.env.SITES_BROWSER_BRIDGE_SECRET = 'x'.repeat(40);
   process.env.APP_HOST = 'https://api.example';
 });
 beforeEach(() => {
@@ -82,7 +77,7 @@ async function sign(tokenId: string, clientId = 'lifecycle-ui', offlineAccess = 
     .setAudience(['lifecycle-api', 'https://api.example/mcp'])
     .setJti(tokenId)
     .setIssuedAt()
-    .setExpirationTime('10m')
+    .setExpirationTime('5m')
     .sign(privateKey);
 }
 async function principals(token: string) {
@@ -105,35 +100,14 @@ async function principals(token: string) {
   return [rest, mcp.principal];
 }
 
-test('unexpired bearer replay after app logout fails Sites policy through REST and MCP', async () => {
-  const auth = new SitesBrowserAuth(mockRedis as any);
-  const login = { loginId: randomSiteToken(), loginExpiresAt: Math.floor(Date.now() / 1000) + 3600, createLogin: true };
-  const bearer = await sign('initial-token');
-  const refreshed = await sign('refreshed-token');
-  for (const token of [bearer, refreshed]) {
-    const [rest, mcp] = await principals(token);
-    await auth.bind({ issuer, subject: 'owner', oauth: rest.oauth }, login);
-    await assertSitesPrincipal(rest, 'write');
-    await assertSitesPrincipal(mcp, 'read');
+test('existing UI and CLI JWTs authorize REST/MCP without a separate application login', async () => {
+  for (const client of ['lifecycle-ui', 'lifecycle-cli']) {
+    for (const principal of await principals(await sign(`token-${client}`, client))) {
+      await assertSitesPrincipal(principal, 'write');
+      expect(principal.oauth!.expiresAt - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(300);
+    }
   }
-  await auth.revoke(login);
-  // JWT verification still succeeds; Sites authorization must independently deny it.
-  for (const token of [bearer, refreshed]) {
-    for (const principal of await principals(token))
-      await expect(assertSitesPrincipal(principal, 'write')).rejects.toMatchObject({ httpStatus: 401 });
-  }
-  const freshLogin = { ...login, loginId: randomSiteToken() };
-  for (const principal of await principals(await sign('new-login-token'))) {
-    await auth.bind({ issuer, subject: 'owner', oauth: principal.oauth }, freshLogin);
-    await assertSitesPrincipal(principal, 'write');
-  }
-});
-
-test('unbound old UI tokens fail closed while separate CLI OAuth remains supported', async () => {
-  for (const principal of await principals(await sign('legacy-unbound')))
-    await expect(assertSitesPrincipal(principal)).rejects.toMatchObject({ httpStatus: 401 });
-  for (const principal of await principals(await sign('cli-token', 'lifecycle-cli')))
-    await assertSitesPrincipal(principal);
+  expect(mockRows.size).toBe(0);
 });
 
 test('IdP session revocation denies signed CLI OAuth tokens with an otherwise enabled account', async () => {
@@ -147,21 +121,13 @@ test('IdP session revocation denies signed CLI OAuth tokens with an otherwise en
   expect(mockDirectorySession).toHaveBeenCalledWith(token);
 });
 
-test('offline OAuth selects live offline validation without bypassing application logout', async () => {
-  const auth = new SitesBrowserAuth(mockRedis as any);
-  const login = { loginId: randomSiteToken(), loginExpiresAt: Math.floor(Date.now() / 1000) + 3600, createLogin: true };
+test('offline OAuth retains incoming token status validation without login registration', async () => {
   const token = await sign('offline-ui', 'lifecycle-ui', true);
-  for (const principal of await principals(token)) {
-    await auth.bind({ issuer, subject: 'owner', oauth: principal.oauth }, login);
-    await assertSitesPrincipal(principal);
-  }
+  for (const principal of await principals(token)) await assertSitesPrincipal(principal);
   expect(mockDirectorySession).toHaveBeenCalledWith(token);
-  await auth.revoke(login);
-  for (const principal of await principals(token))
-    await expect(assertSitesPrincipal(principal)).rejects.toMatchObject({ httpStatus: 401 });
 });
 
-test('a token-level revoke with live login blocks the next protected viewer authorization', async () => {
+test('issued viewers use only their fixed grant deadline; new authorization still checks token status', async () => {
   const bearer = await sign('viewer-token');
   const [rest] = await principals(bearer);
   const auth = new SitesBrowserAuth(mockRedis as any);
@@ -176,34 +142,38 @@ test('a token-level revoke with live login blocks the next protected viewer auth
   };
   const host = 'site-test--g-abcdef012345.sites.example.net';
   const challenge = await auth.challenge(site, host, '/');
-  const login = { loginId: randomSiteToken(), loginExpiresAt: Math.floor(Date.now() / 1000) + 3600, createLogin: true };
-  const actor = { issuer, subject: 'owner', oauth: rest.oauth };
-  await auth.bind(actor, login);
-  const minted = await auth.mint(
-    site,
-    actor,
-    { ...login, state: challenge.state, siteId: site.siteId },
-    rest.oauth!.expiresAt,
-    bearer
-  );
-  const viewerPrincipal = { ...rest, authMethod: 'sites_viewer' as const };
+  const actor = { issuer, subject: 'owner' };
+  await assertSitesPrincipal(rest);
+  const minted = await auth.mint(site, actor, { state: challenge.state, siteId: site.siteId }, rest.oauth!.expiresAt);
   const consumed = await auth.consume(
     minted.ticket,
     host,
     { [challengeCookieName(challenge.state)]: challenge.secret },
     process.env.SITES_UI_ORIGIN,
-    async () => {
-      await assertSitesPrincipal(viewerPrincipal);
-    }
+    async (viewer) => authorizeSitesViewer(site as any, viewer)
   );
   const viewer = await auth.viewer(consumed.sessionId, host);
   expect(JSON.stringify(viewer)).not.toContain(bearer);
   expect(JSON.stringify(viewer)).not.toContain('ciphertext');
   expect(Array.from(mockRows.values()).some((row) => row.includes(bearer))).toBe(false);
-  await assertSitesPrincipal(viewerPrincipal);
-  // Only this token's status changes: the user, browser login and sid remain live.
+  await authorizeSitesViewer(site as any, viewer);
+  // V1 accepts revocation freshness bounded by the already-issued grant deadline.
   mockDirectorySession.mockImplementation(async (token) => (token === bearer ? 'revoked' : 'active'));
-  await auth.assertLogin(viewer);
+  mockDirectorySession.mockClear();
+  await authorizeSitesViewer(site as any, viewer);
+  expect(mockDirectorySession).not.toHaveBeenCalled();
   await expect(assertSitesPrincipal(rest)).rejects.toMatchObject({ httpStatus: 401 });
-  await expect(assertSitesPrincipal(viewerPrincipal)).rejects.toMatchObject({ httpStatus: 401 });
+  await expect(
+    authorizeSitesViewer(site as any, { ...viewer, expiresAt: Math.floor(Date.now() / 1000) })
+  ).rejects.toMatchObject({ httpStatus: 401 });
+  for (const changed of [
+    { ownerSubject: 'other' },
+    { servingGeneration: 'new' },
+    { accessRevision: 2 },
+    { siteId: 'other' },
+  ]) {
+    await expect(authorizeSitesViewer({ ...site, ...changed } as any, viewer)).rejects.toMatchObject({
+      httpStatus: expect.any(Number),
+    });
+  }
 });

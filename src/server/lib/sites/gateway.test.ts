@@ -5,7 +5,6 @@ import { assertSitesPrincipal } from './policy';
 
 const browser = {
   viewer: jest.fn(),
-  assertLogin: jest.fn(),
   challenge: jest.fn(),
   rateLimit: jest.fn(),
   consume: jest.fn(),
@@ -30,10 +29,7 @@ const viewer = {
   generation: site.servingGeneration,
   accessRevision: 2,
   host: 'site-abc123--g-abcdef012345.sites.example.net',
-  loginId: 'login',
-  loginExpiresAt: 1e12,
   expiresAt: 1e12,
-  oauth: { sessionId: 'session', tokenId: 'jwt', clientId: 'ui', expiresAt: 1e12 },
 };
 function request(method = 'GET', headers = {}, url = '/') {
   return {
@@ -75,10 +71,8 @@ beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
   process.env.SITES_PRIVATE_ENABLED = 'true';
   process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
-  process.env.SITES_BROWSER_BRIDGE_SECRET = 'x'.repeat(40);
   jest.clearAllMocks();
   browser.viewer.mockResolvedValue(viewer);
-  browser.assertLogin.mockResolvedValue(undefined);
   (assertSitesPrincipal as jest.Mock).mockResolvedValue(undefined);
 });
 afterEach(() => {
@@ -104,7 +98,7 @@ it('denies another authenticated user and changed generation', async () => {
     statusCode: 401,
   });
 });
-it('authorizes HEAD, including another current account/login check before storage', async () => {
+it('authorizes HEAD with current Site checks and no incoming-principal or IdP policy calls', async () => {
   const api = service();
   const res = response();
   await handleSitesRequest(request('HEAD'), res, api);
@@ -113,8 +107,7 @@ it('authorizes HEAD, including another current account/login check before storag
   expect(res.headers['Origin-Agent-Cluster']).toBe('?1');
   expect(res.headers['Cross-Origin-Resource-Policy']).toBe('same-origin');
   expect(api.getGatewayObject).toHaveBeenCalledTimes(1);
-  expect(assertSitesPrincipal).toHaveBeenCalledTimes(2);
-  expect(browser.assertLogin).toHaveBeenCalled();
+  expect(assertSitesPrincipal).not.toHaveBeenCalled();
 });
 it('never returns a login page or redirect for an unauthenticated asset/HEAD', async () => {
   browser.viewer.mockRejectedValue(new SitesBrowserError(401));
@@ -145,8 +138,8 @@ it('blocks service workers and unsupported methods without storage', async () =>
     expect(api.getGatewayObject).not.toHaveBeenCalled();
   }
 });
-it('never falls back to public bytes when account lookup or Redis fails', async () => {
-  (assertSitesPrincipal as jest.Mock).mockRejectedValue(new Error('directory down'));
+it('never falls back to public bytes when Redis fails', async () => {
+  browser.viewer.mockRejectedValue(new Error('Redis down'));
   const api = service();
   const res = response();
   await handleSitesRequest(request(), res, api);
@@ -197,9 +190,21 @@ it.each([
   expect(existing.getGatewayObject).not.toHaveBeenCalled();
   expect(missing.getGatewayObject).not.toHaveBeenCalled();
 });
-it('propagates the verified OAuth session to both private authorization checks', async () => {
-  await handleSitesRequest(request('HEAD'), response(), service());
-  expect(assertSitesPrincipal).toHaveBeenCalledWith(expect.objectContaining({ oauth: viewer.oauth }));
+it('rejects a concurrent Site change or grant expiry immediately before storage', async () => {
+  for (const changed of [{ accessRevision: 3 }, { ownerSubject: 'other' }, { servingGeneration: 'retired' }]) {
+    const api = service();
+    api.getGatewayObject.mockImplementation(async (_host: string, _path: string, authorize: any) => {
+      await authorize({ ...site, ...changed });
+      throw new Error('must not reach storage');
+    });
+    const res = response();
+    await handleSitesRequest(request('HEAD'), res, api);
+    expect(res.statusCode).toBe(404);
+  }
+  await expect(
+    authorizeSitesViewer(site as any, { ...viewer, expiresAt: Math.floor(Date.now() / 1000) })
+  ).rejects.toMatchObject({ statusCode: 401 });
+  expect(assertSitesPrincipal).not.toHaveBeenCalled();
 });
 
 it.each([new SitesBrowserError(401), new Error('Redis unavailable'), new SitesBrowserError(503)])(

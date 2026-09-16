@@ -62,18 +62,18 @@ describe('requestIdMiddleware', () => {
   });
 
   it.each(['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'])('preserves native %s request semantics', async (method) => {
-    const body = ['GET', 'HEAD'].includes(method) ? undefined : '{"action":"signed-payload"}';
-    const request = new NextRequest('https://example.test/api/v2/sites/browser/revoke', {
+    const body = ['GET', 'HEAD'].includes(method) ? undefined : '{"action":"payload"}';
+    const request = new NextRequest('https://example.test/api/v2/sites/browser/mint', {
       method,
       body,
-      headers: { 'x-lfc-sites-bridge': 'signature-value' },
+      headers: { 'content-type': 'application/json' },
     });
     const next = jest.fn().mockResolvedValue(NextResponse.next());
     await requestIdMiddleware(request, next);
     const forwarded = next.mock.calls[0][0] as NextRequest;
     expect(forwarded.method).toBe(method);
     expect(await forwarded.text()).toBe(body || '');
-    expect(forwarded.headers.get('x-lfc-sites-bridge')).toBe('signature-value');
+    expect(forwarded.headers.get('content-type')).toBe('application/json');
   });
 
   it('preserves a POST arriving from the installed Edge Request constructor realm', async () => {
@@ -81,11 +81,11 @@ describe('requestIdMiddleware', () => {
     // miss Edge instances that otherwise silently become GET without a body.
     const { EdgeRuntime } = require('next/dist/compiled/edge-runtime');
     const runtime = new EdgeRuntime();
-    const body = '{"action":"cross-realm-signed-payload"}';
-    const foreignRequest = new runtime.context.Request('https://example.test/api/v2/sites/browser/revoke', {
+    const body = '{"action":"cross-realm-payload"}';
+    const foreignRequest = new runtime.context.Request('https://example.test/api/v2/sites/browser/mint', {
       method: 'POST',
       body,
-      headers: { 'x-lfc-sites-bridge': 'signature-value' },
+      headers: { 'content-type': 'application/json' },
     });
     expect(foreignRequest instanceof Request).toBe(false);
     const next = jest.fn().mockResolvedValue(NextResponse.next());
@@ -93,6 +93,6 @@ describe('requestIdMiddleware', () => {
     const forwarded = next.mock.calls[0][0] as NextRequest;
     expect(forwarded.method).toBe('POST');
     expect(await forwarded.text()).toBe(body);
-    expect(forwarded.headers.get('x-lfc-sites-bridge')).toBe('signature-value');
+    expect(forwarded.headers.get('content-type')).toBe('application/json');
   });
 });

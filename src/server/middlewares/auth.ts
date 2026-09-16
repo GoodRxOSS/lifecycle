@@ -68,11 +68,6 @@ export const authMiddleware: Middleware = async (request, next) => {
     return forwardWithoutUser(request, next);
   }
 
-  // Sites logout uses a dedicated bridge signature and must work after OAuth expiry.
-  if (request.method === 'POST' && request.nextUrl.pathname === '/api/v2/sites/browser/revoke') {
-    return forwardWithoutUser(request, next);
-  }
-
   if (MCP_OAUTH_CALLBACK_PATH.test(request.nextUrl.pathname)) {
     return forwardWithoutUser(request, next);
   }
