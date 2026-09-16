@@ -69,8 +69,7 @@ function service(current = site) {
 const originalEnv = { ...process.env };
 beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
+  process.env.LIFECYCLE_UI_URL = 'https://ui.example.com';
   jest.clearAllMocks();
   browser.viewer.mockResolvedValue(viewer);
   (assertSitesPrincipal as jest.Mock).mockResolvedValue(undefined);
@@ -155,15 +154,19 @@ it('public HEAD does not inspect viewer credentials', async () => {
   expect(assertSitesPrincipal).not.toHaveBeenCalled();
 });
 
-it('ignores forged forwarding headers from an untrusted peer and follows only configured proxies', () => {
-  const { sitesClientAddress } = require('./gateway');
-  process.env.SITES_TRUSTED_PROXY_ADDRESSES = '127.0.0.1';
-  const direct = request('GET', { 'x-forwarded-for': '1.1.1.1' });
-  direct.socket.remoteAddress = '203.0.113.5';
-  expect(sitesClientAddress(direct)).toBe('203.0.113.5');
-  direct.socket.remoteAddress = '::ffff:127.0.0.1';
-  direct.headers['x-forwarded-for'] = '1.1.1.1, 203.0.113.5';
-  expect(sitesClientAddress(direct)).toBe('203.0.113.5');
+it('ignores forwarded addresses when rate limiting bootstrap requests', async () => {
+  browser.viewer.mockRejectedValue(new SitesBrowserError(401));
+  browser.challenge.mockResolvedValue({ state: 's'.repeat(43), secret: 'c'.repeat(43) });
+  for (const forwarded of ['1.1.1.1', '2.2.2.2']) {
+    const req = request('GET', {
+      'x-forwarded-for': forwarded,
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-dest': 'document',
+    });
+    req.socket.remoteAddress = '203.0.113.5';
+    await handleSitesRequest(req, response(), service());
+  }
+  expect(browser.rateLimit.mock.calls).toEqual([['challenge:203.0.113.5'], ['challenge:203.0.113.5']]);
 });
 
 it.each([

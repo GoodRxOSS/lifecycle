@@ -55,8 +55,7 @@ const originalEnv = { ...process.env };
 beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
   process.env.KEYCLOAK_ISSUER = issuer;
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
+  process.env.LIFECYCLE_UI_URL = 'https://ui.example.com';
   mockRedisRows.clear();
   principal = {
     kind: 'user',

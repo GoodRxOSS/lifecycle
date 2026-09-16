@@ -146,8 +146,7 @@ const originalSitesEnv = { ...process.env };
 beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
   process.env.KEYCLOAK_ISSUER = principal.issuer!;
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://lifecycle.example.net';
+  process.env.LIFECYCLE_UI_URL = 'https://lifecycle.example.net';
 });
 afterEach(() => {
   process.env = { ...originalSitesEnv };
@@ -1230,13 +1229,27 @@ describe('SitesService behavior', () => {
         })
       );
     });
-    it('advertises no human upload choices while private readiness is disabled', async () => {
-      process.env.SITES_PRIVATE_ENABLED = 'false';
+    it('advertises no uploads while the existing Sites setting is disabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
       await expect(service.getCapabilities(principal)).resolves.toMatchObject({
         defaultVisibility: 'private',
         canCreate: false,
         allowedVisibilities: [],
       });
+    });
+    it('denies public and private gateway reads when the existing Sites setting is disabled', async () => {
+      addSite(state, { siteId: 'private', visibility: 'private' });
+      addSite(state, { siteId: 'public', visibility: 'public' });
+      mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false, domain: 'sites.example.com' } });
+      for (const id of ['private', 'public']) {
+        const host = `site-${id}.sites.example.com`;
+        await expect(service.getGatewaySite(host)).rejects.toMatchObject({ statusCode: 404 });
+        await expect(service.getGatewayLocator(host)).rejects.toMatchObject({ statusCode: 404 });
+        await expect(service.getGatewayObject(host, '/index.html', async () => {})).rejects.toMatchObject({
+          statusCode: 404,
+        });
+      }
+      expect(mockGetObject).not.toHaveBeenCalled();
     });
     it('resolves valid missing host locators without a database Site for the anonymous bootstrap', async () => {
       await expect(service.getGatewayLocator('site-missing--g-abcdef012345.sites.example.com')).resolves.toEqual({
@@ -1255,12 +1268,12 @@ describe('SitesService behavior', () => {
       });
     });
     it.each([undefined, 'public'] as const)(
-      'refuses human creation (%s) before storage if the secure rollout gate is closed',
+      'refuses human creation (%s) before storage if the existing Sites setting is disabled',
       async (visibility) => {
-        process.env.SITES_PRIVATE_ENABLED = 'false';
+        mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
         await expect(
           service.createSite({ principal, visibility, fileName: 'index.html', content: Buffer.from('site') })
-        ).rejects.toMatchObject({ code: 'private_sites_unavailable' });
+        ).rejects.toMatchObject({ statusCode: 404 });
         expect(mockPutFiles).not.toHaveBeenCalled();
       }
     );

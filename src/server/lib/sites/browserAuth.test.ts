@@ -5,6 +5,7 @@ import {
   siteTokenHash,
   challengeCookieName,
   assertPrivateSitesReady,
+  sitesUiOrigin,
   assertViewerOwns,
   safeSiteReturnPath,
   parseSitesCookies,
@@ -67,8 +68,7 @@ beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
   process.env.KEYCLOAK_ISSUER = actor.issuer;
   actor.oauth.expiresAt = Math.floor(Date.now() / 1000) + 1200;
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
+  process.env.LIFECYCLE_UI_URL = 'https://ui.example.com';
   store = new Store();
   auth = new SitesBrowserAuth(store as any);
 });
@@ -93,8 +93,8 @@ it('consumes only once across two gateway instances and creates an owner-scoped 
     assertViewerOwns(site, viewer);
   });
   const outcomes = await Promise.allSettled([
-    auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, authorize),
-    second.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, authorize),
+    auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, authorize),
+    second.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, authorize),
   ]);
   expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
   const value = (outcomes.find((result) => result.status === 'fulfilled') as PromiseFulfilledResult<any>).value;
@@ -110,7 +110,7 @@ it.each(['wrong-origin', 'wrong-host', 'wrong-cookie'])('rejects %s before autho
       minted.ticket,
       scenario === 'wrong-host' ? 'another.sites.example.net' : host,
       scenario === 'wrong-cookie' ? {} : cookies,
-      scenario === 'wrong-origin' ? 'https://evil.example.org' : process.env.SITES_UI_ORIGIN,
+      scenario === 'wrong-origin' ? 'https://evil.example.org' : process.env.LIFECYCLE_UI_URL,
       authorize
     )
   ).rejects.toBeInstanceOf(SitesBrowserError);
@@ -121,7 +121,7 @@ it('expires one-use tickets after 60 seconds', async () => {
   const { minted, cookies } = await setup();
   jest.advanceTimersByTime(61_000);
   await expect(
-    auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, jest.fn())
+    auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, jest.fn())
   ).rejects.toMatchObject({ statusCode: 401 });
 });
 it('never lets a different actor or service-key owner mint a viewer', async () => {
@@ -136,7 +136,7 @@ it('never lets a different actor or service-key owner mint a viewer', async () =
 it('runs current authorization on consume and returns no session when ownership/generation changes', async () => {
   const { minted, cookies } = await setup();
   await expect(
-    auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, async () => {
+    auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {
       throw new SitesBrowserError(404);
     })
   ).rejects.toMatchObject({ statusCode: 404 });
@@ -144,7 +144,7 @@ it('runs current authorization on consume and returns no session when ownership/
 });
 it('auth-off denies already issued cookies; content logout removes its viewer', async () => {
   const { minted, cookies } = await setup();
-  const result = await auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, async () => {});
+  const result = await auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {});
   process.env.ENABLE_AUTH = 'false';
   await expect(auth.viewer(result.sessionId, host)).rejects.toMatchObject({ statusCode: 503 });
   await auth.logoutViewer(result.sessionId);
@@ -154,17 +154,29 @@ it('auth-off denies already issued cookies; content logout removes its viewer', 
 it('fails closed on Redis failure', async () => {
   const { minted, cookies } = await setup();
   store.eval = jest.fn().mockRejectedValue(new Error('redis down'));
-  await expect(auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, jest.fn())).rejects.toThrow(
+  await expect(auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, jest.fn())).rejects.toThrow(
     'redis down'
   );
 });
-it('requires explicitly enabled HTTPS, separate registrable domain and the rollout switch', () => {
+it('requires authentication, HTTPS and a separate registrable domain', () => {
   expect(() => assertPrivateSitesReady(`https://${host}`)).not.toThrow();
   expect(() => assertPrivateSitesReady('https://sites.example.com')).toThrow();
   expect(() => assertPrivateSitesReady('http://sites.example.net')).toThrow();
-  process.env.SITES_PRIVATE_ENABLED = 'false';
+  process.env.ENABLE_AUTH = 'false';
   expect(() => assertPrivateSitesReady()).toThrow();
 });
+it('derives the trusted origin from the existing UI URL', () => {
+  process.env.LIFECYCLE_UI_URL = 'https://UI.example.com:443/app/?q=test#section';
+  expect(sitesUiOrigin()).toBe('https://ui.example.com');
+  expect(() => assertPrivateSitesReady(`https://${host}`)).not.toThrow();
+});
+it.each(['', 'not-a-url', 'http://ui.example.com', 'https://user:password@ui.example.com'])(
+  'rejects unsafe or missing private UI URL %s',
+  (url) => {
+    process.env.LIFECYCLE_UI_URL = url;
+    expect(() => assertPrivateSitesReady()).toThrow();
+  }
+);
 it('rejects unsafe return paths and ambiguous cookies', () => {
   for (const path of [
     '//evil.test',
@@ -198,9 +210,9 @@ it('bounds chunked mint request bodies before parsing without Content-Length', a
 it('consumes at most one ticket from the same browser challenge', async () => {
   const { minted, login, cookies } = await setup();
   const second = await auth.mint(site, actor, login, actor.oauth.expiresAt);
-  await auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, async () => {});
+  await auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {});
   await expect(
-    auth.consume(second.ticket, host, cookies, process.env.SITES_UI_ORIGIN, async () => {})
+    auth.consume(second.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {})
   ).rejects.toMatchObject({ statusCode: 401 });
 });
 it.each([30, 300, 1200])('caps fixed viewer lifetime to token expiry or 300 seconds: %s', async (tokenSeconds) => {
@@ -213,7 +225,7 @@ it.each([30, 300, 1200])('caps fixed viewer lifetime to token expiry or 300 seco
     minted.ticket,
     host,
     { [challengeCookieName(challenge.state)]: challenge.secret },
-    process.env.SITES_UI_ORIGIN,
+    process.env.LIFECYCLE_UI_URL,
     async () => {}
   );
   const viewer = await auth.viewer(result.sessionId, host);
@@ -240,14 +252,14 @@ it('supports authenticated renewal with a fresh token but cannot renew with an e
     renewed.ticket,
     host,
     { [challengeCookieName(challenge.state)]: challenge.secret },
-    process.env.SITES_UI_ORIGIN,
+    process.env.LIFECYCLE_UI_URL,
     async () => {}
   );
   expect((await auth.viewer(result.sessionId, host)).expiresAt).toBe(freshDeadline);
 });
 it('retains only Site claims, no OAuth login, token metadata or bearer vault', async () => {
   const { minted, cookies } = await setup();
-  const result = await auth.consume(minted.ticket, host, cookies, process.env.SITES_UI_ORIGIN, async () => {});
+  const result = await auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {});
   expect(Object.keys(await auth.viewer(result.sessionId, host)).sort()).toEqual([
     'accessRevision',
     'expiresAt',
@@ -268,7 +280,7 @@ it('rejects previous-version viewers and tickets', async () => {
     await store.set(`sites:browser:v1:${kind}:${siteTokenHash(token)}`, JSON.stringify({ ...actor, host }), 'EX', 300);
   }
   await expect(auth.viewer(token, host)).rejects.toMatchObject({ statusCode: 401 });
-  await expect(auth.consume(token, host, {}, process.env.SITES_UI_ORIGIN, jest.fn())).rejects.toMatchObject({
+  await expect(auth.consume(token, host, {}, process.env.LIFECYCLE_UI_URL, jest.fn())).rejects.toMatchObject({
     statusCode: 401,
   });
 });

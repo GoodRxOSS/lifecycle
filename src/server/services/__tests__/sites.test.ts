@@ -94,8 +94,7 @@ const originalSitesEnv = { ...process.env };
 beforeEach(() => {
   process.env.ENABLE_AUTH = 'true';
   process.env.KEYCLOAK_ISSUER = principal.issuer!;
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://lifecycle.example.net';
+  process.env.LIFECYCLE_UI_URL = 'https://lifecycle.example.net';
 });
 afterEach(() => {
   process.env = { ...originalSitesEnv };

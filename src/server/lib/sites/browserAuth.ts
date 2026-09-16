@@ -49,18 +49,17 @@ export const siteTokenHash = (value: string) => createHash('sha256').update(valu
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export function sitesUiOrigin(): string {
-  const raw = process.env.SITES_UI_ORIGIN;
+  const raw = process.env.LIFECYCLE_UI_URL;
   try {
     const url = new URL(raw || '');
-    if (url.protocol !== 'https:' || url.username || url.password || url.origin !== raw) throw new Error();
+    if (url.protocol !== 'https:' || url.username || url.password) throw new Error();
     return url.origin;
   } catch {
     throw new SitesBrowserError(503);
   }
 }
 export function assertPrivateSitesReady(contentUrl?: string): void {
-  if (process.env.ENABLE_AUTH !== 'true' || process.env.SITES_PRIVATE_ENABLED !== 'true')
-    throw new SitesBrowserError(503);
+  if (process.env.ENABLE_AUTH !== 'true') throw new SitesBrowserError(503);
   const ui = new URL(sitesUiOrigin());
   if (contentUrl) {
     const content = new URL(contentUrl);

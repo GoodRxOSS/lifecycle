@@ -52,8 +52,7 @@ beforeAll(async () => {
   process.env.KEYCLOAK_ISSUER = issuer;
   process.env.KEYCLOAK_CLIENT_ID = 'lifecycle-api';
   process.env.KEYCLOAK_JWKS_URL = 'https://identity.example/test-jwks';
-  process.env.SITES_PRIVATE_ENABLED = 'true';
-  process.env.SITES_UI_ORIGIN = 'https://ui.example.com';
+  process.env.LIFECYCLE_UI_URL = 'https://ui.example.com';
   process.env.APP_HOST = 'https://api.example';
 });
 beforeEach(() => {
@@ -149,7 +148,7 @@ test('issued viewers use only their fixed grant deadline; new authorization stil
     minted.ticket,
     host,
     { [challengeCookieName(challenge.state)]: challenge.secret },
-    process.env.SITES_UI_ORIGIN,
+    process.env.LIFECYCLE_UI_URL,
     async (viewer) => authorizeSitesViewer(site as any, viewer)
   );
   const viewer = await auth.viewer(consumed.sessionId, host);

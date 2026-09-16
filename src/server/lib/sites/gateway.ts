@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { isIP } from 'net';
 import type Site from 'server/models/Site';
 import {
   assertViewerOwns,
@@ -14,25 +13,6 @@ import {
   type Viewer,
 } from './browserAuth';
 import type SitesService from 'server/services/sites';
-
-export function sitesClientAddress(req: Pick<IncomingMessage, 'headers' | 'socket'>): string {
-  const normalize = (value: string) =>
-    value.startsWith('::ffff:') && isIP(value.slice(7)) === 4 ? value.slice(7) : value;
-  const peer = normalize(req.socket.remoteAddress || 'unknown');
-  const trusted = new Set(
-    (process.env.SITES_TRUSTED_PROXY_ADDRESSES || '')
-      .split(',')
-      .map((value) => normalize(value.trim()))
-      .filter((value) => isIP(value))
-  );
-  if (!trusted.has(peer)) return peer;
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded !== 'string' || forwarded.length > 2048) return peer;
-  const chain = forwarded.split(',').map((value) => normalize(value.trim()));
-  if (chain.some((value) => !isIP(value))) return peer;
-  for (const address of chain.reverse()) if (!trusted.has(address)) return address;
-  return peer;
-}
 
 export async function authorizeSitesViewer(site: Site, viewer: Viewer): Promise<void> {
   assertViewerActive(viewer);
@@ -79,7 +59,7 @@ export async function handleSitesRequest(
       // private hosts take the same browser flow; mint still authorizes the real Site.
       const locator = await service.getGatewayLocator(host);
       const browser = getSitesBrowserAuth();
-      await browser.rateLimit(`challenge:${sitesClientAddress(req)}`);
+      await browser.rateLimit(`challenge:${req.socket.remoteAddress || 'unknown'}`);
       const challenge = await browser.challenge(locator, host, `${url.pathname}${url.search}`);
       res.setHeader(
         'Set-Cookie',
@@ -98,7 +78,7 @@ export async function handleSitesRequest(
       if (url.pathname === `${SITES_AUTH_PATH}consume` && req.method === 'POST') {
         if (!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded'))
           throw new SitesBrowserError(415);
-        await auth!.rateLimit(`consume:${sitesClientAddress(req)}`, 240);
+        await auth!.rateLimit(`consume:${req.socket.remoteAddress || 'unknown'}`, 240);
         const values = new URLSearchParams(await readSmallBody(req));
         if (values.getAll('ticket').length !== 1) throw new SitesBrowserError(400);
         const result = await auth!.consume(

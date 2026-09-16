@@ -145,7 +145,7 @@ export default class SitesService extends Service {
     const owner = isSiteOwner(site, principal);
     const writable = owner && Boolean(principal && hasSitesScope(principal, 'write'));
     const contentUrl = buildSiteUrl(site.siteId, config, site.servingGeneration);
-    const uiOrigin = process.env.SITES_UI_ORIGIN?.replace(/\/$/, '');
+    const uiUrl = process.env.LIFECYCLE_UI_URL;
     const expiresAt = site.expiresAt ? new Date(site.expiresAt).getTime() : null;
     const status =
       site.status === 'active' && expiresAt !== null && Number.isFinite(expiresAt) && expiresAt <= Date.now()
@@ -156,7 +156,7 @@ export default class SitesService extends Service {
       name: site.name,
       url: contentUrl,
       contentUrl,
-      openUrl: uiOrigin ? `${uiOrigin}/sites/open/${site.siteId}` : contentUrl,
+      openUrl: uiUrl ? new URL(`/sites/open/${site.siteId}`, uiUrl).toString() : contentUrl,
       visibility: site.visibility,
       accessRevision: site.accessRevision,
       contentRevision: site.contentRevision,
@@ -218,7 +218,7 @@ export default class SitesService extends Service {
       throw new AppError({
         httpStatus: 503,
         code: 'private_sites_unavailable',
-        message: 'Private Sites are not enabled or securely configured on this installation.',
+        message: 'Private Sites are not securely configured on this installation.',
       });
     }
   }
