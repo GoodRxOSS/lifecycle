@@ -347,6 +347,28 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           additionalProperties: false,
         },
 
+        FeaturesConfigInput: {
+          type: 'object',
+          description: 'Update existing boolean keys in global_config.features; unspecified keys are preserved.',
+          minProperties: 1,
+          additionalProperties: { type: 'boolean' },
+        },
+        FeaturesConfigSuccessResponse: {
+          allOf: [
+            { $ref: '#/components/schemas/SuccessApiResponse' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  properties: { features: { type: 'object', additionalProperties: { type: 'boolean' } } },
+                  required: ['features'],
+                },
+              },
+              required: ['data'],
+            },
+          ],
+        },
         SitesConfig: {
           type: 'object',
           description: 'Global Sites hosting configuration stored in global_config under the sites key.',
@@ -4738,6 +4760,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             podName: { type: 'string' },
+            podUid: { type: 'string', description: 'Kubernetes pod identity, changes when the pod is replaced.' },
             status: { type: 'string' },
             restarts: { type: 'integer' },
             ageSeconds: { type: 'integer' },
@@ -4748,7 +4771,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               items: { $ref: '#/components/schemas/DeploymentPodContainerInfo' },
             },
           },
-          required: ['podName', 'status', 'restarts', 'ageSeconds', 'age', 'ready', 'containers'],
+          required: ['podUid', 'podName', 'status', 'restarts', 'ageSeconds', 'age', 'ready', 'containers'],
         },
 
         /**

@@ -88,6 +88,7 @@ export async function getEnvironmentPodsInNamespace(
 
         return {
           podName: pod.metadata?.name ?? '',
+          podUid: pod.metadata?.uid ?? '',
           serviceName,
           status: podStatus(pod),
           restarts: podRestarts(pod),

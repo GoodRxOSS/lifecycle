@@ -27,6 +27,7 @@ moduleAlias.addAliases({
   scripts: join(__dirname, 'scripts'),
 });
 
+import { createExecUpgrade } from 'server/services/podExec/upgrade';
 import { createServer, IncomingMessage, ServerResponse, request as httpRequest, STATUS_CODES } from 'http';
 import { request as httpsRequest } from 'https';
 import type { Socket } from 'net';
@@ -1331,11 +1332,28 @@ app.prepare().then(() => {
     }
   });
 
+  const execUpgrade = createExecUpgrade();
+  const shutdown = (signal: 'SIGTERM' | 'SIGINT') => {
+    execUpgrade.drain();
+    const workerHandlers = global as typeof global & { sigintHandler?: () => void; sigtermHandler?: () => void };
+    const workerHandler = signal === 'SIGTERM' ? workerHandlers.sigtermHandler : workerHandlers.sigintHandler;
+    // Workers already own process exit after draining active jobs and Redis.
+    if (workerHandler && process.listeners(signal).includes(workerHandler)) {
+      httpServer.close();
+      return;
+    }
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  httpServer.once('close', execUpgrade.drain);
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (request: IncomingMessage, socket, head) => {
     // A throw here would be an uncaughtException that kills the whole server; drop the socket instead.
     try {
+      if (execUpgrade.handle(request, socket as Socket, head)) return;
       const { pathname } = parse(request.url!, true);
       const connectionLogCtx = { path: pathname, remoteAddress: request.socket.remoteAddress };
 
