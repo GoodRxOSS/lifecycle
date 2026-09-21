@@ -43,7 +43,7 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 /**
- * Operator-approved downgrade: the old gateway serves every Site publicly.
+ * Operator-approved downgrade: the old gateway serves active, unexpired Sites publicly.
  * Site rows, versions, and stored files remain; owner/visibility metadata does not.
  * Stop all new core processes before running this migration so startup cannot reapply it.
  */
