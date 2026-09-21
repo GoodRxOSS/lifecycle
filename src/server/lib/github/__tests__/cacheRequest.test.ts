@@ -348,13 +348,13 @@ describe('cacheRequest', () => {
         .mockResolvedValueOnce(response);
 
       const pending = cacheRequest(endpoint, {}, { cache });
-      await jest.advanceTimersByTimeAsync(20_000);
+      await jest.advanceTimersByTimeAsync(10_000);
       const result = await pending;
 
       expect(result).toBe(response);
       expect(request).toHaveBeenCalledTimes(2);
       expect(logger.warn).toHaveBeenCalledWith('GitHub: cache request retrying');
-      expect(getLogger).toHaveBeenCalledWith({ endpoint, attempt: 1, status: 500 });
+      expect(getLogger).toHaveBeenCalledWith({ endpoint, status: 500 });
       expect(cache.hset).toHaveBeenCalledTimes(1);
     });
 
@@ -365,43 +365,42 @@ describe('cacheRequest', () => {
       const assertion = expect(cacheRequest(endpoint, { data: { ref: 'main' } }, { cache })).rejects.toMatchObject({
         message: 'GitHub API request failed',
       });
-      await jest.advanceTimersByTimeAsync(20_000);
+      await jest.advanceTimersByTimeAsync(10_000);
       await assertion;
 
       expect(request).toHaveBeenCalledTimes(1);
       expect(logger.warn).not.toHaveBeenCalled();
     });
 
-    it('keeps the retry budget intact when a 304 refetch is what hits the server error', async () => {
+    it('still retries when a 304 refetch is what hits the server error', async () => {
       const endpoint = 'GET /repos/acme/widget';
       const response = { status: 200, headers: {}, data: { id: 17 } };
       cache.hgetall.mockResolvedValue({ etag: '"stale-etag"', lastModified: '', data: 'not-json' });
       request
         .mockRejectedValueOnce(Object.assign(new Error('Not Modified'), { status: 304 }))
         .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
-        .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
         .mockResolvedValueOnce(response);
 
       const pending = cacheRequest(endpoint, {}, { cache });
-      await jest.advanceTimersByTimeAsync(20_000);
+      await jest.advanceTimersByTimeAsync(10_000);
 
       expect(await pending).toBe(response);
-      expect(request).toHaveBeenCalledTimes(4);
-      expect(logger.warn).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
     });
 
-    it('gives up once the retry budget is exhausted', async () => {
+    it('retries only once, then gives up', async () => {
       const endpoint = 'GET /repos/acme/widget';
       request.mockRejectedValue(Object.assign(new Error('other side closed'), { status: 500 }));
 
       const assertion = expect(cacheRequest(endpoint, {}, { cache })).rejects.toMatchObject({
         message: 'GitHub API request failed',
       });
-      await jest.advanceTimersByTimeAsync(20_000);
+      await jest.advanceTimersByTimeAsync(10_000);
       await assertion;
 
-      expect(request).toHaveBeenCalledTimes(3);
-      expect(logger.warn).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.error).toHaveBeenCalledWith('GitHub: cache request failed');
     });
   });

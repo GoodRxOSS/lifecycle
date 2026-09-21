@@ -22,12 +22,12 @@ import { CacheRequestData } from 'server/lib/github/types';
 
 import { redisClient } from 'server/lib/dependencies';
 
-const TRANSIENT_RETRY_DELAYS_MS = [5_000, 15_000];
+const TRANSIENT_RETRY_DELAY_MS = 10_000;
 
 export async function cacheRequest(
   endpoint: string,
   requestData = {} as CacheRequestData,
-  { cache = redisClient.getRedis(), ignoreCache = false, attempt = 1 } = {}
+  { cache = redisClient.getRedis(), ignoreCache = false, retried = false } = {}
 ) {
   const cacheKey = `github:req_cache:${endpoint}`;
   let cached;
@@ -75,18 +75,18 @@ export async function cacheRequest(
         getLogger({ endpoint, cacheHit: true }).debug('GitHub: cache request hit');
         return { data, cacheHit: true };
       } catch (error) {
-        return cacheRequest(endpoint, requestData, { cache, ignoreCache: true, attempt });
+        return cacheRequest(endpoint, requestData, { cache, ignoreCache: true, retried });
       }
     } else if (error?.status === 404) {
       getLogger().info(`GitHub: cache request not found endpoint=${endpoint}`);
       throw new Error('Resource not found');
-    } else if (endpoint.startsWith('GET ') && error?.status >= 500 && attempt <= TRANSIENT_RETRY_DELAYS_MS.length) {
+    } else if (!retried && endpoint.startsWith('GET ') && error?.status >= 500) {
       // Octokit reports a dropped keep-alive socket as status 500, indistinguishable from a real 5xx.
-      // Delays are spaced to miss the same dead socket, and kept short so a sleeping retry does
-      // not outlive a worker's shutdown grace and leave its job to stall recovery.
-      getLogger({ endpoint, attempt, status: error.status }).warn('GitHub: cache request retrying');
-      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[attempt - 1]));
-      return cacheRequest(endpoint, requestData, { cache, ignoreCache, attempt: attempt + 1 });
+      // The wait is long enough to miss the same dead socket, and short enough that a sleeping
+      // retry does not outlive a worker's shutdown grace and leave its job to stall recovery.
+      getLogger({ endpoint, status: error.status }).warn('GitHub: cache request retrying');
+      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAY_MS));
+      return cacheRequest(endpoint, requestData, { cache, ignoreCache, retried: true });
     } else {
       const errorHeaders = error?.response?.headers || error?.headers;
       getLogger({
