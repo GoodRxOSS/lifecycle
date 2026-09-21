@@ -42,8 +42,27 @@ export async function up(knex: Knex): Promise<void> {
   // Existing personal keys remain unbound. Reissue rather than guess their historical realm.
 }
 
-export async function down(): Promise<void> {
-  throw new Error(
-    'Sites ACL rollback is unsafe: preserve enforcement and use the documented forward recovery procedure.'
-  );
+/**
+ * Operator-approved downgrade: the old gateway serves every Site publicly.
+ * Site rows, versions, and stored files remain; owner/visibility metadata does not.
+ * Stop all new core processes before running this migration so startup cannot reapply it.
+ */
+export async function down(knex: Knex): Promise<void> {
+  await knex.raw('LOCK TABLE sites IN ACCESS EXCLUSIVE MODE');
+  await knex.raw('DROP TRIGGER sites_preserve_owner ON sites');
+  await knex.raw('DROP FUNCTION sites_preserve_owner()');
+  await knex.raw('ALTER TABLE sites DROP CONSTRAINT sites_access_consistency');
+  await knex.raw('DROP INDEX sites_owner_identity_idx');
+  await knex.raw('DROP INDEX sites_creator_token_idx');
+  await knex.raw('DROP INDEX sites_visibility_idx');
+  await knex.raw(`ALTER TABLE sites
+    DROP COLUMN visibility,
+    DROP COLUMN "ownerKind",
+    DROP COLUMN "ownerIssuer",
+    DROP COLUMN "ownerSubject",
+    DROP COLUMN "creatorTokenId",
+    DROP COLUMN "servingGeneration",
+    DROP COLUMN "accessRevision",
+    DROP COLUMN "contentRevision"`);
+  await knex.raw('ALTER TABLE api_tokens DROP COLUMN "ownerIssuer"');
 }
