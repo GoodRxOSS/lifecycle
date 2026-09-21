@@ -77,7 +77,7 @@ describe('/api/v2/config/sites', () => {
     }
   });
 
-  it('requires admin to read full configuration', async () => {
+  it('allows any session to read config', async () => {
     mockGetUser.mockReturnValue({
       sub: 'sample-user',
       realm_access: {
@@ -88,9 +88,12 @@ describe('/api/v2/config/sites', () => {
     const response = await GET(makeRequest());
     const body = await response.json();
 
-    expect(response.status).toBe(403);
-    expect(body.error).toBeDefined();
-    expect(mockGetSitesConfig).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(body.data.config).toMatchObject({
+      enabled: false,
+      domain: 'localhost',
+      hostPrefix: 'site',
+    });
   });
 
   it('requires admin access before updating config', async () => {

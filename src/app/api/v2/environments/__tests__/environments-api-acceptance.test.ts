@@ -66,7 +66,11 @@ jest.mock('server/services/apiToken', () => {
   const actual = jest.requireActual('server/services/apiToken');
   return { __esModule: true, ...actual, default: { verifyToken: jest.fn(), touchLastUsed: jest.fn() } };
 });
-jest.mock('server/lib/get-user', () => ({ getRequestUserIdentity: jest.fn() }));
+jest.mock('server/lib/get-user', () => ({
+  getRequestUserIdentity: jest.fn(),
+  getUser: jest.fn(),
+  getOAuthCredentialFromClaims: jest.fn(),
+}));
 jest.mock('server/services/globalConfig', () => {
   const getAllConfigs = jest.fn();
   const getConfig = jest.fn();

@@ -274,9 +274,6 @@ export class SitesBrowserAuth {
     assertViewerActive(value);
     return value;
   }
-  async logoutViewer(sessionId: string | undefined): Promise<void> {
-    if (sessionId && TOKEN.test(sessionId)) await this.redis.eval(CONSUME, 1, this.key('viewer', sessionId));
-  }
 }
 let instance: SitesBrowserAuth | undefined;
 export function getSitesBrowserAuth(): SitesBrowserAuth {

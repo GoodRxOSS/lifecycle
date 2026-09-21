@@ -78,10 +78,10 @@ export async function handleSitesRequest(
       if (url.pathname === `${SITES_AUTH_PATH}consume` && req.method === 'POST') {
         if (!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded'))
           throw new SitesBrowserError(415);
-        await auth!.rateLimit(`consume:${req.socket.remoteAddress || 'unknown'}`, 240);
+        await auth.rateLimit(`consume:${req.socket.remoteAddress || 'unknown'}`, 240);
         const values = new URLSearchParams(await readSmallBody(req));
         if (values.getAll('ticket').length !== 1) throw new SitesBrowserError(400);
-        const result = await auth!.consume(
+        const result = await auth.consume(
           values.get('ticket') || '',
           host,
           cookies,
@@ -94,14 +94,6 @@ export async function handleSitesRequest(
         ]);
         res.writeHead(303, { Location: result.path });
         res.end();
-        return;
-      }
-      if (url.pathname === `${SITES_AUTH_PATH}logout` && req.method === 'POST') {
-        if (req.headers.origin !== `https://${host}` && req.headers.origin !== sitesUiOrigin())
-          throw new SitesBrowserError(403);
-        await auth!.logoutViewer(cookies[SITES_VIEWER_COOKIE]);
-        res.setHeader('Set-Cookie', `${SITES_VIEWER_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
-        res.writeHead(204).end();
         return;
       }
       throw new SitesBrowserError(404);

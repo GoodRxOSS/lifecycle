@@ -8,7 +8,6 @@ const browser = {
   challenge: jest.fn(),
   rateLimit: jest.fn(),
   consume: jest.fn(),
-  logoutViewer: jest.fn(),
 };
 jest.mock('./policy', () => ({ assertSitesPrincipal: jest.fn() }));
 jest.mock('./browserAuth', () => ({ ...jest.requireActual('./browserAuth'), getSitesBrowserAuth: () => browser }));

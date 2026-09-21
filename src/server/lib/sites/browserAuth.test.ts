@@ -142,14 +142,11 @@ it('runs current authorization on consume and returns no session when ownership/
   ).rejects.toMatchObject({ statusCode: 404 });
   expect(Array.from(store.rows.keys()).filter((key) => key.includes(':viewer:'))).toHaveLength(0);
 });
-it('auth-off denies already issued cookies; content logout removes its viewer', async () => {
+it('auth-off denies already issued cookies', async () => {
   const { minted, cookies } = await setup();
   const result = await auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {});
   process.env.ENABLE_AUTH = 'false';
   await expect(auth.viewer(result.sessionId, host)).rejects.toMatchObject({ statusCode: 503 });
-  await auth.logoutViewer(result.sessionId);
-  process.env.ENABLE_AUTH = 'true';
-  await expect(auth.viewer(result.sessionId, host)).rejects.toMatchObject({ statusCode: 401 });
 });
 it('fails closed on Redis failure', async () => {
   const { minted, cookies } = await setup();
