@@ -82,7 +82,8 @@ export async function cacheRequest(
       throw new Error('Resource not found');
     } else if (endpoint.startsWith('GET ') && error?.status >= 500 && attempt <= TRANSIENT_RETRY_DELAYS_MS.length) {
       // Octokit reports a dropped keep-alive socket as status 500, indistinguishable from a real 5xx.
-      // Delays are spaced to miss the same dead socket, and sum to under the queue's 30s job lock.
+      // Delays are spaced to miss the same dead socket, and kept short so a sleeping retry does
+      // not outlive a worker's shutdown grace and leave its job to stall recovery.
       getLogger({ endpoint, attempt, status: error.status }).warn('GitHub: cache request retrying');
       await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[attempt - 1]));
       return cacheRequest(endpoint, requestData, { cache, ignoreCache, attempt: attempt + 1 });

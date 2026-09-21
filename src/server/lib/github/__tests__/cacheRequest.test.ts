@@ -372,6 +372,24 @@ describe('cacheRequest', () => {
       expect(logger.warn).not.toHaveBeenCalled();
     });
 
+    it('keeps the retry budget intact when a 304 refetch is what hits the server error', async () => {
+      const endpoint = 'GET /repos/acme/widget';
+      const response = { status: 200, headers: {}, data: { id: 17 } };
+      cache.hgetall.mockResolvedValue({ etag: '"stale-etag"', lastModified: '', data: 'not-json' });
+      request
+        .mockRejectedValueOnce(Object.assign(new Error('Not Modified'), { status: 304 }))
+        .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
+        .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
+        .mockResolvedValueOnce(response);
+
+      const pending = cacheRequest(endpoint, {}, { cache });
+      await jest.advanceTimersByTimeAsync(20_000);
+
+      expect(await pending).toBe(response);
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+    });
+
     it('gives up once the retry budget is exhausted', async () => {
       const endpoint = 'GET /repos/acme/widget';
       request.mockRejectedValue(Object.assign(new Error('other side closed'), { status: 500 }));
