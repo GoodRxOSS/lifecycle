@@ -22,10 +22,12 @@ import { CacheRequestData } from 'server/lib/github/types';
 
 import { redisClient } from 'server/lib/dependencies';
 
+const TRANSIENT_RETRY_DELAYS_MS = [5_000, 15_000];
+
 export async function cacheRequest(
   endpoint: string,
   requestData = {} as CacheRequestData,
-  { cache = redisClient.getRedis(), ignoreCache = false } = {}
+  { cache = redisClient.getRedis(), ignoreCache = false, attempt = 1 } = {}
 ) {
   const cacheKey = `github:req_cache:${endpoint}`;
   let cached;
@@ -73,11 +75,17 @@ export async function cacheRequest(
         getLogger({ endpoint, cacheHit: true }).debug('GitHub: cache request hit');
         return { data, cacheHit: true };
       } catch (error) {
-        return cacheRequest(endpoint, requestData, { cache, ignoreCache: true });
+        return cacheRequest(endpoint, requestData, { cache, ignoreCache: true, attempt });
       }
     } else if (error?.status === 404) {
       getLogger().info(`GitHub: cache request not found endpoint=${endpoint}`);
       throw new Error('Resource not found');
+    } else if (endpoint.startsWith('GET ') && error?.status >= 500 && attempt <= TRANSIENT_RETRY_DELAYS_MS.length) {
+      // Octokit reports a dropped keep-alive socket as status 500, indistinguishable from a real 5xx.
+      // Delays are spaced to miss the same dead socket, and sum to under the queue's 30s job lock.
+      getLogger({ endpoint, attempt, status: error.status }).warn('GitHub: cache request retrying');
+      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[attempt - 1]));
+      return cacheRequest(endpoint, requestData, { cache, ignoreCache, attempt: attempt + 1 });
     } else {
       const errorHeaders = error?.response?.headers || error?.headers;
       getLogger({
