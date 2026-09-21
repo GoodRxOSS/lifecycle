@@ -44,6 +44,7 @@ describe('cacheRequest', () => {
   let logger: {
     debug: jest.Mock;
     info: jest.Mock;
+    warn: jest.Mock;
     error: jest.Mock;
   };
 
@@ -54,6 +55,7 @@ describe('cacheRequest', () => {
     logger = {
       debug: jest.fn(),
       info: jest.fn(),
+      warn: jest.fn(),
       error: jest.fn(),
     };
     (redisClient.getRedis as jest.Mock).mockReturnValue(cache);
@@ -327,5 +329,79 @@ describe('cacheRequest', () => {
     expect(request).toHaveBeenCalledTimes(1);
     expect(cache.hset).toHaveBeenCalledTimes(1);
     expect(cache.expire).not.toHaveBeenCalled();
+  });
+
+  describe('transient failures', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('retries a GET that fails with a server error and returns the eventual response', async () => {
+      const endpoint = 'GET /repos/acme/widget/git/trees/abc123';
+      const response = { status: 200, headers: {}, data: { tree: [] } };
+      request
+        .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
+        .mockResolvedValueOnce(response);
+
+      const pending = cacheRequest(endpoint, {}, { cache });
+      await jest.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+
+      expect(result).toBe(response);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(logger.warn).toHaveBeenCalledWith('GitHub: cache request retrying');
+      expect(getLogger).toHaveBeenCalledWith({ endpoint, status: 500 });
+      expect(cache.hset).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry a non-GET endpoint, so a write is never duplicated', async () => {
+      const endpoint = 'POST /repos/acme/widget/deployments';
+      request.mockRejectedValue(Object.assign(new Error('other side closed'), { status: 500 }));
+
+      const assertion = expect(cacheRequest(endpoint, { data: { ref: 'main' } }, { cache })).rejects.toMatchObject({
+        message: 'GitHub API request failed',
+      });
+      await jest.advanceTimersByTimeAsync(10_000);
+      await assertion;
+
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('still retries when a 304 refetch is what hits the server error', async () => {
+      const endpoint = 'GET /repos/acme/widget';
+      const response = { status: 200, headers: {}, data: { id: 17 } };
+      cache.hgetall.mockResolvedValue({ etag: '"stale-etag"', lastModified: '', data: 'not-json' });
+      request
+        .mockRejectedValueOnce(Object.assign(new Error('Not Modified'), { status: 304 }))
+        .mockRejectedValueOnce(Object.assign(new Error('other side closed'), { status: 500 }))
+        .mockResolvedValueOnce(response);
+
+      const pending = cacheRequest(endpoint, {}, { cache });
+      await jest.advanceTimersByTimeAsync(10_000);
+
+      expect(await pending).toBe(response);
+      expect(request).toHaveBeenCalledTimes(3);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries only once, then gives up', async () => {
+      const endpoint = 'GET /repos/acme/widget';
+      request.mockRejectedValue(Object.assign(new Error('other side closed'), { status: 500 }));
+
+      const assertion = expect(cacheRequest(endpoint, {}, { cache })).rejects.toMatchObject({
+        message: 'GitHub API request failed',
+      });
+      await jest.advanceTimersByTimeAsync(10_000);
+      await assertion;
+
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith('GitHub: cache request failed');
+    });
   });
 });
