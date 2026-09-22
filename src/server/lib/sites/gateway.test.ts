@@ -17,7 +17,6 @@ const site = {
   ownerKind: 'user',
   ownerIssuer: 'https://id.example.com',
   ownerSubject: 'owner',
-  servingGeneration: 'abcdef012345',
   accessRevision: 2,
   visibility: 'private',
 };
@@ -25,9 +24,8 @@ const viewer = {
   issuer: site.ownerIssuer,
   subject: site.ownerSubject,
   siteId: site.siteId,
-  generation: site.servingGeneration,
   accessRevision: 2,
-  host: 'site-abc123--g-abcdef012345.sites.example.net',
+  host: 'site-abc123.sites.example.net',
   expiresAt: 1e12,
 };
 function request(method = 'GET', headers = {}, url = '/') {
@@ -57,7 +55,7 @@ function response() {
 }
 function service(current = site) {
   return {
-    getGatewayLocator: jest.fn(async () => ({ siteId: current.siteId, servingGeneration: current.servingGeneration })),
+    getGatewayLocator: jest.fn(async () => ({ siteId: current.siteId })),
     getGatewaySite: jest.fn(async () => ({ site: current, config: {} })),
     getGatewayObject: jest.fn(async (_host, _path, authorize) => {
       if (current.visibility === 'private') await authorize(current);
@@ -88,11 +86,11 @@ it.each(['/', '/style.css', '/app.js', '/private.json'])(
     expect(res.headers['Cache-Control']).toBe('no-store');
   }
 );
-it('denies another authenticated user and changed generation', async () => {
+it('denies another authenticated user and a stale access revision', async () => {
   await expect(authorizeSitesViewer(site as any, { ...viewer, subject: 'other' })).rejects.toMatchObject({
     statusCode: 404,
   });
-  await expect(authorizeSitesViewer(site as any, { ...viewer, generation: 'old' })).rejects.toMatchObject({
+  await expect(authorizeSitesViewer(site as any, { ...viewer, accessRevision: 1 })).rejects.toMatchObject({
     statusCode: 401,
   });
 });
@@ -203,7 +201,7 @@ it.each([
   expect(missing.getGatewayObject).not.toHaveBeenCalled();
 });
 it('rejects a concurrent Site change or grant expiry immediately before storage', async () => {
-  for (const changed of [{ accessRevision: 3 }, { ownerSubject: 'other' }, { servingGeneration: 'retired' }]) {
+  for (const changed of [{ accessRevision: 3 }, { ownerSubject: 'other' }, { siteId: 'other' }]) {
     const api = service();
     api.getGatewayObject.mockImplementation(async (_host: string, _path: string, authorize: any) => {
       await authorize({ ...site, ...changed });

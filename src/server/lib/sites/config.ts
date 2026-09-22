@@ -180,7 +180,7 @@ export function resolveSitesConfig(config?: SitesConfig | null): ResolvedSitesCo
   };
 }
 
-export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig, generation?: string | null): string {
+export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig): string {
   const protocol =
     process.env.SITES_GATEWAY_HTTPS === 'true'
       ? 'https'
@@ -188,13 +188,10 @@ export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig, genera
       ? 'http'
       : 'https';
   const port = config.port ? `:${config.port}` : '';
-  return `${protocol}://${config.hostPrefix}-${siteId}${generation ? `--g-${generation}` : ''}.${config.domain}${port}`;
+  return `${protocol}://${config.hostPrefix}-${siteId}.${config.domain}${port}`;
 }
 
-export function parseSiteHost(
-  hostHeader: string | undefined,
-  config: ResolvedSitesConfig
-): { siteId: string; generation: string | null } | null {
+export function parseSiteIdFromHost(hostHeader: string | undefined, config: ResolvedSitesConfig): string | null {
   if (!hostHeader || !/^[a-z0-9.-]+(?::[0-9]+)?$/i.test(hostHeader)) return null;
   const host = hostHeader.split(':')[0].toLowerCase();
   const suffix = `.${config.domain.toLowerCase()}`;
@@ -202,13 +199,6 @@ export function parseSiteHost(
   const label = host.slice(0, -suffix.length);
   const prefix = `${config.hostPrefix}-`;
   if (!label.startsWith(prefix)) return null;
-  const locator = label.slice(prefix.length);
-  const parts = locator.split('--g-');
-  if (parts.length > 2 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(parts[0])) return null;
-  if (parts.length === 2 && !/^[a-z0-9]{12,40}$/.test(parts[1])) return null;
-  return { siteId: parts[0], generation: parts[1] || null };
-}
-
-export function parseSiteIdFromHost(hostHeader: string | undefined, config: ResolvedSitesConfig): string | null {
-  return parseSiteHost(hostHeader, config)?.siteId ?? null;
+  const siteId = label.slice(prefix.length);
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(siteId) ? siteId : null;
 }

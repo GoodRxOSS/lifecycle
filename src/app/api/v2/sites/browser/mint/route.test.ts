@@ -40,14 +40,13 @@ jest.mock('server/services/keycloak/principalStatus', () => ({
 import { rememberVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 import { POST } from './route';
 const issuer = 'https://identity.example/realms/lifecycle';
-const host = 'site-abc123--g-abcdef012345.sites.example.net';
+const host = 'site-abc123.sites.example.net';
 const site = {
   siteId: 'abc123',
   ownerKind: 'user',
   ownerIssuer: issuer,
   ownerSubject: 'owner',
   visibility: 'private',
-  servingGeneration: 'abcdef012345',
   accessRevision: 1,
 };
 let principal: Principal;

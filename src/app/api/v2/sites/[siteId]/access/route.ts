@@ -33,7 +33,7 @@ import SitesService, { SitesServiceError } from 'server/services/sites';
  *             required: [visibility, expectedAccessRevision]
  *     responses:
  *       '200':
- *         description: Visibility changed; private transition retires the previous content URL.
+ *         description: Visibility changed; the Site ID and content URL stay the same.
  *         content:
  *           application/json:
  *             schema:

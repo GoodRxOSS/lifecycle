@@ -136,10 +136,9 @@ test('issued viewers use only their fixed grant deadline; new authorization stil
     ownerIssuer: issuer,
     ownerSubject: 'owner',
     visibility: 'private',
-    servingGeneration: 'abcdef012345',
     accessRevision: 1,
   };
-  const host = 'site-test--g-abcdef012345.sites.example.net';
+  const host = 'site-test.sites.example.net';
   const challenge = await auth.challenge(site, host, '/');
   const actor = { issuer, subject: 'owner' };
   await assertSitesPrincipal(rest);
@@ -165,12 +164,7 @@ test('issued viewers use only their fixed grant deadline; new authorization stil
   await expect(
     authorizeSitesViewer(site as any, { ...viewer, expiresAt: Math.floor(Date.now() / 1000) })
   ).rejects.toMatchObject({ httpStatus: 401 });
-  for (const changed of [
-    { ownerSubject: 'other' },
-    { servingGeneration: 'new' },
-    { accessRevision: 2 },
-    { siteId: 'other' },
-  ]) {
+  for (const changed of [{ ownerSubject: 'other' }, { accessRevision: 2 }, { siteId: 'other' }]) {
     await expect(authorizeSitesViewer({ ...site, ...changed } as any, viewer)).rejects.toMatchObject({
       httpStatus: expect.any(Number),
     });

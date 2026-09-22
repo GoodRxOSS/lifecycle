@@ -108,7 +108,6 @@ type SiteRow = {
   ownerIssuer: string | null;
   ownerSubject: string | null;
   creatorTokenId: number | null;
-  servingGeneration: string | null;
   accessRevision: number;
   contentRevision: number;
   siteId: string;
@@ -209,7 +208,6 @@ function createSiteRow(overrides: Partial<SiteRow> = {}): SiteRow {
     ownerIssuer: principal.issuer!,
     ownerSubject: principal.userId,
     creatorTokenId: null,
-    servingGeneration: null,
     accessRevision: 1,
     contentRevision: 1,
     siteId: 'site-1',

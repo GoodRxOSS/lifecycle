@@ -162,7 +162,6 @@ type SiteData = {
   ownerIssuer: string | null;
   ownerSubject: string | null;
   creatorTokenId: number | null;
-  servingGeneration: string | null;
   accessRevision: number;
   contentRevision: number;
   siteId: string;
@@ -237,7 +236,6 @@ function addSite(state: FakeState, overrides: Partial<SiteData> = {}): SiteRow {
     ownerIssuer: principal.issuer!,
     ownerSubject: principal.userId,
     creatorTokenId: null,
-    servingGeneration: null,
     accessRevision: 1,
     contentRevision: 1,
     siteId: 'site-1',
@@ -1158,7 +1156,7 @@ describe('SitesService behavior', () => {
         contentRevision: 1,
         permissions: { canEdit: true },
       });
-      expect(result.url).toContain('--g-version00001');
+      expect(result.url).toBe('https://site-site000001.sites.example.com');
       expect(result.openUrl).toBe('https://lifecycle.example.net/sites/open/site000001');
       expect(state.sites[0]).toMatchObject({ ownerKind: 'user', ownerSubject: 'owner', ownerIssuer: principal.issuer });
     });
@@ -1252,13 +1250,12 @@ describe('SitesService behavior', () => {
       expect(mockGetObject).not.toHaveBeenCalled();
     });
     it('resolves valid missing host locators without a database Site for the anonymous bootstrap', async () => {
-      await expect(service.getGatewayLocator('site-missing--g-abcdef012345.sites.example.com')).resolves.toEqual({
+      await expect(service.getGatewayLocator('site-missing.sites.example.com')).resolves.toEqual({ siteId: 'missing' });
+      await expect(service.getGatewayLocator('site-missing.sites.example.com:443')).resolves.toEqual({
         siteId: 'missing',
-        servingGeneration: 'abcdef012345',
       });
-      await expect(service.getGatewayLocator('site-missing--g-abcdef012345.sites.example.com:443')).resolves.toEqual({
-        siteId: 'missing',
-        servingGeneration: 'abcdef012345',
+      await expect(service.getGatewayLocator('site-missing--g-abcdef012345.sites.example.com')).rejects.toMatchObject({
+        statusCode: 404,
       });
       await expect(service.getGatewayLocator('site-missing.sites.example.com:9443')).rejects.toMatchObject({
         statusCode: 404,
@@ -1342,15 +1339,18 @@ describe('SitesService behavior', () => {
       expect(authorize).toHaveBeenCalledTimes(1);
       expect(mockGetObject).not.toHaveBeenCalled();
     });
-    it('retires the old public host on privatization and never restores it when republishing', async () => {
+    it('keeps the content URL and Site ID while changing visibility', async () => {
       addSite(state);
       addVersion(state);
       const hidden = await service.setVisibility('site-1', 'private', principal, 1);
-      expect(hidden.url).toBe('https://site-site-1--g-version00001.sites.example.com');
-      await expect(service.getGatewaySite('site-site-1.sites.example.com')).rejects.toMatchObject({ statusCode: 404 });
+      expect(hidden.url).toBe('https://site-site-1.sites.example.com');
+      expect(hidden.openUrl).toBe('https://lifecycle.example.net/sites/open/site-1');
+      await expect(service.getGatewaySite('site-site-1.sites.example.com')).resolves.toMatchObject({
+        site: expect.objectContaining({ visibility: 'private' }),
+      });
       const published = await service.setVisibility('site-1', 'public', principal, 2);
       expect(published.url).toBe(hidden.url);
-      await expect(service.getGatewaySite('site-site-1.sites.example.com')).rejects.toMatchObject({ statusCode: 404 });
+      expect(published.openUrl).toBe(hidden.openUrl);
     });
     it('rejects a stale visibility revision without modifying the site', async () => {
       const row = addSite(state);
@@ -1372,7 +1372,7 @@ describe('SitesService behavior', () => {
       expect(mockDeletePrefix).toHaveBeenCalledWith('sites/site-1/versions/version00001');
     });
     it('rejects publishing or deleting content replaced since the owner prepared the action', async () => {
-      addSite(state, { visibility: 'private', servingGeneration: 'generation-1' });
+      addSite(state, { visibility: 'private' });
       addVersion(state);
       const before = await service.getSite('site-1', principal);
       const replaced = await service.replaceSiteContent('site-1', {
@@ -1395,7 +1395,7 @@ describe('SitesService behavior', () => {
       expect(published).toMatchObject({ visibility: 'public', accessRevision: 3, contentRevision: 2 });
     });
     it('rejects replacement when a private site is published during the upload', async () => {
-      addSite(state, { visibility: 'private', servingGeneration: 'generation-1' });
+      addSite(state, { visibility: 'private' });
       addVersion(state);
       mockPutFiles.mockImplementationOnce(async () => {
         await service.setVisibility('site-1', 'public', principal, 1);

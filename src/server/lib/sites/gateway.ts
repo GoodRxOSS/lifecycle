@@ -17,12 +17,7 @@ import type SitesService from 'server/services/sites';
 export async function authorizeSitesViewer(site: Site, viewer: Viewer): Promise<void> {
   assertViewerActive(viewer);
   assertViewerOwns(site, viewer);
-  if (
-    site.siteId !== viewer.siteId ||
-    (site.servingGeneration ?? null) !== viewer.generation ||
-    site.accessRevision !== viewer.accessRevision
-  )
-    throw new SitesBrowserError(401);
+  if (site.siteId !== viewer.siteId || site.accessRevision !== viewer.accessRevision) throw new SitesBrowserError(401);
 }
 function securityHeaders(res: ServerResponse) {
   res.setHeader('Cache-Control', 'no-store');

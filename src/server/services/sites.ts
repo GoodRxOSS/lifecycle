@@ -22,13 +22,7 @@ import GlobalConfigService from './globalConfig';
 import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { getLogger } from 'server/lib/logger';
-import {
-  buildSiteUrl,
-  parseSiteIdFromHost,
-  parseSiteHost,
-  resolveSitesConfig,
-  ResolvedSitesConfig,
-} from 'server/lib/sites/config';
+import { buildSiteUrl, parseSiteIdFromHost, resolveSitesConfig, ResolvedSitesConfig } from 'server/lib/sites/config';
 import { SitesObjectNotFoundError, SitesStorage } from 'server/lib/sites/storage';
 import {
   normalizeGatewayPath,
@@ -144,7 +138,7 @@ export default class SitesService extends Service {
   private serialize(site: Site, config: ResolvedSitesConfig, principal?: Principal): SiteResponse {
     const owner = isSiteOwner(site, principal);
     const writable = owner && Boolean(principal && hasSitesScope(principal, 'write'));
-    const contentUrl = buildSiteUrl(site.siteId, config, site.servingGeneration);
+    const contentUrl = buildSiteUrl(site.siteId, config);
     const uiUrl = process.env.LIFECYCLE_UI_URL;
     const expiresAt = site.expiresAt ? new Date(site.expiresAt).getTime() : null;
     const status =
@@ -387,7 +381,6 @@ export default class SitesService extends Service {
           ownerIssuer: machine ? null : principal.issuer,
           ownerSubject: machine ? null : principal.userId,
           creatorTokenId: machine ? principal.tokenId : null,
-          servingGeneration: visibility === 'private' ? createVersionId() : null,
           accessRevision: 1,
           contentRevision: 1,
           createdBy: principal.identity?.email || null,
@@ -554,7 +547,6 @@ export default class SitesService extends Service {
       const updated = await site.$query(trx).patchAndFetch({
         visibility,
         accessRevision: site.accessRevision + 1,
-        servingGeneration: visibility === 'private' ? createVersionId() : site.servingGeneration,
       });
       return this.serialize(updated as Site, config, principal);
     });
@@ -591,23 +583,23 @@ export default class SitesService extends Service {
   async resolvePublicSiteUrl(siteId: string): Promise<string | null> {
     try {
       const { site, config } = await this.getActiveSite(siteId);
-      return site.visibility === 'public' ? buildSiteUrl(siteId, config, site.servingGeneration) : null;
+      return site.visibility === 'public' ? buildSiteUrl(siteId, config) : null;
     } catch (error) {
       if (error instanceof SitesServiceError && error.statusCode === 404) return null;
       throw error;
     }
   }
 
-  async getGatewayLocator(hostHeader: string | undefined): Promise<Pick<Site, 'siteId' | 'servingGeneration'>> {
+  async getGatewayLocator(hostHeader: string | undefined): Promise<Pick<Site, 'siteId'>> {
     const config = await this.getConfig();
-    const locator = parseSiteHost(hostHeader, config);
-    if (!config.enabled || !locator) throw new SitesServiceError('Site not found.', 404);
-    const expected = new URL(buildSiteUrl(locator.siteId, config, locator.generation));
+    const siteId = parseSiteIdFromHost(hostHeader, config);
+    if (!config.enabled || !siteId) throw new SitesServiceError('Site not found.', 404);
+    const expected = new URL(buildSiteUrl(siteId, config));
     const requested = new URL(`${expected.protocol}//${hostHeader}`);
     if (requested.host.toLowerCase() !== expected.host.toLowerCase())
       throw new SitesServiceError('Site not found.', 404);
     this.assertPrivateReady(config);
-    return { siteId: locator.siteId, servingGeneration: locator.generation };
+    return { siteId };
   }
 
   async getGatewaySite(hostHeader: string | undefined): Promise<{ site: Site; config: ResolvedSitesConfig }> {
@@ -615,11 +607,11 @@ export default class SitesService extends Service {
     const siteId = parseSiteIdFromHost(hostHeader, config);
     if (!siteId) throw new SitesServiceError('Site not found.', 404);
     const result = await this.getActiveSite(siteId);
-    const expectedHost = new URL(buildSiteUrl(siteId, result.config, result.site.servingGeneration)).host.toLowerCase();
+    const expectedHost = new URL(buildSiteUrl(siteId, result.config)).host.toLowerCase();
     let requestedHost: string;
     try {
       requestedHost = new URL(
-        `${new URL(buildSiteUrl(siteId, result.config, result.site.servingGeneration)).protocol}//${hostHeader}`
+        `${new URL(buildSiteUrl(siteId, result.config)).protocol}//${hostHeader}`
       ).host.toLowerCase();
     } catch {
       throw new SitesServiceError('Site not found.', 404);

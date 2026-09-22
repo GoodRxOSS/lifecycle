@@ -31,14 +31,12 @@ export type BrowserSite = {
   ownerIssuer?: string | null;
   ownerSubject?: string | null;
   visibility: string;
-  servingGeneration?: string | null;
   accessRevision: number;
 };
-type Challenge = { siteId: string; host: string; generation: string | null; secretHash: string; path: string };
+type Challenge = { siteId: string; host: string; secretHash: string; path: string };
 export type Viewer = BrowserActor & {
   siteId: string;
   host: string;
-  generation: string | null;
   accessRevision: number;
   expiresAt: number;
 };
@@ -174,14 +172,13 @@ export class SitesBrowserAuth {
   async rateLimit(identity: string, maximum = 60): Promise<void> {
     if (Number(await this.redis.eval(LIMIT, 1, this.key('rate', identity))) > maximum) throw new SitesBrowserError(429);
   }
-  async challenge(site: Pick<BrowserSite, 'siteId' | 'servingGeneration'>, host: string, path: string) {
+  async challenge(site: Pick<BrowserSite, 'siteId'>, host: string, path: string) {
     assertPrivateSitesReady(`https://${host}`);
     const state = randomSiteToken();
     const secret = randomSiteToken();
     const challenge: Challenge = {
       siteId: site.siteId,
       host,
-      generation: site.servingGeneration ?? null,
       secretHash: siteTokenHash(secret),
       path: safeSiteReturnPath(path),
     };
@@ -204,8 +201,7 @@ export class SitesBrowserAuth {
     assertViewerOwns(site, actor);
     if (!body.state || body.siteId !== site.siteId) throw new SitesBrowserError(401);
     const challenge = await this.readChallenge(body.state);
-    if (challenge.siteId !== site.siteId || challenge.generation !== (site.servingGeneration ?? null))
-      throw new SitesBrowserError(401);
+    if (challenge.siteId !== site.siteId) throw new SitesBrowserError(401);
     assertPrivateSitesReady(`https://${challenge.host}`);
     if (!Number.isSafeInteger(tokenExpiresAt)) throw new SitesBrowserError(401);
     const expiresAt = Math.min(nowSeconds() + MAX_VIEWER_SECONDS, tokenExpiresAt);
@@ -215,7 +211,6 @@ export class SitesBrowserAuth {
       subject: actor.subject,
       siteId: site.siteId,
       host: challenge.host,
-      generation: site.servingGeneration ?? null,
       accessRevision: site.accessRevision,
       expiresAt,
       challengeId: body.state,
@@ -259,7 +254,6 @@ export class SitesBrowserAuth {
         subject: value.subject,
         siteId: value.siteId,
         host: value.host,
-        generation: value.generation,
         accessRevision: value.accessRevision,
         expiresAt: value.expiresAt,
       }),

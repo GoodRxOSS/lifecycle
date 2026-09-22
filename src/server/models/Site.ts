@@ -30,7 +30,6 @@ export default class Site extends Model {
   ownerIssuer!: string | null;
   ownerSubject!: string | null;
   creatorTokenId!: number | null;
-  servingGeneration!: string | null;
   accessRevision!: number;
   contentRevision!: number;
   activeVersionId?: string | null;

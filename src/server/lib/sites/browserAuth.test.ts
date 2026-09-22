@@ -57,10 +57,9 @@ const site: BrowserSite = {
   ownerIssuer: actor.issuer,
   ownerSubject: actor.subject,
   visibility: 'private',
-  servingGeneration: 'abcdef012345',
   accessRevision: 1,
 };
-const host = 'site-abc123--g-abcdef012345.sites.example.net';
+const host = 'site-abc123.sites.example.net';
 let store: Store;
 let auth: SitesBrowserAuth;
 const originalEnv = { ...process.env };
@@ -133,7 +132,7 @@ it('never lets a different actor or service-key owner mint a viewer', async () =
     auth.mint({ ...site, ownerKind: 'service_key' }, actor, login, actor.oauth.expiresAt)
   ).rejects.toMatchObject({ statusCode: 404 });
 });
-it('runs current authorization on consume and returns no session when ownership/generation changes', async () => {
+it('runs current authorization on consume and returns no session when ownership changes', async () => {
   const { minted, cookies } = await setup();
   await expect(
     auth.consume(minted.ticket, host, cookies, process.env.LIFECYCLE_UI_URL, async () => {
@@ -266,7 +265,6 @@ it('retains only Site claims, no OAuth login, token metadata or bearer vault', a
   expect(Object.keys(await auth.viewer(result.sessionId, host)).sort()).toEqual([
     'accessRevision',
     'expiresAt',
-    'generation',
     'host',
     'issuer',
     'siteId',

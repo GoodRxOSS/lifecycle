@@ -12,7 +12,6 @@ export async function up(knex: Knex): Promise<void> {
     table.string('ownerSubject', 255).nullable();
     // No FK: deleting or rotating a key must not delete or transfer the original owner's Sites.
     table.integer('creatorTokenId').nullable();
-    table.string('servingGeneration', 32).nullable();
     table.integer('accessRevision').notNullable().defaultTo(1);
     table.integer('contentRevision').notNullable().defaultTo(1);
     table.index(['ownerIssuer', 'ownerSubject'], 'sites_owner_identity_idx');
@@ -25,7 +24,7 @@ export async function up(knex: Knex): Promise<void> {
       ("ownerKind" = 'user' AND "ownerIssuer" IS NOT NULL AND length("ownerIssuer") > 0 AND "ownerSubject" IS NOT NULL AND length("ownerSubject") > 0 AND "creatorTokenId" IS NULL) OR
       ("ownerKind" = 'service_key' AND "ownerIssuer" IS NULL AND "ownerSubject" IS NULL AND "creatorTokenId" IS NOT NULL AND "creatorTokenId" > 0) OR
       ("ownerKind" = 'unresolved' AND "ownerIssuer" IS NULL AND "ownerSubject" IS NULL AND "creatorTokenId" IS NULL)
-    ) AND (visibility = 'public' OR ("ownerKind" = 'user' AND "servingGeneration" IS NOT NULL AND length("servingGeneration") > 0))
+    ) AND (visibility = 'public' OR "ownerKind" = 'user')
   )`);
   await knex.raw(`CREATE FUNCTION sites_preserve_owner() RETURNS trigger LANGUAGE plpgsql AS $$
   BEGIN
@@ -61,7 +60,6 @@ export async function down(knex: Knex): Promise<void> {
     DROP COLUMN "ownerIssuer",
     DROP COLUMN "ownerSubject",
     DROP COLUMN "creatorTokenId",
-    DROP COLUMN "servingGeneration",
     DROP COLUMN "accessRevision",
     DROP COLUMN "contentRevision"`);
   await knex.raw('ALTER TABLE api_tokens DROP COLUMN "ownerIssuer"');
