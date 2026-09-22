@@ -1310,17 +1310,17 @@ describe('SitesService behavior', () => {
     });
     it('denies all nonowner mutations including realm admins before storage', async () => {
       addSite(state, { visibility: 'private' });
-      await expect(service.getSite('site-1', stranger)).rejects.toMatchObject({ statusCode: 404 });
+      await expect(service.getSite('site-1', stranger)).rejects.toMatchObject({ statusCode: 403 });
       await expect(
         service.replaceSiteContent('site-1', {
           principal: stranger,
           fileName: 'index.html',
           content: Buffer.from('bad'),
         })
-      ).rejects.toMatchObject({ httpStatus: 404 });
-      await expect(service.extendSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 404 });
-      await expect(service.setVisibility('site-1', 'public', stranger, 1)).rejects.toMatchObject({ httpStatus: 404 });
-      await expect(service.deleteSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 404 });
+      ).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.extendSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.setVisibility('site-1', 'public', stranger, 1)).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.deleteSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 403 });
       expect(mockPutFiles).not.toHaveBeenCalled();
       expect(mockDeletePrefix).not.toHaveBeenCalled();
     });

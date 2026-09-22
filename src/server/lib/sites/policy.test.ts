@@ -58,7 +58,7 @@ test('admin status, matching display email, or a different issuer never grant ow
   expect(isSiteOwner(site, human())).toBe(true);
   expect(isSiteOwner(site, human({ userId: 'bob' }))).toBe(false);
   expect(isSiteOwner(site, human({ issuer: 'https://other.example/realm' }))).toBe(false);
-  expect(() => assertSiteOwner(site, human({ userId: 'bob' }))).toThrow('Site not found');
+  expect(() => assertSiteOwner(site, human({ userId: 'bob' }))).toThrow('You do not have access to this Site.');
   expect(isSiteOwner({ ...site, ownerKind: 'unresolved' } as Site, human())).toBe(false);
 });
 test('machine ownership is the immutable token id and cannot impersonate a human', async () => {

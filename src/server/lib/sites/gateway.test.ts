@@ -88,7 +88,7 @@ it.each(['/', '/style.css', '/app.js', '/private.json'])(
 );
 it('denies another authenticated user and a stale access revision', async () => {
   await expect(authorizeSitesViewer(site as any, { ...viewer, subject: 'other' })).rejects.toMatchObject({
-    statusCode: 404,
+    statusCode: 403,
   });
   await expect(authorizeSitesViewer(site as any, { ...viewer, accessRevision: 1 })).rejects.toMatchObject({
     statusCode: 401,

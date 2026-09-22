@@ -114,8 +114,9 @@ export function parseSitesCookies(raw?: string): Record<string, string> {
 }
 export function assertViewerOwns(site: BrowserSite, actor: BrowserActor): void {
   assertPrivateSitesReady();
+  // Internal tool: 403 here (not 404) so a denied teammate knows to ask the owner.
   if (site.ownerKind !== 'user' || site.ownerIssuer !== actor.issuer || site.ownerSubject !== actor.subject)
-    throw new SitesBrowserError(404);
+    throw new SitesBrowserError(403, 'You do not have access to this Site.');
 }
 
 export async function readSitesMintBody(request: {

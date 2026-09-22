@@ -126,11 +126,11 @@ it('expires one-use tickets after 60 seconds', async () => {
 it('never lets a different actor or service-key owner mint a viewer', async () => {
   const { login } = await setup();
   await expect(auth.mint(site, { ...actor, subject: 'other' }, login, actor.oauth.expiresAt)).rejects.toMatchObject({
-    statusCode: 404,
+    statusCode: 403,
   });
   await expect(
     auth.mint({ ...site, ownerKind: 'service_key' }, actor, login, actor.oauth.expiresAt)
-  ).rejects.toMatchObject({ statusCode: 404 });
+  ).rejects.toMatchObject({ statusCode: 403 });
 });
 it('runs current authorization on consume and returns no session when ownership changes', async () => {
   const { minted, cookies } = await setup();

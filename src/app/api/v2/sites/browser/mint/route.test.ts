@@ -119,7 +119,7 @@ it('denies anonymous, unrelated owner, expired JWT and disabled account without 
   );
   expect((await mint()).status).toBe(401);
   principal.userId = 'other';
-  expect((await mint()).status).toBe(404);
+  expect((await mint()).status).toBe(403);
   principal.userId = 'owner';
   principal.oauth!.expiresAt = Math.floor(Date.now() / 1000);
   expect((await mint()).status).toBe(401);

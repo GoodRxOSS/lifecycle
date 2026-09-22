@@ -435,8 +435,10 @@ export default class SitesService extends Service {
     const config = await this.getConfig();
     this.assertEnabled(config);
     const site = (await this.db.models.Site.query().findOne({ siteId }).whereNull('deletedAt')) as Site | undefined;
-    if (!site || (site.visibility !== 'public' && !isSiteOwner(site, principal)))
-      throw new SitesServiceError('Site not found.', 404);
+    if (!site) throw new SitesServiceError('Site not found.', 404);
+    // Internal tool: 403 here (not 404) so a denied teammate knows to ask the owner.
+    if (site.visibility !== 'public' && !isSiteOwner(site, principal))
+      throw new SitesServiceError('You do not have access to this Site.', 403);
     return this.serialize(site, config, principal);
   }
 

@@ -113,7 +113,11 @@ export function isSiteOwner(site: Site, principal: Principal | null | undefined)
 
 export function assertSiteOwner(site: Site, principal: Principal): void {
   if (!isSiteOwner(site, principal)) {
-    // Same response for missing and inaccessible private resources.
-    throw new AppError({ httpStatus: 404, code: 'site_not_found', message: 'Site not found.' });
+    // Internal tool: 403 here (not 404) so a denied teammate knows to ask the owner.
+    throw new AppError({
+      httpStatus: 403,
+      code: 'site_access_denied',
+      message: 'You do not have access to this Site.',
+    });
   }
 }
