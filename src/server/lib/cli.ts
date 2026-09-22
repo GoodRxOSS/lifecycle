@@ -205,6 +205,20 @@ export async function waitForCodefresh(id: string) {
   }
 }
 
+const RDS_HOST = /\.rds\.amazonaws\.com(\.cn)?$/;
+
+/**
+ * Whether an aurora-restore deploy's cname was pinned by an operator rather than written by Lifecycle.
+ *
+ * Lifecycle only ever stores RDS endpoints returned by AWS, so any other host (typically a DNS record
+ * fronting an externally managed database) was set by hand. Pinned cnames must never be restored over
+ * or destroyed.
+ */
+export function isPinnedCname(cname: string | null | undefined): boolean {
+  const host = cname?.trim().toLowerCase().replace(/\.$/, '');
+  return !!host && !RDS_HOST.test(host);
+}
+
 /**
  * Deletes CLI based services for this build
  * @param build the build to delete CLI services from
@@ -223,6 +237,7 @@ export async function deleteBuild(build: Build) {
       deploys
         ?.filter((d) => {
           const serviceType: DeployTypes = d.deployable.type;
+          if (serviceType === DeployTypes.AURORA_RESTORE && isPinnedCname(d.cname)) return false;
           return CLIDeployTypes.has(serviceType) && d.active;
         })
         .map(async (deploy) => {

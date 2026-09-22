@@ -262,7 +262,17 @@ export default class DeployService extends BaseService {
           throw new Error('Aurora restore deployable is missing.');
         }
 
-        if ((deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY) && deploy.cname) {
+        const isBuilt = deploy.status === DeployStatus.BUILT || deploy.status === DeployStatus.READY;
+
+        if (cli.isPinnedCname(deploy.cname)) {
+          getLogger().info('Aurora: skipped reason=pinned');
+          if (!isBuilt) {
+            await this.patchDeployForRun(deploy, runUUID, { status: DeployStatus.BUILT });
+          }
+          return true;
+        }
+
+        if (isBuilt && deploy.cname) {
           getLogger().info('Aurora: skipped reason=alreadyBuilt');
           return true;
         }

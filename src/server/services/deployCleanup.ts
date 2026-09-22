@@ -19,7 +19,7 @@ import { Deploy } from 'server/models';
 import { shellPromise } from 'server/lib/shell';
 import { extractContextForQueue, getLogger, withLogContext } from 'server/lib/logger';
 import { CLIDeployTypes, DeployStatus, DeployTypes } from 'shared/constants';
-import { codefreshDestroy, deleteDeploy } from 'server/lib/cli';
+import { codefreshDestroy, deleteDeploy, isPinnedCname } from 'server/lib/cli';
 import Metrics from 'server/lib/metrics';
 import BaseService from './_service';
 import { parseSecretRefsFromEnv } from 'server/lib/secretRefs';
@@ -386,6 +386,11 @@ export default class DeployCleanupService extends BaseService {
 
   private buildCliTask(deploy: Deploy, deployType: DeployTypes): CleanupTask | null {
     if (!CLIDeployTypes.has(deployType)) {
+      return null;
+    }
+
+    if (deployType === DeployTypes.AURORA_RESTORE && isPinnedCname(deploy.cname)) {
+      getLogger().info('Deploy cleanup: cli-destroy skipped reason=pinned');
       return null;
     }
 
