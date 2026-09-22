@@ -1185,7 +1185,7 @@ describe('SitesService behavior', () => {
         ownerSubject: null,
         ownerIssuer: null,
       });
-      await expect(service.deleteSite(result.id, principal)).rejects.toMatchObject({ httpStatus: 404 });
+      await expect(service.deleteSite(result.id, principal)).rejects.toMatchObject({ httpStatus: 403 });
       await expect(
         service.createSite({
           principal: machine,
@@ -1274,7 +1274,7 @@ describe('SitesService behavior', () => {
         expect(mockPutFiles).not.toHaveBeenCalled();
       }
     );
-    it('returns the same missing/private deletion error contract to a nonowner', async () => {
+    it('gives a nonowner a distinct deletion error for a private Site versus a missing one', async () => {
       addSite(state, { visibility: 'private', ownerSubject: 'other' });
       const errors = [];
       for (const id of ['site-1', 'missing']) {
@@ -1288,9 +1288,10 @@ describe('SitesService behavior', () => {
           });
         }
       }
-      expect(errors).toHaveLength(2);
-      expect(errors[0]).toEqual(errors[1]);
-      expect(errors[0]).toEqual({ message: 'Site not found.', code: 'site_not_found', status: 404 });
+      expect(errors).toEqual([
+        { message: 'You do not have access to this Site.', code: 'site_access_denied', status: 403 },
+        { message: 'Site not found.', code: 'site_not_found', status: 404 },
+      ]);
     });
     it('filters unauthorized private rows before page totals and shows public creator attribution', async () => {
       addSite(state, { siteId: 'secret', visibility: 'private', ownerSubject: 'other' });
