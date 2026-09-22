@@ -19,6 +19,10 @@ import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
 const mockGetAllConfigs = jest.fn();
+const mockAudit = jest.fn<Promise<void>, unknown[]>(async () => undefined);
+jest.mock('server/services/authAudit', () => ({
+  recordAuthAuditEventInTransaction: (...args: unknown[]) => mockAudit(...args),
+}));
 
 jest.mock('shared/config', () => ({
   QUEUE_NAMES: {
@@ -62,9 +66,50 @@ jest.mock('server/services/globalConfig', () => ({
   },
 }));
 
+import type { Principal } from 'server/lib/principal';
+const principal: Principal = {
+  kind: 'user',
+  authMethod: 'session',
+  userId: 'owner',
+  issuer: 'https://identity.example/realms/lifecycle',
+  actor: 'owner',
+  roles: ['user'],
+  scopes: null,
+  tokenId: null,
+  repositoryAllowlist: null,
+  repositoryAllowlistRepoIds: null,
+  identity: null,
+  oauth: { sessionId: 'session', tokenId: 'jwt', clientId: 'cli', expiresAt: 1e12 },
+};
+jest.mock('server/services/keycloak/principalStatus', () => ({
+  getUserStatus: jest.fn(async () => 'active'),
+  getUserSessionStatus: jest.fn(async () => 'active'),
+  getOAuthTokenStatus: jest.fn(async () => 'active'),
+}));
+jest.mock('server/lib/verifiedOAuthBearer', () => ({ getVerifiedOAuthBearer: jest.fn(() => 'fixture-bearer') }));
+jest.mock('server/lib/sites/browserAuth', () => ({
+  ...jest.requireActual('server/lib/sites/browserAuth'),
+}));
+const originalSitesEnv = { ...process.env };
+beforeEach(() => {
+  process.env.ENABLE_AUTH = 'true';
+  process.env.KEYCLOAK_ISSUER = principal.issuer!;
+  process.env.LIFECYCLE_UI_URL = 'https://lifecycle.example.net';
+});
+afterEach(() => {
+  process.env = { ...originalSitesEnv };
+});
+
 import SitesService from 'server/services/sites';
 
 type SiteRow = {
+  visibility: 'private' | 'public';
+  ownerKind: 'user' | 'service_key' | 'unresolved';
+  ownerIssuer: string | null;
+  ownerSubject: string | null;
+  creatorTokenId: number | null;
+  accessRevision: number;
+  contentRevision: number;
   siteId: string;
   name: string;
   status: string;
@@ -85,6 +130,27 @@ class SiteQuery {
 
   constructor(private readonly rows: SiteRow[]) {}
 
+  forUpdate() {
+    return this;
+  }
+  orWhere(scope: Partial<SiteRow>) {
+    const existing = [...this.filters];
+    this.filters = [
+      (row) =>
+        existing.every((f) => f(row)) ||
+        Object.entries(scope).every(([key, value]) => row[key as keyof SiteRow] === value),
+    ];
+    return this;
+  }
+  where(scope: Partial<SiteRow> | keyof SiteRow | ((query: SiteQuery) => unknown), value?: unknown) {
+    if (typeof scope === 'function') {
+      const group = new SiteQuery(this.rows);
+      scope(group);
+      this.filters.push((row) => group.filters.every((f) => f(row)));
+    } else if (typeof scope === 'string') this.filters.push((row) => row[scope] === value);
+    else this.filters.push((row) => Object.entries(scope).every(([key, value]) => row[key as keyof SiteRow] === value));
+    return this;
+  }
   whereNull(field: keyof SiteRow) {
     this.filters.push((row) => row[field] == null);
     return this;
@@ -105,7 +171,7 @@ class SiteQuery {
   }
 
   orderBy(field: keyof SiteRow, direction: string) {
-    this.sortBy = { field, direction };
+    if (!this.sortBy) this.sortBy = { field, direction };
     return this;
   }
 
@@ -137,6 +203,13 @@ class SiteQuery {
 
 function createSiteRow(overrides: Partial<SiteRow> = {}): SiteRow {
   return {
+    visibility: 'public',
+    ownerKind: 'user',
+    ownerIssuer: principal.issuer!,
+    ownerSubject: principal.userId,
+    creatorTokenId: null,
+    accessRevision: 1,
+    contentRevision: 1,
     siteId: 'site-1',
     name: 'site',
     status: 'active',
@@ -187,16 +260,16 @@ describe('SitesService', () => {
   describe('listSites', () => {
     it('returns all non-deleted sites without a user filter', async () => {
       rows.push(
-        createSiteRow({ siteId: 'old', updatedAt: '2026-05-01T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'old', createdAt: '2026-05-01T00:00:00.000Z' }),
         createSiteRow({
           siteId: 'deleted',
-          updatedAt: '2026-05-03T00:00:00.000Z',
+          createdAt: '2026-05-03T00:00:00.000Z',
           deletedAt: '2026-05-04T00:00:00.000Z',
         }),
-        createSiteRow({ siteId: 'new', updatedAt: '2026-05-02T00:00:00.000Z' })
+        createSiteRow({ siteId: 'new', createdAt: '2026-05-02T00:00:00.000Z' })
       );
 
-      await expect(service.listSites()).resolves.toMatchObject({
+      await expect(service.listSites({}, principal)).resolves.toMatchObject({
         sites: [{ id: 'new' }, { id: 'old' }],
         pagination: {
           current: 1,
@@ -207,47 +280,20 @@ describe('SitesService', () => {
       });
     });
 
-    it('filters to sites created or last updated by the supplied user email', async () => {
-      rows.push(
-        createSiteRow({
-          siteId: 'created-by-user',
-          createdBy: 'ALICE@example.com',
-          updatedBy: 'other@example.com',
-          updatedAt: '2026-05-01T00:00:00.000Z',
-        }),
-        createSiteRow({
-          siteId: 'updated-by-user',
-          createdBy: 'other@example.com',
-          updatedBy: 'alice@example.com',
-          updatedAt: '2026-05-03T00:00:00.000Z',
-        }),
-        createSiteRow({
-          siteId: 'not-touched-by-user',
-          createdBy: 'other@example.com',
-          updatedBy: 'other@example.com',
-          updatedAt: '2026-05-04T00:00:00.000Z',
-        })
-      );
-
-      await expect(service.listSites({ user: ' Alice@Example.com ' })).resolves.toMatchObject({
-        sites: [{ id: 'updated-by-user' }, { id: 'created-by-user' }],
-        pagination: {
-          current: 1,
-          total: 1,
-          items: 2,
-          limit: 25,
-        },
+    it('rejects legacy email filters instead of treating mutable attribution as ownership', async () => {
+      await expect(service.listSites({ user: 'Alice@Example.com' }, principal)).rejects.toMatchObject({
+        statusCode: 400,
       });
     });
 
     it('paginates sites after sorting and filtering', async () => {
       rows.push(
-        createSiteRow({ siteId: 'oldest', updatedAt: '2026-05-01T00:00:00.000Z' }),
-        createSiteRow({ siteId: 'middle', updatedAt: '2026-05-02T00:00:00.000Z' }),
-        createSiteRow({ siteId: 'newest', updatedAt: '2026-05-03T00:00:00.000Z' })
+        createSiteRow({ siteId: 'oldest', createdAt: '2026-05-01T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'middle', createdAt: '2026-05-02T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'newest', createdAt: '2026-05-03T00:00:00.000Z' })
       );
 
-      await expect(service.listSites({ page: 2, limit: 1 })).resolves.toMatchObject({
+      await expect(service.listSites({ page: 2, limit: 1 }, principal)).resolves.toMatchObject({
         sites: [{ id: 'middle' }],
         pagination: {
           current: 2,
@@ -263,10 +309,10 @@ describe('SitesService', () => {
       const now = jest.spyOn(Date, 'now').mockReturnValue(new Date(expiresAt).getTime());
       rows.push(createSiteRow({ expiresAt }));
 
-      await expect(service.listSites()).resolves.toMatchObject({
+      await expect(service.listSites({}, principal)).resolves.toMatchObject({
         sites: [{ id: 'site-1', status: 'expired', expiresAt }],
       });
-      await expect(service.getSite('site-1')).resolves.toMatchObject({
+      await expect(service.getSite('site-1', principal)).resolves.toMatchObject({
         id: 'site-1',
         status: 'expired',
         expiresAt,
@@ -274,7 +320,7 @@ describe('SitesService', () => {
       now.mockRestore();
     });
 
-    it('keeps an elapsed expiresAt active when site TTL is disabled', async () => {
+    it('does not resurrect elapsed sites when TTL defaults are disabled', async () => {
       mockGetAllConfigs.mockResolvedValue({
         sites: {
           enabled: true,
@@ -285,12 +331,12 @@ describe('SitesService', () => {
       });
       rows.push(createSiteRow({ expiresAt: '2000-01-01T00:00:00.000Z' }));
 
-      await expect(service.listSites()).resolves.toMatchObject({
-        sites: [{ id: 'site-1', status: 'active' }],
+      await expect(service.listSites({}, principal)).resolves.toMatchObject({
+        sites: [{ id: 'site-1', status: 'expired' }],
       });
-      await expect(service.getSite('site-1')).resolves.toMatchObject({
+      await expect(service.getSite('site-1', principal)).resolves.toMatchObject({
         id: 'site-1',
-        status: 'active',
+        status: 'expired',
       });
     });
   });

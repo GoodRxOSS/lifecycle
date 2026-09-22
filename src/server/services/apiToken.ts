@@ -27,15 +27,8 @@ import { getLogger } from 'server/lib/logger';
 import { GITHUB_APP_INSTALLATION_ID } from 'shared/config';
 import { paginate, type PaginationMetadata, type PaginationParams } from 'server/lib/paginate';
 
-export const API_TOKEN_SCOPES: ApiTokenScope[] = [
-  'env:read',
-  'env:write',
-  'env:admin',
-  'sites:read',
-  'sites:write',
-  'repos:read',
-  'repos:write',
-];
+import { API_TOKEN_SCOPES } from 'server/lib/apiTokenScopes';
+export { API_TOKEN_SCOPES, scopeSatisfies } from 'server/lib/apiTokenScopes';
 export { API_TOKEN_PATTERN };
 
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
@@ -86,6 +79,7 @@ export interface IssueTokenInput {
 }
 
 export interface UserTokenOwner {
+  issuer?: string | null;
   userId: string;
   githubUsername: string | null;
   email: string | null;
@@ -104,17 +98,6 @@ export interface IssueUserTokenInput {
 }
 
 export type OwnerSelectorField = 'ownerUserId' | 'ownerEmail' | 'ownerPreferredUsername';
-
-/** write ⊃ read within one resource; legacy env:admin covers env:* only; never cross-resource. */
-export function scopeSatisfies(granted: ApiTokenScope[], required: ApiTokenScope): boolean {
-  return granted.some((scope) => {
-    if (!API_TOKEN_SCOPES.includes(scope)) return false;
-    if (scope === required) return true;
-    if (scope === 'env:admin') return required === 'env:read' || required === 'env:write';
-    const [resource, action] = scope.split(':');
-    return action === 'write' && required === `${resource}:read`;
-  });
-}
 
 /** SECURITY: only a null/undefined allowlist is unrestricted; an explicit empty one fails closed. */
 export function isRepositoryAllowed(allowlist: string[] | null | undefined, fullName: string): boolean {
@@ -605,6 +588,7 @@ export default class ApiTokenService {
         expiresAt: input.expiresAt,
         createdBy: input.owner.userId,
         ownerUserId: input.owner.userId,
+        ownerIssuer: input.owner.issuer ?? null,
         ownerGithubUsername: input.owner.githubUsername,
         ownerEmail: input.owner.email ? input.owner.email.trim().toLowerCase() : null,
         ownerPreferredUsername: input.owner.preferredUsername

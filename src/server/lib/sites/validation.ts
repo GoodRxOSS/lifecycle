@@ -79,6 +79,9 @@ function normalizeArchivePath(input: string): string {
     reject('Archive contains a path traversal entry.');
   }
 
+  if (normalized === '_lfc-sites' || normalized.startsWith('_lfc-sites/')) {
+    reject('The _lfc-sites path is reserved for site authentication.');
+  }
   return normalized;
 }
 

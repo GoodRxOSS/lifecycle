@@ -17,8 +17,8 @@
 import { NextRequest } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
 import type { Principal } from 'server/lib/principal';
-import { successResponse } from 'server/lib/response';
-import { sitesErrorResponse } from 'server/lib/sites/routeHelpers';
+import { sitesSuccessResponse as successResponse } from 'server/lib/sites/routeHelpers';
+import { readSiteRevision, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
 import SitesService from 'server/services/sites';
 
 type RouteContext = {
@@ -71,6 +71,10 @@ type RouteContext = {
  *         required: true
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: expectedAccessRevision
+ *         required: false
+ *         schema: { type: integer, minimum: 1, maximum: 2147483647 }
  *     responses:
  *       '200':
  *         description: Hosted static site deleted.
@@ -85,22 +89,26 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  */
-const getHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
+const getHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.getSite(routeParams.siteId);
+    const site = await service.getSite(routeParams.siteId, principal);
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);
   }
 };
 
-const deleteHandler = async (req: NextRequest, _principal: Principal, { params }: RouteContext) => {
+const deleteHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
     const service = new SitesService();
-    const site = await service.deleteSite(routeParams.siteId);
+    const site = await service.deleteSite(
+      routeParams.siteId,
+      principal,
+      readSiteRevision(req.nextUrl.searchParams.get('expectedAccessRevision'))
+    );
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {
     return sitesErrorResponse(error, req);

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Initialize Next's Node globals before server helpers import next/server or next/headers.
+import 'next/dist/server/node-environment';
 import 'module-alias/register';
 import { join } from 'path';
 import moduleAlias from 'module-alias';
@@ -40,6 +42,7 @@ import { handleMcpHttpRequest as mcpHttpRequestHandler } from './src/server/mcp/
 import { createLifecycleMcpRegistry } from './src/server/mcp/tools';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
+import { handleSitesRequest } from './src/server/lib/sites/gateway';
 import {
   serializeSocketHttpResponse,
   EDITOR_PROXY_TIMEOUT_MS,
@@ -1230,7 +1233,7 @@ async function handleChatPreviewHttp(
   }
 }
 
-async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse, pathname: string) {
+async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse) {
   if (LIFECYCLE_MODE !== 'gateway' && LIFECYCLE_MODE !== 'all') {
     return false;
   }
@@ -1240,45 +1243,8 @@ async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse,
     return false;
   }
 
-  if (!req.method || !['GET', 'HEAD'].includes(req.method.toUpperCase())) {
-    res.statusCode = 404;
-    res.end('not found');
-    return true;
-  }
-
-  try {
-    const object = await service.getGatewayObject(req.headers.host, pathname);
-
-    res.statusCode = object.statusCode;
-    res.setHeader('Content-Type', object.contentType);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, max-age=60');
-    if (object.contentLength !== undefined) {
-      res.setHeader('Content-Length', object.contentLength.toString());
-    }
-
-    if (req.method.toUpperCase() === 'HEAD') {
-      (object.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-      res.end();
-      return true;
-    }
-
-    object.body.on('error', (error) => {
-      logger.error({ error, path: pathname }, 'SitesGateway: stream failed');
-      if (!res.headersSent) {
-        res.statusCode = 502;
-      }
-      res.end();
-    });
-    object.body.pipe(res);
-    return true;
-  } catch (error: any) {
-    const statusCode = typeof error?.statusCode === 'number' ? error.statusCode : 500;
-    logger.warn({ error, path: pathname, statusCode }, 'SitesGateway: request failed');
-    res.statusCode = statusCode === 404 ? 404 : 500;
-    res.end(statusCode === 404 ? 'not found' : 'internal server error');
-    return true;
-  }
+  await handleSitesRequest(req, res, service);
+  return true;
 }
 
 app.prepare().then(() => {
@@ -1306,7 +1272,7 @@ app.prepare().then(() => {
         res.end('Preview is unavailable');
         return;
       }
-      if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res, parsedUrl.pathname))) {
+      if (parsedUrl.pathname && (await handleSitesGatewayHttp(req, res))) {
         return;
       }
       if (handleMcpHttpRequest && (await handleMcpHttpRequest(req, res, parsedUrl.pathname))) {

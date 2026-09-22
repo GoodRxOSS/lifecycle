@@ -24,7 +24,13 @@ export type V2RoutePolicyEntry =
   | { method: V2HttpMethod; route: string; policy: 'public' }
   | { method: V2HttpMethod; route: string; policy: 'session'; roles?: readonly ['admin'] }
   /* scope null = any authenticated principal, reserved for pure functions with no data access */
-  | { method: V2HttpMethod; route: string; policy: 'principal'; scope: V2KeyScope | null };
+  | {
+      method: V2HttpMethod;
+      route: string;
+      policy: 'principal';
+      scope: V2KeyScope | null;
+      kinds?: readonly ('user' | 'personal_key' | 'service_key')[];
+    };
 
 export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'GET', route: '/api/v2/ai/admin/agent/capabilities', policy: 'session', roles: ['admin'] },
@@ -250,6 +256,10 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'POST', route: '/api/v2/repositories', policy: 'principal', scope: 'repos:write' },
   { method: 'DELETE', route: '/api/v2/repositories/{fullName+}', policy: 'principal', scope: 'repos:write' },
   { method: 'GET', route: '/api/v2/schema/validate', policy: 'principal', scope: 'repos:read' },
+  { method: 'POST', route: '/api/v2/sites/browser/mint', policy: 'principal', scope: 'sites:read', kinds: ['user'] },
+  { method: 'GET', route: '/api/v2/sites/browser/open/{siteId}', policy: 'public' },
+  { method: 'GET', route: '/api/v2/sites/capabilities', policy: 'principal', scope: 'sites:read' },
+  { method: 'PATCH', route: '/api/v2/sites/{siteId}/access', policy: 'principal', scope: 'sites:write' },
   { method: 'GET', route: '/api/v2/sites', policy: 'principal', scope: 'sites:read' },
   { method: 'POST', route: '/api/v2/sites', policy: 'principal', scope: 'sites:write' },
   { method: 'DELETE', route: '/api/v2/sites/{siteId}', policy: 'principal', scope: 'sites:write' },

@@ -17,6 +17,26 @@
 import { Readable } from 'stream';
 
 const mockGetAllConfigs = jest.fn();
+const mockTokenState = { id: 7, kind: 'service', scopes: ['sites:write'], revokedAt: null as string | null };
+jest.mock('server/models/ApiToken', () => ({
+  __esModule: true,
+  default: {
+    query: () => ({
+      findById: (id: number) => ({
+        forShare() {
+          return this;
+        },
+        then(resolve: (v: unknown) => unknown) {
+          return Promise.resolve(id === mockTokenState.id ? mockTokenState : undefined).then(resolve);
+        },
+      }),
+    }),
+  },
+}));
+const mockAudit = jest.fn<Promise<void>, unknown[]>(async () => undefined);
+jest.mock('server/services/authAudit', () => ({
+  recordAuthAuditEventInTransaction: (...args: unknown[]) => mockAudit(...args),
+}));
 const mockPutFiles = jest.fn();
 const mockDeletePrefix = jest.fn();
 const mockGetObject = jest.fn();
@@ -68,6 +88,7 @@ jest.mock('server/services/globalConfig', () => ({
   default: {
     getInstance: jest.fn(() => ({
       getAllConfigs: (...args: unknown[]) => mockGetAllConfigs(...args),
+      getConfig: async () => ({ personalAuthEnabled: true, serviceAuthEnabled: true }),
     })),
   },
 }));
@@ -97,11 +118,52 @@ jest.mock('server/lib/sites/validation', () => {
   };
 });
 
+import type { Principal } from 'server/lib/principal';
+const principal: Principal = {
+  kind: 'user',
+  authMethod: 'session',
+  userId: 'owner',
+  issuer: 'https://identity.example/realms/lifecycle',
+  actor: 'owner',
+  roles: ['user'],
+  scopes: null,
+  tokenId: null,
+  repositoryAllowlist: null,
+  repositoryAllowlistRepoIds: null,
+  identity: null,
+  oauth: { sessionId: 'session', tokenId: 'jwt', clientId: 'cli', expiresAt: 1e12 },
+};
+jest.mock('server/services/keycloak/principalStatus', () => ({
+  getUserStatus: jest.fn(async () => 'active'),
+  getUserSessionStatus: jest.fn(async () => 'active'),
+  getOAuthTokenStatus: jest.fn(async () => 'active'),
+}));
+jest.mock('server/lib/verifiedOAuthBearer', () => ({ getVerifiedOAuthBearer: jest.fn(() => 'fixture-bearer') }));
+jest.mock('server/lib/sites/browserAuth', () => ({
+  ...jest.requireActual('server/lib/sites/browserAuth'),
+}));
+const originalSitesEnv = { ...process.env };
+beforeEach(() => {
+  process.env.ENABLE_AUTH = 'true';
+  process.env.KEYCLOAK_ISSUER = principal.issuer!;
+  process.env.LIFECYCLE_UI_URL = 'https://lifecycle.example.net';
+});
+afterEach(() => {
+  process.env = { ...originalSitesEnv };
+});
+
 import SitesService, { SitesServiceError } from 'server/services/sites';
 import { SitesObjectNotFoundError } from 'server/lib/sites/storage';
 import { SiteUploadValidationError } from 'server/lib/sites/validation';
 
 type SiteData = {
+  visibility: 'private' | 'public';
+  ownerKind: 'user' | 'service_key' | 'unresolved';
+  ownerIssuer: string | null;
+  ownerSubject: string | null;
+  creatorTokenId: number | null;
+  accessRevision: number;
+  contentRevision: number;
   siteId: string;
   name: string;
   status: string;
@@ -131,7 +193,7 @@ type VersionData = {
   deletedAt: string | null;
 };
 
-type VersionRow = VersionData;
+type VersionRow = VersionData & { $query: jest.Mock };
 
 type FakeState = {
   sites: SiteRow[];
@@ -169,6 +231,13 @@ function attachSite(state: FakeState, data: SiteData): SiteRow {
 
 function addSite(state: FakeState, overrides: Partial<SiteData> = {}): SiteRow {
   const row = attachSite(state, {
+    visibility: 'public',
+    ownerKind: 'user',
+    ownerIssuer: principal.issuer!,
+    ownerSubject: principal.userId,
+    creatorTokenId: null,
+    accessRevision: 1,
+    contentRevision: 1,
     siteId: 'site-1',
     name: 'site',
     status: 'active',
@@ -199,8 +268,15 @@ function addVersion(state: FakeState, overrides: Partial<VersionData> = {}): Ver
     deletedAt: null,
     ...overrides,
   };
-  state.versions.push(version);
-  return version;
+  const row = version as VersionRow;
+  row.$query = jest.fn(() => ({
+    patch: async (patch: Partial<VersionData>) => {
+      Object.assign(row, patch);
+      return 1;
+    },
+  }));
+  state.versions.push(row);
+  return row;
 }
 
 class SiteQuery {
@@ -211,6 +287,18 @@ class SiteQuery {
 
   constructor(private readonly state: FakeState) {}
 
+  forUpdate() {
+    return this;
+  }
+  orWhere(scope: Partial<SiteRow>) {
+    const existing = [...this.filters];
+    this.filters = [
+      (row) =>
+        existing.every((f) => f(row)) ||
+        Object.entries(scope).every(([key, value]) => row[key as keyof SiteRow] === value),
+    ];
+    return this;
+  }
   whereNull(field: keyof SiteData) {
     this.filters.push((row) => row[field] == null);
     return this;
@@ -221,7 +309,17 @@ class SiteQuery {
     return this;
   }
 
-  where(scopeOrField: Partial<SiteData> | keyof SiteData, operationOrValue?: unknown, expectedValue?: unknown) {
+  where(
+    scopeOrField: Partial<SiteData> | keyof SiteData | ((query: SiteQuery) => unknown),
+    operationOrValue?: unknown,
+    expectedValue?: unknown
+  ) {
+    if (typeof scopeOrField === 'function') {
+      const group = new SiteQuery(this.state);
+      scopeOrField(group);
+      this.filters.push((row) => group.filters.every((f) => f(row)));
+      return this;
+    }
     if (typeof scopeOrField === 'object') {
       this.filters.push((row) =>
         Object.entries(scopeOrField).every(([key, value]) => row[key as keyof SiteData] === value)
@@ -251,7 +349,7 @@ class SiteQuery {
   }
 
   orderBy(field: keyof SiteData, direction: string) {
-    this.sortBy = { field, direction };
+    if (!this.sortBy) this.sortBy = { field, direction };
     return this;
   }
 
@@ -266,6 +364,11 @@ class SiteQuery {
     return { results: rows.slice(start, start + pageSize), total: rows.length };
   }
 
+  async patch(patch: Partial<SiteData>) {
+    const rows = this.filteredRows();
+    rows.forEach((row) => Object.assign(row, patch));
+    return rows.length;
+  }
   async insert(input: Partial<SiteData>) {
     if (this.state.siteInsertError) throw this.state.siteInsertError;
     return addSite(this.state, {
@@ -300,18 +403,40 @@ class VersionQuery {
 
   constructor(private readonly state: FakeState) {}
 
+  whereRaw() {
+    this.filters.push((version) => {
+      const site = this.state.sites.find((site) => site.siteId === version.siteId);
+      return Boolean(
+        site && (['deleted', 'expired'].includes(site.status) || site.activeVersionId !== version.versionId)
+      );
+    });
+    return this;
+  }
+  join() {
+    return this;
+  }
+  select() {
+    return this;
+  }
+  limit() {
+    return this;
+  }
   where(scope: Partial<VersionData>) {
     this.filters.push((row) => Object.entries(scope).every(([key, value]) => row[key as keyof VersionData] === value));
     return this;
   }
 
-  whereNull(field: keyof VersionData) {
-    this.filters.push((row) => row[field] == null);
+  whereNull(field: keyof VersionData | 'site_versions.deletedAt') {
+    this.filters.push((row) => row[field === 'site_versions.deletedAt' ? 'deletedAt' : field] == null);
     return this;
   }
 
-  whereIn(field: keyof VersionData, values: unknown[]) {
-    this.filters.push((row) => values.includes(row[field]));
+  whereIn(field: keyof VersionData | 'sites.status', values: unknown[]) {
+    this.filters.push((row) =>
+      values.includes(
+        field === 'sites.status' ? this.state.sites.find((site) => site.siteId === row.siteId)?.status : row[field]
+      )
+    );
     return this;
   }
 
@@ -397,6 +522,8 @@ describe('SitesService behavior', () => {
 
   beforeEach(() => {
     state = { sites: [], versions: [] };
+    mockAudit.mockReset().mockResolvedValue(undefined);
+    mockTokenState.revokedAt = null;
     database = createDatabase(state);
     queueAdd = jest.fn();
     queueManager = { registerQueue: jest.fn(() => ({ add: queueAdd })) };
@@ -430,7 +557,9 @@ describe('SitesService behavior', () => {
   it('fails closed when Sites is disabled without touching validation, storage, or the database', async () => {
     mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
 
-    await expect(service.createSite({ fileName: 'index.html', content: Buffer.from('site') })).rejects.toMatchObject({
+    await expect(
+      service.createSite({ principal, visibility: 'public', fileName: 'index.html', content: Buffer.from('site') })
+    ).rejects.toMatchObject({
       message: 'Sites hosting is disabled.',
       statusCode: 404,
     });
@@ -445,12 +574,14 @@ describe('SitesService behavior', () => {
 
       await expect(
         service.createSite({
+          principal: { ...principal, identity: { email: 'author@example.com' } as any },
+          visibility: 'public',
           fileName: 'docs.html',
           content: Buffer.from('source upload'),
           name: '  Product docs  ',
           user: { email: 'author@example.com' } as any,
         })
-      ).resolves.toEqual({
+      ).resolves.toMatchObject({
         id: 'site000001',
         name: 'Product docs',
         url: 'https://site-site000001.sites.example.com',
@@ -502,6 +633,8 @@ describe('SitesService behavior', () => {
       enabledConfig({ ttl: { enabled: false } });
 
       const result = await service.createSite({
+        principal,
+        visibility: 'public',
         fileName: 'index.html',
         content: Buffer.from('site'),
         name: '   ',
@@ -522,7 +655,9 @@ describe('SitesService behavior', () => {
         throw new SiteUploadValidationError('Only HTML uploads are supported.');
       });
 
-      await expect(service.createSite({ fileName: 'site.exe', content: Buffer.from('bad') })).rejects.toMatchObject({
+      await expect(
+        service.createSite({ principal, visibility: 'public', fileName: 'site.exe', content: Buffer.from('bad') })
+      ).rejects.toMatchObject({
         message: 'Only HTML uploads are supported.',
         statusCode: 400,
       });
@@ -536,9 +671,9 @@ describe('SitesService behavior', () => {
         throw unexpected;
       });
 
-      await expect(service.createSite({ fileName: 'site.html', content: Buffer.from('site') })).rejects.toBe(
-        unexpected
-      );
+      await expect(
+        service.createSite({ principal, visibility: 'public', fileName: 'site.html', content: Buffer.from('site') })
+      ).rejects.toBe(unexpected);
       expect(database.models.Site.transact).not.toHaveBeenCalled();
     });
 
@@ -546,9 +681,9 @@ describe('SitesService behavior', () => {
       const insertError = new Error('version insert failed');
       state.versionInsertError = insertError;
 
-      await expect(service.createSite({ fileName: 'site.html', content: Buffer.from('site') })).rejects.toBe(
-        insertError
-      );
+      await expect(
+        service.createSite({ principal, visibility: 'public', fileName: 'site.html', content: Buffer.from('site') })
+      ).rejects.toBe(insertError);
 
       expect(mockDeletePrefix).toHaveBeenCalledWith('sites/site000001/versions/version00001');
       expect(state.sites).toEqual([]);
@@ -561,9 +696,9 @@ describe('SitesService behavior', () => {
       mockPutFiles.mockRejectedValueOnce(uploadError);
       mockDeletePrefix.mockRejectedValueOnce(cleanupError);
 
-      await expect(service.createSite({ fileName: 'site.html', content: Buffer.from('site') })).rejects.toBe(
-        uploadError
-      );
+      await expect(
+        service.createSite({ principal, visibility: 'public', fileName: 'site.html', content: Buffer.from('site') })
+      ).rejects.toBe(uploadError);
 
       expect(state.sites).toEqual([]);
       expect(mockWarn).toHaveBeenCalledWith(
@@ -579,8 +714,8 @@ describe('SitesService behavior', () => {
         addSite(state, { siteId: `site-${String(index).padStart(3, '0')}`, updatedAt: `2026-06-${index}` });
       }
 
-      const defaults = await service.listSites({ page: Number.NaN, limit: -1 });
-      const capped = await service.listSites({ page: 1.9, limit: 101.8 });
+      const defaults = await service.listSites({ page: Number.NaN, limit: -1 }, principal);
+      const capped = await service.listSites({ page: 1.9, limit: 101.8 }, principal);
 
       expect(defaults.pagination).toEqual({ current: 1, total: 5, items: 105, limit: 25 });
       expect(defaults.sites).toHaveLength(25);
@@ -600,7 +735,7 @@ describe('SitesService behavior', () => {
         updatedBy: '',
       });
 
-      await expect(service.getSite('site-nullables')).resolves.toEqual({
+      await expect(service.getSite('site-nullables', principal)).resolves.toMatchObject({
         id: 'site-nullables',
         name: 'Nullable row',
         url: 'https://site-site-nullables.sites.example.com',
@@ -618,20 +753,29 @@ describe('SitesService behavior', () => {
     it('returns not found for a missing or soft-deleted site', async () => {
       addSite(state, { siteId: 'deleted', deletedAt: UPDATED_AT });
 
-      await expect(service.getSite('missing')).rejects.toMatchObject({ message: 'Site not found.', statusCode: 404 });
-      await expect(service.getSite('deleted')).rejects.toMatchObject({ message: 'Site not found.', statusCode: 404 });
+      await expect(service.getSite('missing', principal)).rejects.toMatchObject({
+        message: 'Site not found.',
+        statusCode: 404,
+      });
+      await expect(service.getSite('deleted', principal)).rejects.toMatchObject({
+        message: 'Site not found.',
+        statusCode: 404,
+      });
     });
 
     it('does not classify an invalid expiry timestamp as elapsed', async () => {
       addSite(state, { expiresAt: 'not-a-date' });
 
-      await expect(service.getSite('site-1')).resolves.toMatchObject({ status: 'active', expiresAt: 'not-a-date' });
+      await expect(service.getSite('site-1', principal)).resolves.toMatchObject({
+        status: 'active',
+        expiresAt: 'not-a-date',
+      });
     });
 
     it('reports zero counters for a new empty site record', async () => {
       addSite(state, { fileCount: 0, sizeBytes: 0 });
 
-      await expect(service.getSite('site-1')).resolves.toMatchObject({ fileCount: 0, sizeBytes: 0 });
+      await expect(service.getSite('site-1', principal)).resolves.toMatchObject({ fileCount: 0, sizeBytes: 0 });
     });
   });
 
@@ -645,7 +789,7 @@ describe('SitesService behavior', () => {
       if (overrides) addSite(state, overrides);
 
       await expect(
-        service.replaceSiteContent('site-1', { fileName: 'site.html', content: Buffer.from('site') })
+        service.replaceSiteContent('site-1', { principal, fileName: 'site.html', content: Buffer.from('site') })
       ).rejects.toMatchObject({ message: 'Site not found.', statusCode: 404 });
       expect(mockValidateSiteUpload).not.toHaveBeenCalled();
       expect(mockPutFiles).not.toHaveBeenCalled();
@@ -661,6 +805,7 @@ describe('SitesService behavior', () => {
       });
 
       const result = await service.replaceSiteContent('site-1', {
+        principal,
         fileName: 'replacement.html',
         content: Buffer.from('replacement'),
       });
@@ -669,7 +814,7 @@ describe('SitesService behavior', () => {
         id: 'site-1',
         fileCount: 1,
         sizeBytes: 14,
-        updatedBy: 'previous@example.com',
+        updatedBy: null,
       });
       expect(site.activeVersionId).toBe('version00001');
       expect(state.versions.find((version) => version.versionId === 'old-1')?.deletedAt).toEqual(expect.any(String));
@@ -689,9 +834,9 @@ describe('SitesService behavior', () => {
       addSite(state, { updatedBy: null });
 
       const result = await service.replaceSiteContent('site-1', {
+        principal: { ...principal, identity: { email: 'editor@example.com' } as any },
         fileName: 'replacement.html',
         content: Buffer.from('replacement'),
-        user: { email: 'editor@example.com' } as any,
       });
 
       expect(result.updatedBy).toBe('editor@example.com');
@@ -702,6 +847,7 @@ describe('SitesService behavior', () => {
       addSite(state, { updatedBy: null });
 
       const result = await service.replaceSiteContent('site-1', {
+        principal,
         fileName: 'replacement.html',
         content: Buffer.from('replacement'),
       });
@@ -718,7 +864,11 @@ describe('SitesService behavior', () => {
       state.sitePatchAndFetchError = patchError;
 
       await expect(
-        service.replaceSiteContent('site-1', { fileName: 'replacement.html', content: Buffer.from('replacement') })
+        service.replaceSiteContent('site-1', {
+          principal,
+          fileName: 'replacement.html',
+          content: Buffer.from('replacement'),
+        })
       ).rejects.toBe(patchError);
 
       expect(mockDeletePrefix).toHaveBeenCalledWith('sites/site-1/versions/version00001');
@@ -736,7 +886,7 @@ describe('SitesService behavior', () => {
       const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-06-10T00:00:00.000Z'));
       addSite(state, { expiresAt: '2026-06-20T00:00:00.000Z' });
 
-      const result = await service.extendSite('site-1');
+      const result = await service.extendSite('site-1', principal);
 
       expect(result.expiresAt).toBe('2026-06-27T00:00:00.000Z');
       expect(state.sites[0].expiresAt).toBe('2026-06-27T00:00:00.000Z');
@@ -747,7 +897,7 @@ describe('SitesService behavior', () => {
       const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-06-10T00:00:00.000Z'));
       addSite(state, { expiresAt: null });
 
-      await expect(service.extendSite('site-1')).resolves.toMatchObject({
+      await expect(service.extendSite('site-1', principal)).resolves.toMatchObject({
         expiresAt: '2026-06-17T00:00:00.000Z',
       });
       now.mockRestore();
@@ -757,7 +907,7 @@ describe('SitesService behavior', () => {
       enabledConfig({ ttl: { enabled: false } });
       addSite(state, { expiresAt: null });
 
-      await expect(service.extendSite('site-1')).rejects.toMatchObject({
+      await expect(service.extendSite('site-1', principal)).rejects.toMatchObject({
         message: 'TTL is disabled for hosted sites.',
         statusCode: 400,
       });
@@ -765,40 +915,38 @@ describe('SitesService behavior', () => {
   });
 
   describe('deleteSite', () => {
-    it('deletes stored versions before atomically soft-deleting site records', async () => {
+    it('tombstones the site before cleaning remaining versions', async () => {
       addSite(state);
       addVersion(state, { versionId: 'version-1', storagePrefix: 'prefix/version-1' });
       addVersion(state, { versionId: 'version-2', storagePrefix: 'prefix/version-2', deletedAt: CREATED_AT });
 
-      const result = await service.deleteSite('site-1');
+      const result = await service.deleteSite('site-1', principal);
 
-      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/version-1'], ['prefix/version-2']]);
+      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/version-1']]);
       expect(result).toMatchObject({ id: 'site-1', status: 'deleted' });
       expect(state.sites[0]).toMatchObject({ status: 'deleted', deletedAt: expect.any(String) });
-      expect(state.versions[0].deletedAt).toBe(state.sites[0].deletedAt);
+      expect(state.versions[0].deletedAt).not.toBeNull();
       expect(state.versions[1].deletedAt).toBe(CREATED_AT);
     });
 
     it('returns not found without touching storage for an unknown site', async () => {
-      await expect(service.deleteSite('missing')).rejects.toMatchObject({
+      await expect(service.deleteSite('missing', principal)).rejects.toMatchObject({
         message: 'Site not found.',
         statusCode: 404,
       });
       expect(mockDeletePrefix).not.toHaveBeenCalled();
-      expect(database.models.Site.transact).not.toHaveBeenCalled();
     });
 
-    it('does not mark database rows deleted when object cleanup fails', async () => {
+    it('keeps access tombstoned and leaves storage for retry when cleanup fails', async () => {
       const site = addSite(state);
       const version = addVersion(state, { storagePrefix: 'prefix/version-1' });
       const deleteError = new Error('delete failed');
       mockDeletePrefix.mockRejectedValueOnce(deleteError);
 
-      await expect(service.deleteSite('site-1')).rejects.toBe(deleteError);
-      expect(site.status).toBe('active');
-      expect(site.deletedAt).toBeNull();
+      await expect(service.deleteSite('site-1', principal)).resolves.toMatchObject({ status: 'deleted' });
+      expect(site.status).toBe('deleted');
+      expect(site.deletedAt).not.toBeNull();
       expect(version.deletedAt).toBeNull();
-      expect(database.models.Site.transact).not.toHaveBeenCalled();
     });
   });
 
@@ -912,9 +1060,9 @@ describe('SitesService behavior', () => {
       await expect(service.getGatewayObject('site-site-1.sites.example.com', '/index.html')).rejects.toBe(outage);
     });
 
-    it('matches only configured gateway hosts while Sites is enabled', async () => {
+    it('intercepts the configured namespace, including unknown hosts', async () => {
       await expect(service.matchesGatewayHost('site-abc123.sites.example.com')).resolves.toBe(true);
-      await expect(service.matchesGatewayHost('other-abc123.sites.example.com')).resolves.toBe(false);
+      await expect(service.matchesGatewayHost('other-abc123.sites.example.com')).resolves.toBe(true);
       await expect(service.matchesGatewayHost(undefined)).resolves.toBe(false);
 
       mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
@@ -925,7 +1073,6 @@ describe('SitesService behavior', () => {
   describe('expiration cleanup', () => {
     it.each([
       ['Sites is disabled', { enabled: false }],
-      ['TTL is disabled', { enabled: true, ttl: { enabled: false } }],
       ['cleanup is disabled', { enabled: true, ttl: { enabled: true }, cleanup: { enabled: false } }],
     ])('does no work when %s', async (_case, sites) => {
       mockGetAllConfigs.mockResolvedValue({ sites });
@@ -969,13 +1116,25 @@ describe('SitesService behavior', () => {
       await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 2, cleaned: 1, errors: 1 });
       expect(cleanedSite).toMatchObject({ status: 'expired', deletedAt: '2026-06-10T00:00:00.000Z' });
       expect(cleanedVersion.deletedAt).toBe('2026-06-10T00:00:00.000Z');
-      expect(failedSite).toMatchObject({ status: 'active', deletedAt: null });
+      expect(failedSite).toMatchObject({ status: 'expired', deletedAt: '2026-06-10T00:00:00.000Z' });
       expect(failedVersion.deletedAt).toBeNull();
-      expect(mockError).toHaveBeenCalledWith(
+      expect(mockWarn).toHaveBeenCalledWith(
         { error: cleanupError, siteId: 'expired-failed' },
-        'Sites: cleanup failed'
+        'Sites: terminal storage cleanup deferred'
       );
       toISOString.mockRestore();
+    });
+
+    it('retries superseded storage cleanup even while the active site has no expiry', async () => {
+      enabledConfig({ ttl: { enabled: false } });
+      addSite(state);
+      addVersion(state);
+      mockDeletePrefix.mockRejectedValueOnce(new Error('storage unavailable'));
+      await service.replaceSiteContent('site-1', { principal, fileName: 'index.html', content: Buffer.from('new') });
+      expect(state.versions[0].deletedAt).toBeNull();
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, cleaned: 1, errors: 0 });
+      expect(state.versions[0].deletedAt).not.toBeNull();
+      expect(state.versions[1].deletedAt).toBeNull();
     });
 
     it('returns zero counts when no active site has elapsed', async () => {
@@ -983,6 +1142,285 @@ describe('SitesService behavior', () => {
 
       await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, cleaned: 0, errors: 0 });
       expect(mockDeletePrefix).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('V1 access enforcement', () => {
+    const stranger = { ...principal, userId: 'stranger', actor: 'stranger', roles: ['admin'] } as Principal;
+    it('creates user sites private by default with stable issuer ownership', async () => {
+      const result = await service.createSite({ principal, fileName: 'index.html', content: Buffer.from('site') });
+      expect(result).toMatchObject({
+        visibility: 'private',
+        currentRole: 'owner',
+        accessRevision: 1,
+        contentRevision: 1,
+        permissions: { canEdit: true },
+      });
+      expect(result.url).toBe('https://site-site000001.sites.example.com');
+      expect(result.openUrl).toBe('https://lifecycle.example.net/sites/open/site000001');
+      expect(state.sites[0]).toMatchObject({ ownerKind: 'user', ownerSubject: 'owner', ownerIssuer: principal.issuer });
+    });
+    it('creates public service-key sites and binds writes to that token only', async () => {
+      const machine = {
+        ...principal,
+        kind: 'service_key',
+        userId: null,
+        issuer: null,
+        tokenId: 7,
+        scopes: ['sites:write'],
+      } as Principal;
+      const result = await service.createSite({
+        principal: machine,
+        fileName: 'index.html',
+        content: Buffer.from('site'),
+      });
+      expect(result).toMatchObject({
+        visibility: 'public',
+        currentRole: 'owner',
+        permissions: { canEdit: true, canChangeVisibility: false },
+      });
+      expect(state.sites[0]).toMatchObject({
+        ownerKind: 'service_key',
+        creatorTokenId: 7,
+        ownerSubject: null,
+        ownerIssuer: null,
+      });
+      await expect(service.deleteSite(result.id, principal)).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(
+        service.createSite({
+          principal: machine,
+          visibility: 'private',
+          fileName: 'index.html',
+          content: Buffer.from('site'),
+        })
+      ).rejects.toMatchObject({ statusCode: 400 });
+    });
+    it('does not commit a machine upload if its token was revoked during storage staging', async () => {
+      const machine = {
+        ...principal,
+        kind: 'service_key',
+        userId: null,
+        issuer: null,
+        tokenId: 7,
+        scopes: ['sites:write'],
+      } as Principal;
+      mockPutFiles.mockImplementationOnce(async () => {
+        mockTokenState.revokedAt = new Date().toISOString();
+      });
+      await expect(
+        service.createSite({ principal: machine, fileName: 'index.html', content: Buffer.from('site') })
+      ).rejects.toMatchObject({ code: 'invalid_credential' });
+      expect(state.sites).toHaveLength(0);
+      expect(mockDeletePrefix).toHaveBeenCalled();
+    });
+    it('commits visibility audit with the mutation and rolls back if auditing fails', async () => {
+      addSite(state);
+      mockAudit.mockRejectedValueOnce(new Error('audit unavailable'));
+      await expect(service.setVisibility('site-1', 'private', principal, 1)).rejects.toThrow('audit unavailable');
+      expect(state.sites[0].visibility).toBe('public');
+      await service.setVisibility('site-1', 'private', principal, 1);
+      expect(mockAudit).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          event: 'sites.visibility_changed',
+          meta: expect.objectContaining({ siteId: 'site-1', from: 'public', to: 'private' }),
+        })
+      );
+    });
+    it('advertises no uploads while the existing Sites setting is disabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
+      await expect(service.getCapabilities(principal)).resolves.toMatchObject({
+        defaultVisibility: 'private',
+        canCreate: false,
+        allowedVisibilities: [],
+      });
+    });
+    it('denies public and private gateway reads when the existing Sites setting is disabled', async () => {
+      addSite(state, { siteId: 'private', visibility: 'private' });
+      addSite(state, { siteId: 'public', visibility: 'public' });
+      mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false, domain: 'sites.example.com' } });
+      for (const id of ['private', 'public']) {
+        const host = `site-${id}.sites.example.com`;
+        await expect(service.getGatewaySite(host)).rejects.toMatchObject({ statusCode: 404 });
+        await expect(service.getGatewayLocator(host)).rejects.toMatchObject({ statusCode: 404 });
+        await expect(service.getGatewayObject(host, '/index.html', async () => {})).rejects.toMatchObject({
+          statusCode: 404,
+        });
+      }
+      expect(mockGetObject).not.toHaveBeenCalled();
+    });
+    it('resolves valid missing host locators without a database Site for the anonymous bootstrap', async () => {
+      await expect(service.getGatewayLocator('site-missing.sites.example.com')).resolves.toEqual({ siteId: 'missing' });
+      await expect(service.getGatewayLocator('site-missing.sites.example.com:443')).resolves.toEqual({
+        siteId: 'missing',
+      });
+      await expect(service.getGatewayLocator('site-missing--g-abcdef012345.sites.example.com')).rejects.toMatchObject({
+        statusCode: 404,
+      });
+      await expect(service.getGatewayLocator('site-missing.sites.example.com:9443')).rejects.toMatchObject({
+        statusCode: 404,
+      });
+      await expect(service.getGatewayLocator('site-missing.other.example.com')).rejects.toMatchObject({
+        statusCode: 404,
+      });
+    });
+    it.each([undefined, 'public'] as const)(
+      'refuses human creation (%s) before storage if the existing Sites setting is disabled',
+      async (visibility) => {
+        mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
+        await expect(
+          service.createSite({ principal, visibility, fileName: 'index.html', content: Buffer.from('site') })
+        ).rejects.toMatchObject({ statusCode: 404 });
+        expect(mockPutFiles).not.toHaveBeenCalled();
+      }
+    );
+    it('gives a nonowner a distinct deletion error for a private Site versus a missing one', async () => {
+      addSite(state, { visibility: 'private', ownerSubject: 'other' });
+      const errors = [];
+      for (const id of ['site-1', 'missing']) {
+        try {
+          await service.deleteSite(id, principal, 1);
+        } catch (error) {
+          errors.push({
+            message: (error as Error).message,
+            code: (error as { code?: string }).code,
+            status: (error as { httpStatus?: number }).httpStatus,
+          });
+        }
+      }
+      expect(errors).toEqual([
+        { message: 'You do not have access to this Site.', code: 'site_access_denied', status: 403 },
+        { message: 'Site not found.', code: 'site_not_found', status: 404 },
+      ]);
+    });
+    it('filters unauthorized private rows before page totals and shows public creator attribution', async () => {
+      addSite(state, { siteId: 'secret', visibility: 'private', ownerSubject: 'other' });
+      addSite(state, { siteId: 'public', ownerSubject: 'other', createdBy: 'private-email@example.com' });
+      addSite(state, { siteId: 'mine', visibility: 'private' });
+      const result = await service.listSites({}, principal);
+      expect(result.pagination.items).toBe(2);
+      expect(result.sites.map((site) => site.id).sort()).toEqual(['mine', 'public']);
+      expect(result.sites.find((site) => site.id === 'public')).toMatchObject({
+        createdBy: 'private-email@example.com',
+        updatedBy: null,
+        currentRole: null,
+        permissions: { canEdit: false },
+      });
+      const mine = await service.listSites({ view: 'mine' }, principal);
+      expect(mine.sites.map((site) => site.id)).toEqual(['mine']);
+    });
+    it('denies all nonowner mutations including realm admins before storage', async () => {
+      addSite(state, { visibility: 'private' });
+      await expect(service.getSite('site-1', stranger)).rejects.toMatchObject({ statusCode: 403 });
+      await expect(
+        service.replaceSiteContent('site-1', {
+          principal: stranger,
+          fileName: 'index.html',
+          content: Buffer.from('bad'),
+        })
+      ).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.extendSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.setVisibility('site-1', 'public', stranger, 1)).rejects.toMatchObject({ httpStatus: 403 });
+      await expect(service.deleteSite('site-1', stranger)).rejects.toMatchObject({ httpStatus: 403 });
+      expect(mockPutFiles).not.toHaveBeenCalled();
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
+    });
+    it('requires a gateway authorizer for every private object before any storage call', async () => {
+      addSite(state, { visibility: 'private' });
+      addVersion(state);
+      await expect(service.getGatewayObject('site-site-1.sites.example.com', '/')).rejects.toMatchObject({
+        statusCode: 404,
+      });
+      const authorize = jest.fn(async () => {
+        throw new Error('denied');
+      });
+      await expect(service.getGatewayObject('site-site-1.sites.example.com', '/asset.css', authorize)).rejects.toThrow(
+        'denied'
+      );
+      expect(authorize).toHaveBeenCalledTimes(1);
+      expect(mockGetObject).not.toHaveBeenCalled();
+    });
+    it('keeps the content URL and Site ID while changing visibility', async () => {
+      addSite(state);
+      addVersion(state);
+      const hidden = await service.setVisibility('site-1', 'private', principal, 1);
+      expect(hidden.url).toBe('https://site-site-1.sites.example.com');
+      expect(hidden.openUrl).toBe('https://lifecycle.example.net/sites/open/site-1');
+      await expect(service.getGatewaySite('site-site-1.sites.example.com')).resolves.toMatchObject({
+        site: expect.objectContaining({ visibility: 'private' }),
+      });
+      const published = await service.setVisibility('site-1', 'public', principal, 2);
+      expect(published.url).toBe(hidden.url);
+      expect(published.openUrl).toBe(hidden.openUrl);
+    });
+    it('rejects a stale visibility revision without modifying the site', async () => {
+      const row = addSite(state);
+      await expect(service.setVisibility('site-1', 'private', principal, 2)).rejects.toMatchObject({
+        code: 'site_changed',
+      });
+      expect(state.sites[0].visibility).toBe(row.visibility);
+    });
+    it('does not resurrect content deleted while its replacement uploads', async () => {
+      addSite(state);
+      addVersion(state);
+      mockPutFiles.mockImplementationOnce(async () => {
+        await service.deleteSite('site-1', principal);
+      });
+      await expect(
+        service.replaceSiteContent('site-1', { principal, fileName: 'index.html', content: Buffer.from('replacement') })
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(state.sites[0].status).toBe('deleted');
+      expect(mockDeletePrefix).toHaveBeenCalledWith('sites/site-1/versions/version00001');
+    });
+    it('rejects publishing or deleting content replaced since the owner prepared the action', async () => {
+      addSite(state, { visibility: 'private' });
+      addVersion(state);
+      const before = await service.getSite('site-1', principal);
+      const replaced = await service.replaceSiteContent('site-1', {
+        principal,
+        fileName: 'index.html',
+        content: Buffer.from('new private content'),
+        expectedAccessRevision: before.accessRevision,
+        expectedContentRevision: before.contentRevision,
+      });
+      expect(replaced).toMatchObject({ visibility: 'private', accessRevision: 2, contentRevision: 2 });
+      expect(replaced.url).toBe(before.url);
+      await expect(service.setVisibility('site-1', 'public', principal, before.accessRevision)).rejects.toMatchObject({
+        code: 'site_changed',
+      });
+      await expect(service.deleteSite('site-1', principal, before.accessRevision)).rejects.toMatchObject({
+        code: 'site_changed',
+      });
+      expect(state.sites[0]).toMatchObject({ visibility: 'private', status: 'active', deletedAt: null });
+      const published = await service.setVisibility('site-1', 'public', principal, replaced.accessRevision);
+      expect(published).toMatchObject({ visibility: 'public', accessRevision: 3, contentRevision: 2 });
+    });
+    it('rejects replacement when a private site is published during the upload', async () => {
+      addSite(state, { visibility: 'private' });
+      addVersion(state);
+      mockPutFiles.mockImplementationOnce(async () => {
+        await service.setVisibility('site-1', 'public', principal, 1);
+      });
+      await expect(
+        service.replaceSiteContent('site-1', {
+          principal,
+          fileName: 'index.html',
+          content: Buffer.from('private draft'),
+        })
+      ).rejects.toMatchObject({ code: 'site_changed' });
+      expect(state.sites[0]).toMatchObject({ activeVersionId: 'version-1', visibility: 'public', contentRevision: 1 });
+    });
+    it('rejects replacement after visibility changed during upload', async () => {
+      addSite(state);
+      addVersion(state);
+      mockPutFiles.mockImplementationOnce(async () => {
+        await service.setVisibility('site-1', 'private', principal, 1);
+      });
+      await expect(
+        service.replaceSiteContent('site-1', { principal, fileName: 'index.html', content: Buffer.from('replacement') })
+      ).rejects.toMatchObject({ code: 'site_changed' });
+      expect(state.sites[0].activeVersionId).toBe('version-1');
+      expect(state.sites[0].visibility).toBe('private');
     });
   });
 
@@ -997,7 +1435,6 @@ describe('SitesService behavior', () => {
 
     it.each([
       ['Sites is disabled', { enabled: false }],
-      ['TTL is disabled', { enabled: true, ttl: { enabled: false } }],
       ['cleanup is disabled', { enabled: true, ttl: { enabled: true }, cleanup: { enabled: false } }],
     ])('does not schedule when %s', async (_case, sites) => {
       mockGetAllConfigs.mockResolvedValue({ sites });
@@ -1006,6 +1443,12 @@ describe('SitesService behavior', () => {
 
       expect(queueAdd).not.toHaveBeenCalled();
       expect(mockDebug).toHaveBeenCalledWith('Sites: cleanup disabled');
+    });
+
+    it('schedules storage retries even when new sites have no expiry', async () => {
+      enabledConfig({ ttl: { enabled: false } });
+      await service.setupSitesCleanupJob();
+      expect(queueAdd).toHaveBeenCalledWith('sites-cleanup', {}, expect.objectContaining({ jobId: 'sites-cleanup' }));
     });
 
     it('schedules one stable repeating cleanup job at the configured interval', async () => {

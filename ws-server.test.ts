@@ -25,7 +25,7 @@ const mockStreamK8sLogs = jest.fn();
 const mockParseChatPreviewHost = jest.fn();
 const mockResolveChatPreviewSessionForHost = jest.fn();
 const mockMatchesGatewayHost = jest.fn();
-const mockGetGatewayObject = jest.fn();
+const mockHandleSitesRequest = jest.fn();
 const mockAgentSessionGetSession = jest.fn();
 const mockVerifyBearerToken = jest.fn();
 const mockAgentSessionFindOne = jest.fn();
@@ -128,10 +128,10 @@ jest.mock('./src/server/lib/k8sStreamer', () => ({ streamK8sLogs: mockStreamK8sL
 jest.mock('./src/server/services/sites', () => ({
   __esModule: true,
   default: jest.fn(() => ({
-    getGatewayObject: mockGetGatewayObject,
     matchesGatewayHost: mockMatchesGatewayHost,
   })),
 }));
+jest.mock('./src/server/lib/sites/gateway', () => ({ handleSitesRequest: mockHandleSitesRequest }));
 jest.mock('./src/server/lib/agentSession/workspaceEditorProxy', () => ({
   EDITOR_PROXY_PING_INTERVAL_MS: 10_000,
   EDITOR_PROXY_PONG_DEADLINE_MS: 5_000,
@@ -390,7 +390,7 @@ describe('ws-server public dispatch', () => {
     mockParseChatPreviewHost.mockReturnValue(null);
     mockResolveChatPreviewSessionForHost.mockResolvedValue(null);
     mockMatchesGatewayHost.mockResolvedValue(false);
-    mockGetGatewayObject.mockReset();
+    mockHandleSitesRequest.mockResolvedValue(undefined);
     mockHttpRequest.mockReset();
     mockHttpsRequest.mockReset();
     mockLifecycleMode = 'web';
@@ -528,76 +528,15 @@ describe('ws-server public dispatch', () => {
     expect(mockNextHandler).not.toHaveBeenCalled();
   });
 
-  it('serves a gateway HEAD request without forwarding its body or falling through', async () => {
+  it.each(['HEAD', 'GET'])('delegates gateway %s requests without falling through', async (method) => {
     mockLifecycleMode = 'gateway';
     mockMatchesGatewayHost.mockResolvedValue(true);
-    const body = { destroy: jest.fn(), on: jest.fn(), pipe: jest.fn() };
-    mockGetGatewayObject.mockResolvedValue({
-      body,
-      contentLength: 42,
-      contentType: 'text/html; charset=utf-8',
-      statusCode: 200,
-    });
     const handler = await bootServer();
-    const req = { ...request('/docs/index.html'), method: 'HEAD' };
+    const req = { ...request('/docs/index.html'), method };
     const res = response();
-
     await handler(req, res);
-
     expect(mockMatchesGatewayHost).toHaveBeenCalledWith('lifecycle.test');
-    expect(mockGetGatewayObject).toHaveBeenCalledWith('lifecycle.test', '/docs/index.html');
-    expect(res.statusCode).toBe(200);
-    expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/html; charset=utf-8');
-    expect(res.setHeader).toHaveBeenCalledWith('Content-Length', '42');
-    expect(body.destroy).toHaveBeenCalledTimes(1);
-    expect(body.pipe).not.toHaveBeenCalled();
-    expect(res.end).toHaveBeenCalledWith();
-    expect(mockMcpHttpRequestHandler).not.toHaveBeenCalled();
-    expect(mockNextHandler).not.toHaveBeenCalled();
-  });
-
-  it('pipes a gateway GET response and converts a body-stream failure into 502', async () => {
-    mockLifecycleMode = 'gateway';
-    mockMatchesGatewayHost.mockResolvedValue(true);
-    const bodyListeners: Record<string, Listener> = {};
-    const body = {
-      on: jest.fn((event: string, listener: Listener) => {
-        bodyListeners[event] = listener;
-      }),
-      pipe: jest.fn(),
-    };
-    mockGetGatewayObject.mockResolvedValue({
-      body,
-      contentType: 'application/javascript',
-      statusCode: 200,
-    });
-    const handler = await bootServer();
-    const res = response();
-
-    await handler(request('/assets/app.js'), res);
-
-    expect(body.pipe).toHaveBeenCalledWith(res);
-    expect(res.setHeader).toHaveBeenCalledWith('Cache-Control', 'private, max-age=60');
-    expect(mockMcpHttpRequestHandler).not.toHaveBeenCalled();
-    bodyListeners.error(new Error('object store disconnected'));
-    expect(res.statusCode).toBe(502);
-    expect(res.end).toHaveBeenCalledWith();
-  });
-
-  it.each([
-    ['not-found storage failures', Object.assign(new Error('missing'), { statusCode: 404 }), 404, 'not found'],
-    ['unexpected storage failures', new Error('object store unavailable'), 500, 'internal server error'],
-  ])('maps %s without falling through to another handler', async (_label, error, status, body) => {
-    mockLifecycleMode = 'gateway';
-    mockMatchesGatewayHost.mockResolvedValue(true);
-    mockGetGatewayObject.mockRejectedValue(error);
-    const handler = await bootServer();
-    const res = response();
-
-    await handler(request('/missing.html'), res);
-
-    expect(res.statusCode).toBe(status);
-    expect(res.end).toHaveBeenCalledWith(body);
+    expect(mockHandleSitesRequest).toHaveBeenCalledWith(req, res, expect.any(Object));
     expect(mockMcpHttpRequestHandler).not.toHaveBeenCalled();
     expect(mockNextHandler).not.toHaveBeenCalled();
   });

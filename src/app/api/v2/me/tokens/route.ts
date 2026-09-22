@@ -108,6 +108,7 @@ const postHandler = async (req: NextRequest) => {
       email: identity.email,
       preferredUsername: identity.preferredUsername,
       displayName: identity.displayName,
+      issuer: identity.issuer ?? null,
       roleAtIssue: identity.roles.includes('admin') ? 'admin' : 'user',
     },
   });

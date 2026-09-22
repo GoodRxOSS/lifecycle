@@ -312,3 +312,18 @@ describe('principal status configuration', () => {
 afterAll(() => {
   restorePrincipalStatusConfig();
 });
+
+describe('standard OAuth token introspection', () => {
+  it.each([true, false])('maps live introspection active=%s without client-list privileges', async (active) => {
+    const introspectAccessToken = jest.fn().mockResolvedValue(active);
+    const status = new KeycloakPrincipalStatus({ introspectAccessToken } as unknown as KeycloakAdminClient);
+    await expect(status.getOAuthTokenStatus('test-bearer')).resolves.toBe(active ? 'active' : 'revoked');
+    expect(introspectAccessToken).toHaveBeenCalledWith('test-bearer');
+  });
+  it('fails closed on unavailable/forbidden/malformed introspection without logging bearer data', async () => {
+    const introspectAccessToken = jest.fn().mockRejectedValue(new Error('unavailable'));
+    const status = new KeycloakPrincipalStatus({ introspectAccessToken } as unknown as KeycloakAdminClient);
+    await expect(status.getOAuthTokenStatus('secret-test-bearer')).resolves.toBe('unknown');
+    expect(JSON.stringify(mockWarn.mock.calls)).not.toContain('secret-test-bearer');
+  });
+});

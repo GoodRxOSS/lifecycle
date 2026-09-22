@@ -181,32 +181,24 @@ export function resolveSitesConfig(config?: SitesConfig | null): ResolvedSitesCo
 }
 
 export function buildSiteUrl(siteId: string, config: ResolvedSitesConfig): string {
-  const protocol = config.domain === 'localhost' || config.domain.endsWith('.localhost') ? 'http' : 'https';
+  const protocol =
+    process.env.SITES_GATEWAY_HTTPS === 'true'
+      ? 'https'
+      : config.domain === 'localhost' || config.domain.endsWith('.localhost')
+      ? 'http'
+      : 'https';
   const port = config.port ? `:${config.port}` : '';
   return `${protocol}://${config.hostPrefix}-${siteId}.${config.domain}${port}`;
 }
 
 export function parseSiteIdFromHost(hostHeader: string | undefined, config: ResolvedSitesConfig): string | null {
-  if (!hostHeader) {
-    return null;
-  }
-
-  const host = hostHeader.split(':')[0]?.toLowerCase();
-  if (!host) {
-    return null;
-  }
-
+  if (!hostHeader || !/^[a-z0-9.-]+(?::[0-9]+)?$/i.test(hostHeader)) return null;
+  const host = hostHeader.split(':')[0].toLowerCase();
   const suffix = `.${config.domain.toLowerCase()}`;
-  if (!host.endsWith(suffix)) {
-    return null;
-  }
-
+  if (!host.endsWith(suffix)) return null;
   const label = host.slice(0, -suffix.length);
   const prefix = `${config.hostPrefix}-`;
-  if (!label.startsWith(prefix)) {
-    return null;
-  }
-
+  if (!label.startsWith(prefix)) return null;
   const siteId = label.slice(prefix.length);
-  return /^[a-z0-9-]+$/.test(siteId) ? siteId : null;
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(siteId) ? siteId : null;
 }

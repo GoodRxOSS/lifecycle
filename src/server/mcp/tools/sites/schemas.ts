@@ -29,6 +29,21 @@ const siteSummarySchema = closedObjectSchema(
     siteId: siteIdSchema,
     name: { type: 'string', minLength: 1, maxLength: 200 },
     url: { type: 'string', format: 'uri', minLength: 1, maxLength: 2048 },
+    visibility: { type: 'string', enum: ['private', 'public'] },
+    contentUrl: { type: 'string', format: 'uri', minLength: 1, maxLength: 2048 },
+    openUrl: { type: 'string', format: 'uri', minLength: 1, maxLength: 2048 },
+    accessRevision: { type: 'integer', minimum: 1 },
+    contentRevision: { type: 'integer', minimum: 1 },
+    currentRole: { type: ['string', 'null'], enum: ['owner', null] },
+    permissions: closedObjectSchema(
+      {
+        canView: { type: 'boolean' },
+        canEdit: { type: 'boolean' },
+        canDelete: { type: 'boolean' },
+        canChangeVisibility: { type: 'boolean' },
+      },
+      ['canView', 'canEdit', 'canDelete', 'canChangeVisibility']
+    ),
     status: { type: 'string', minLength: 1, maxLength: 50 },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
@@ -38,13 +53,29 @@ const siteSummarySchema = closedObjectSchema(
     createdBy: { type: 'string', minLength: 1, maxLength: 512 },
     updatedBy: { type: 'string', minLength: 1, maxLength: 512 },
   },
-  ['siteId', 'name', 'url', 'status', 'createdAt', 'updatedAt', 'fileCount', 'sizeBytes']
+  [
+    'siteId',
+    'name',
+    'url',
+    'status',
+    'createdAt',
+    'updatedAt',
+    'fileCount',
+    'sizeBytes',
+    'visibility',
+    'contentUrl',
+    'openUrl',
+    'accessRevision',
+    'contentRevision',
+    'currentRole',
+    'permissions',
+  ]
 );
 
 export const listSitesInputSchema = closedObjectSchema({
   mineOnly: {
     type: 'boolean',
-    description: 'Return only sites created or updated by the authenticated Lifecycle user.',
+    description: 'Return only sites owned by the authenticated Lifecycle principal.',
   },
   cursor: { type: 'string', maxLength: 500 },
   limit: { type: 'integer', minimum: 1, maximum: 100, default: 25 },

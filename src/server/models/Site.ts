@@ -16,12 +16,22 @@
 
 import Model from './_Model';
 
+export type SiteVisibility = 'private' | 'public';
+export type SiteOwnerKind = 'user' | 'service_key' | 'unresolved';
+
 export type SiteStatus = 'active' | 'deleted' | 'expired';
 
 export default class Site extends Model {
   siteId!: string;
   name!: string;
   status!: SiteStatus;
+  visibility!: SiteVisibility;
+  ownerKind!: SiteOwnerKind;
+  ownerIssuer!: string | null;
+  ownerSubject!: string | null;
+  creatorTokenId!: number | null;
+  accessRevision!: number;
+  contentRevision!: number;
   activeVersionId?: string | null;
   fileCount!: number;
   sizeBytes!: number | string;

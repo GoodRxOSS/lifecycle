@@ -17,8 +17,9 @@
 import { NextRequest } from 'next/server';
 import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
 import type { Principal } from 'server/lib/principal';
-import { successResponse } from 'server/lib/response';
+import { sitesSuccessResponse as successResponse } from 'server/lib/sites/routeHelpers';
 import { readUploadFile, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
+import { SitesServiceError } from 'server/services/sites';
 import SitesService from 'server/services/sites';
 
 export const runtime = 'nodejs';
@@ -76,11 +77,16 @@ type RouteContext = {
 const putHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
-    const upload = await readUploadFile(req);
     const service = new SitesService();
+    const existing = await service.getSite(routeParams.siteId, principal);
+    if (!existing.permissions.canEdit) throw new SitesServiceError('Site content editing is not permitted.', 403);
+    const capabilities = await service.getCapabilities(principal);
+    const upload = await readUploadFile(req, capabilities.upload.maxUploadBytes);
+    if (upload.visibility !== undefined)
+      throw new SitesServiceError('Use the access endpoint to change visibility.', 400);
     const site = await service.replaceSiteContent(routeParams.siteId, {
       ...upload,
-      user: principal.identity,
+      principal,
     });
     return successResponse({ site }, { status: 200 }, req);
   } catch (error) {

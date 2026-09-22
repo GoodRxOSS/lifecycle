@@ -111,6 +111,7 @@ describe('resolvePrincipal with API keys', () => {
       kind: 'personal_key',
       authMethod: 'api_key',
       userId: 'sub-1',
+      issuer: null,
       actor: 'sub-1',
       roles: [],
       scopes: ['env:read', 'env:write'],
@@ -119,6 +120,7 @@ describe('resolvePrincipal with API keys', () => {
       repositoryAllowlistRepoIds: [42],
       identity: {
         userId: 'sub-1',
+        issuer: null,
         githubUsername: 'octo',
         preferredUsername: 'octo-pref',
         email: 'owner@corp.com',
@@ -130,6 +132,20 @@ describe('resolvePrincipal with API keys', () => {
         roles: [],
       },
     });
+  });
+
+  it('uses only the persisted key issuer and never binds a legacy key to current config', async () => {
+    const originalIssuer = process.env.KEYCLOAK_ISSUER;
+    try {
+      process.env.KEYCLOAK_ISSUER = 'https://new-issuer.test/realms/lifecycle';
+      query.findOne.mockResolvedValueOnce(personalRecord({ ownerIssuer: 'https://old-issuer.test/realms/lifecycle' }));
+      expect((await resolvePrincipal(keyRequest(PAT_TOKEN))).issuer).toBe('https://old-issuer.test/realms/lifecycle');
+      query.findOne.mockResolvedValueOnce(personalRecord({ ownerIssuer: null }));
+      expect((await resolvePrincipal(keyRequest(PAT_TOKEN))).issuer).toBeNull();
+    } finally {
+      if (originalIssuer === undefined) delete process.env.KEYCLOAK_ISSUER;
+      else process.env.KEYCLOAK_ISSUER = originalIssuer;
+    }
   });
 
   it('rebuilds the display name through the snapshot chain and falls back to the sub', async () => {
@@ -323,5 +339,27 @@ describe('resolvePrincipal with sessions', () => {
       tokenId: null,
     });
     expect(principal.identity?.displayName).toBe('local-dev-user');
+  });
+});
+
+test('REST principal retains revocation identity only from verified middleware claims', async () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 300;
+  const principal = await resolvePrincipal(
+    request({
+      'x-user': encodeUser({
+        sub: 'owner',
+        sid: 'login-sid',
+        jti: 'access-token-id',
+        azp: 'lifecycle-ui',
+        exp: expiresAt,
+        realm_access: { roles: ['user'] },
+      }),
+    })
+  );
+  expect(principal.oauth).toEqual({
+    sessionId: 'login-sid',
+    tokenId: 'access-token-id',
+    clientId: 'lifecycle-ui',
+    expiresAt,
   });
 });

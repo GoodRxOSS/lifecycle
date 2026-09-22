@@ -61,10 +61,12 @@ function isBearerAuthOrLifecycleKey(security: unknown): boolean {
   );
 }
 
-function hasAndCombinedSchemes(security: unknown): boolean {
-  return requirementObjects(security).some(
-    (req) => ('KeycloakBearer' in req || 'BearerAuth' in req) && 'LifecycleApiKey' in req
-  );
+function principalSecurity(entry: Extract<V2RoutePolicyEntry, { policy: 'principal' }>) {
+  const kinds = entry.kinds ?? ['user', 'personal_key', 'service_key'];
+  return [
+    ...(kinds.includes('user') ? [{ BearerAuth: [] }] : []),
+    ...(kinds.some((kind) => kind === 'personal_key' || kind === 'service_key') ? [{ LifecycleApiKey: [] }] : []),
+  ];
 }
 
 describe('OpenAPI v2 security contract', () => {
@@ -77,7 +79,6 @@ describe('OpenAPI v2 security contract', () => {
     expect(schemes.LifecycleApiKey.description).toMatch(/lfc_pat_/);
     expect(schemes.LifecycleApiKey.description).toMatch(/lfc_svc_/);
   });
-
   it('defaults globally to the Keycloak session only', () => {
     expect(spec.security).toEqual([{ BearerAuth: [] }]);
   });
@@ -88,10 +89,9 @@ describe('OpenAPI v2 security contract', () => {
     expect(spec.components.schemas.ApiTokenGrantableScope.enum).not.toContain('env:admin');
   });
 
-  it('offers both schemes (OR, never AND) on every principal operation', () => {
+  it('matches allowed principal kinds and requires handler credentials on every principal operation', () => {
     const missing: string[] = [];
-    const notOr: string[] = [];
-    const andCombined: string[] = [];
+    const mismatched: string[] = [];
 
     for (const entry of V2_ROUTE_POLICY_MANIFEST) {
       if (entry.policy !== 'principal') continue;
@@ -100,12 +100,17 @@ describe('OpenAPI v2 security contract', () => {
         missing.push(keyOf(entry));
         continue;
       }
-      if (hasAndCombinedSchemes(op.security)) andCombined.push(keyOf(entry));
-      if (!isBearerAuthOrLifecycleKey(op.security)) notOr.push(`${keyOf(entry)} -> ${JSON.stringify(op.security)}`);
+      // The array contains credential alternatives (OR); each object contains mandatory credentials (AND).
+      // Compare complete objects, including scopes, so an extra anonymous or signature-only alternative fails.
+      try {
+        expect(op.security).toEqual(principalSecurity(entry));
+      } catch {
+        mismatched.push(`${keyOf(entry)} -> ${JSON.stringify(op.security)}`);
+      }
     }
 
     // Every principal route must be documented: a future one that isn't fails here by name.
-    expect({ missing, notOr, andCombined }).toEqual({ missing: [], notOr: [], andCombined: [] });
+    expect({ missing, mismatched }).toEqual({ missing: [], mismatched: [] });
   });
 
   it('never offers LifecycleApiKey on a session operation', () => {
@@ -119,10 +124,33 @@ describe('OpenAPI v2 security contract', () => {
     expect(leaked).toEqual([]);
   });
 
-  it('exposes the OAuth callback with no platform security', () => {
-    const entry = V2_ROUTE_POLICY_MANIFEST.find((e) => e.policy === 'public');
-    expect(entry).toBeDefined();
-    expect(operationFor(entry as V2RoutePolicyEntry).security).toEqual([]);
+  it('covers every public operation, including anonymous public-link resolution', () => {
+    for (const entry of V2_ROUTE_POLICY_MANIFEST) {
+      if (entry.policy !== 'public') continue;
+      expect({ operation: keyOf(entry), security: operationFor(entry)?.security }).toEqual({
+        operation: keyOf(entry),
+        security: [],
+      });
+    }
+  });
+
+  it('documents only JWT-authenticated mint and its minimal body', () => {
+    const op = spec.paths['/api/v2/sites/browser/mint'].post;
+    expect(op.security).toEqual([{ BearerAuth: [] }]);
+    expect(op.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/SitesBrowserMintRequest',
+    });
+    expect(spec.components.schemas.SitesBrowserMintRequest.required).toEqual(['siteId', 'state']);
+    expect(spec.components.schemas.SitesBrowserMintRequest.additionalProperties).toBe(false);
+    expect(
+      Object.keys(op.responses['200'].content['application/json'].schema.properties.data.properties).sort()
+    ).toEqual(['consumeUrl', 'ticket']);
+    expect(spec.paths['/api/v2/sites/browser/open/{siteId}'].get.security).toEqual([]);
+    for (const action of ['bind', 'revoke']) {
+      expect(spec.paths[`/api/v2/sites/browser/${action}`]).toBeUndefined();
+    }
+    expect(spec.components.schemas.SitesBrowserLoginRequest).toBeUndefined();
+    expect(spec.components.schemas.SitesBrowserBindRequest).toBeUndefined();
   });
 
   it('documents auth/context with the OR form under operationId getAuthContext', () => {

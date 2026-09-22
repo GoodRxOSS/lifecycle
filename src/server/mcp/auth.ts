@@ -17,9 +17,10 @@
 import type { IncomingMessage } from 'http';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { AppError, isAppError } from 'server/lib/appError';
-import { getIdentityFromClaims } from 'server/lib/get-user';
+import { getIdentityFromClaims, getOAuthCredentialFromClaims } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import type { Principal } from 'server/lib/principal';
+import { rememberVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
 import { getMcpResourceMetadataUrl, getMcpResourceUrl, isAuthEnabled, MCP_SCOPE } from './config';
 
 export interface McpAuthSuccess {
@@ -125,6 +126,8 @@ function oauthPrincipal(payload: JWTPayload, roles: Array<'user' | 'admin'>): Pr
     kind: 'user',
     authMethod: 'oauth',
     userId: identity.userId,
+    issuer: identity.issuer ?? null,
+    oauth: getOAuthCredentialFromClaims(payload),
     actor: identity.userId,
     roles,
     scopes: null,
@@ -206,6 +209,7 @@ export async function authenticateMcpRequest(req: IncomingMessage): Promise<McpA
         message: 'Bearer token has no valid subject.',
       });
     }
+    rememberVerifiedOAuthBearer(principal, token);
     return { ok: true, principal };
   } catch (error) {
     if (isAppError(error) && error.code === 'insufficient_scope') {

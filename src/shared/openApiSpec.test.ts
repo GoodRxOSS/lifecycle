@@ -194,16 +194,8 @@ describe('OpenAPI v2 environment contract', () => {
 describe('OpenAPI v2 sites contract', () => {
   it('documents sites list filters and pagination', () => {
     expect(getOperation('/api/v2/sites', 'get')?.parameters).toEqual([
-      {
-        name: 'user',
-        in: 'query',
-        required: false,
-        description: 'Filters to sites created or last updated by the supplied user email.',
-        schema: {
-          type: 'string',
-        },
-        example: 'user@example.com',
-      },
+      { name: 'view', in: 'query', schema: { type: 'string', enum: ['mine', 'public', 'all'] } },
+      { name: 'q', in: 'query', schema: { type: 'string', maxLength: 200 } },
       {
         name: 'page',
         in: 'query',
