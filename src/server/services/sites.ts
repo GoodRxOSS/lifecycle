@@ -173,7 +173,7 @@ export default class SitesService extends Service {
       expiresAt: site.expiresAt || null,
       fileCount: Number(site.fileCount || 0),
       sizeBytes: Number(site.sizeBytes || 0),
-      createdBy: owner ? site.createdBy || null : null,
+      createdBy: owner || site.visibility === 'public' ? site.createdBy || null : null,
       updatedBy: owner ? site.updatedBy || null : null,
     };
   }

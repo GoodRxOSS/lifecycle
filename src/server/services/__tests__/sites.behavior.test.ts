@@ -1295,7 +1295,7 @@ describe('SitesService behavior', () => {
       expect(errors[0]).toEqual(errors[1]);
       expect(errors[0]).toEqual({ message: 'Site not found.', code: 'site_not_found', status: 404 });
     });
-    it('filters unauthorized private rows before page totals and redacts public attribution', async () => {
+    it('filters unauthorized private rows before page totals and shows public creator attribution', async () => {
       addSite(state, { siteId: 'secret', visibility: 'private', ownerSubject: 'other' });
       addSite(state, { siteId: 'public', ownerSubject: 'other', createdBy: 'private-email@example.com' });
       addSite(state, { siteId: 'mine', visibility: 'private' });
@@ -1303,7 +1303,7 @@ describe('SitesService behavior', () => {
       expect(result.pagination.items).toBe(2);
       expect(result.sites.map((site) => site.id).sort()).toEqual(['mine', 'public']);
       expect(result.sites.find((site) => site.id === 'public')).toMatchObject({
-        createdBy: null,
+        createdBy: 'private-email@example.com',
         updatedBy: null,
         currentRole: null,
         permissions: { canEdit: false },
