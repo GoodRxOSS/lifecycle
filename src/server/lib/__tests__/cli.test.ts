@@ -92,6 +92,7 @@ import {
   deleteBuild,
   deleteDeploy,
   deployBuild,
+  isPinnedCname,
   waitForCodefresh,
 } from '../cli';
 
@@ -477,6 +478,18 @@ describe('generic CLI deploy lifecycle', () => {
     expect(mockLoggerInfo).toHaveBeenCalledWith('CLI: deleted');
   });
 
+  test('deleteBuild leaves a pinned aurora database in place', async () => {
+    const pinned = createCliDeploy(DeployTypes.AURORA_RESTORE, { cname: 'database-rw.example.test' });
+    const withGraphFetched = jest.fn().mockResolvedValue([pinned]);
+    const where = jest.fn(() => ({ withGraphFetched }));
+    mockDeployQuery.mockReturnValue({ where });
+
+    await deleteBuild({ id: 42, uuid: 'build-uuid' } as any);
+
+    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockLoggerInfo).not.toHaveBeenCalledWith('CLI: deleting');
+  });
+
   test('codefresh deploy and destroy omit optional triggers and destroy preserves undefined CLI output', async () => {
     const deploy = createDeploy({
       env: { ENABLED: true, EMPTY: null },
@@ -497,5 +510,25 @@ describe('generic CLI deploy lifecycle', () => {
     expect(mockShellPromise.mock.calls[0][0]).not.toContain('--trigger');
     expect(mockDeleteExternalSecret).not.toHaveBeenCalled();
     expect(mockUpdateLogContext).toHaveBeenCalledWith({ buildUuid: 'build-uuid' });
+  });
+});
+
+describe('isPinnedCname', () => {
+  test.each([
+    [null, false],
+    [undefined, false],
+    ['', false],
+    ['   ', false],
+    ['app-db-env.cluster-abc123.us-west-2.rds.amazonaws.com', false],
+    ['app-db-env.abc123.us-west-2.rds.amazonaws.com', false],
+    ['APP-DB-ENV.CLUSTER-ABC123.US-WEST-2.RDS.AMAZONAWS.COM.', false],
+    ['  app-db-env.cluster-abc123.us-west-2.rds.amazonaws.com  ', false],
+    ['app-db-env.cluster-abc123.cn-north-1.rds.amazonaws.com.cn', false],
+    ['app-db-rw.example.com', true],
+    ['app-db-rw.example.com.', true],
+    ['rds.amazonaws.com.example.com', true],
+    ['app-db.cluster-abc123.us-west-2.rds.amazonaws.com.example.com', true],
+  ])('%p → %p', (cname, expected) => {
+    expect(isPinnedCname(cname)).toBe(expected);
   });
 });

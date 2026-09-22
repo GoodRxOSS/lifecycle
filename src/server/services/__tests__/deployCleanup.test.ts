@@ -42,6 +42,7 @@ jest.mock('server/lib/shell', () => ({
 jest.mock('server/lib/cli', () => ({
   codefreshDestroy: (...args: any[]) => mockCodefreshDestroy(...args),
   deleteDeploy: (...args: any[]) => mockDeleteDeploy(...args),
+  isPinnedCname: jest.requireActual('server/lib/cli').isPinnedCname,
 }));
 
 jest.mock('server/lib/metrics', () => ({
@@ -440,6 +441,32 @@ describe('DeployCleanupService', () => {
         status: DeployStatus.TORN_DOWN,
       })
     );
+  });
+
+  test('infra cleanup keeps a pinned aurora database and its cname', async () => {
+    const deploy = createDeploy({
+      cname: 'database-rw.example.test',
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE, serviceDisksYaml: null },
+    });
+    const service = createService();
+
+    await expect(service.cleanupDeploy(deploy, { mode: 'infra' })).resolves.toBe(true);
+
+    expect(mockDeleteDeploy).not.toHaveBeenCalled();
+    expect(deploy.patch).toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.TORN_DOWN }));
+    expect(deploy.patch).not.toHaveBeenCalledWith(expect.objectContaining({ cname: expect.anything() }));
+  });
+
+  test('infra cleanup destroys a Lifecycle-restored aurora database', async () => {
+    const deploy = createDeploy({
+      cname: 'database-build-1.cluster-abc.us-west-2.rds.amazonaws.com',
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE, serviceDisksYaml: null },
+    });
+    const service = createService();
+
+    await expect(service.cleanupDeploy(deploy, { mode: 'infra' })).resolves.toBe(true);
+
+    expect(mockDeleteDeploy).toHaveBeenCalledWith(deploy);
   });
 
   test('enqueueCleanup queues infra cleanup jobs', async () => {
