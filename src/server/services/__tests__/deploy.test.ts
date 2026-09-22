@@ -2065,8 +2065,35 @@ describe('DeployService uncovered public behavior', () => {
     expect(mockCliDeploy).not.toHaveBeenCalled();
   });
 
-  test.each([DeployStatus.QUEUED, DeployStatus.DEPLOY_FAILED, DeployStatus.ERROR, DeployStatus.TORN_DOWN])(
-    'deployAurora keeps a pinned cname from %s without consulting AWS or running restore',
+  test.each([
+    DeployStatus.QUEUED,
+    DeployStatus.BUILDING,
+    DeployStatus.DEPLOY_FAILED,
+    DeployStatus.ERROR,
+    DeployStatus.TORN_DOWN,
+  ])('deployAurora keeps a pinned cname from %s without consulting AWS or running restore', async (status) => {
+    const { service, deployPatch } = serviceHarness();
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status,
+      cname: 'database-rw.example.test',
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockTaggingGetResources).not.toHaveBeenCalled();
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+    expect(deployPatch).toHaveBeenCalledTimes(1);
+    expect(deployPatch).toHaveBeenCalledWith({ status: DeployStatus.BUILT });
+  });
+
+  test.each([DeployStatus.BUILT, DeployStatus.READY])(
+    'deployAurora leaves a %s pinned cname untouched',
     async (status) => {
       const { service, deployPatch } = serviceHarness();
       const deploy: any = {
@@ -2084,30 +2111,9 @@ describe('DeployService uncovered public behavior', () => {
 
       expect(mockTaggingGetResources).not.toHaveBeenCalled();
       expect(mockCliDeploy).not.toHaveBeenCalled();
-      expect(deployPatch).toHaveBeenCalledTimes(1);
-      expect(deployPatch).toHaveBeenCalledWith({ status: DeployStatus.BUILT });
+      expect(deployPatch).not.toHaveBeenCalled();
     }
   );
-
-  test('deployAurora leaves a ready pinned cname untouched', async () => {
-    const { service, deployPatch } = serviceHarness();
-    const deploy: any = {
-      id: 1,
-      uuid: 'database-env',
-      status: DeployStatus.READY,
-      cname: 'database-rw.example.test',
-      build: { uuid: 'env' },
-      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
-      reload: jest.fn().mockResolvedValue(undefined),
-      $fetchGraph: jest.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
-
-    expect(mockTaggingGetResources).not.toHaveBeenCalled();
-    expect(mockCliDeploy).not.toHaveBeenCalled();
-    expect(deployPatch).not.toHaveBeenCalled();
-  });
 
   test('deployAurora adopts an existing cluster endpoint without running restore', async () => {
     const { service, deployPatch } = serviceHarness();
