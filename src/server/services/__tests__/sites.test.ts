@@ -260,13 +260,13 @@ describe('SitesService', () => {
   describe('listSites', () => {
     it('returns all non-deleted sites without a user filter', async () => {
       rows.push(
-        createSiteRow({ siteId: 'old', updatedAt: '2026-05-01T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'old', createdAt: '2026-05-01T00:00:00.000Z' }),
         createSiteRow({
           siteId: 'deleted',
-          updatedAt: '2026-05-03T00:00:00.000Z',
+          createdAt: '2026-05-03T00:00:00.000Z',
           deletedAt: '2026-05-04T00:00:00.000Z',
         }),
-        createSiteRow({ siteId: 'new', updatedAt: '2026-05-02T00:00:00.000Z' })
+        createSiteRow({ siteId: 'new', createdAt: '2026-05-02T00:00:00.000Z' })
       );
 
       await expect(service.listSites({}, principal)).resolves.toMatchObject({
@@ -288,9 +288,9 @@ describe('SitesService', () => {
 
     it('paginates sites after sorting and filtering', async () => {
       rows.push(
-        createSiteRow({ siteId: 'oldest', updatedAt: '2026-05-01T00:00:00.000Z' }),
-        createSiteRow({ siteId: 'middle', updatedAt: '2026-05-02T00:00:00.000Z' }),
-        createSiteRow({ siteId: 'newest', updatedAt: '2026-05-03T00:00:00.000Z' })
+        createSiteRow({ siteId: 'oldest', createdAt: '2026-05-01T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'middle', createdAt: '2026-05-02T00:00:00.000Z' }),
+        createSiteRow({ siteId: 'newest', createdAt: '2026-05-03T00:00:00.000Z' })
       );
 
       await expect(service.listSites({ page: 2, limit: 1 }, principal)).resolves.toMatchObject({

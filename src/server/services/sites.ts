@@ -421,7 +421,7 @@ export default class SitesService extends Service {
       ]);
     }
     const result = await query
-      .orderBy('updatedAt', 'desc')
+      .orderBy('createdAt', 'desc')
       .orderBy('siteId', 'asc')
       .page(page - 1, limit);
     return {
