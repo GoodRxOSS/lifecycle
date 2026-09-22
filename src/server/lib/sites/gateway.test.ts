@@ -104,8 +104,18 @@ it('authorizes HEAD with current Site checks and no incoming-principal or IdP po
   expect(res.headers['Cross-Origin-Opener-Policy']).toBe('same-origin');
   expect(res.headers['Origin-Agent-Cluster']).toBe('?1');
   expect(res.headers['Cross-Origin-Resource-Policy']).toBe('same-origin');
+  expect(res.headers['Content-Security-Policy']).toBe("worker-src 'none'; frame-ancestors 'none'");
   expect(api.getGatewayObject).toHaveBeenCalledTimes(1);
   expect(assertSitesPrincipal).not.toHaveBeenCalled();
+});
+it('restricts hosted-content network egress when the shared-apex opt-in is on', async () => {
+  process.env.SITES_ALLOW_SHARED_APEX = 'true';
+  const api = service();
+  const res = response();
+  await handleSitesRequest(request('HEAD'), res, api);
+  expect(res.headers['Content-Security-Policy']).toBe(
+    "worker-src 'none'; frame-ancestors 'none'; connect-src 'self'; form-action 'self'"
+  );
 });
 it('never returns a login page or redirect for an unauthenticated asset/HEAD', async () => {
   browser.viewer.mockRejectedValue(new SitesBrowserError(401));

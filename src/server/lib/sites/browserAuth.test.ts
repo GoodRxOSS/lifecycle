@@ -162,6 +162,12 @@ it('requires authentication, HTTPS and a separate registrable domain', () => {
   process.env.ENABLE_AUTH = 'false';
   expect(() => assertPrivateSitesReady()).toThrow();
 });
+it('the shared-apex opt-in only bypasses the same-domain check, never HTTPS', () => {
+  expect(() => assertPrivateSitesReady('https://sites.example.com')).toThrow();
+  process.env.SITES_ALLOW_SHARED_APEX = 'true';
+  expect(() => assertPrivateSitesReady('https://sites.example.com')).not.toThrow();
+  expect(() => assertPrivateSitesReady('http://sites.example.com')).toThrow();
+});
 it('derives the trusted origin from the existing UI URL', () => {
   process.env.LIFECYCLE_UI_URL = 'https://UI.example.com:443/app/?q=test#section';
   expect(sitesUiOrigin()).toBe('https://ui.example.com');

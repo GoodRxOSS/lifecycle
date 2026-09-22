@@ -140,7 +140,11 @@ export async function handleSitesRequest(
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
       res.setHeader('Origin-Agent-Cluster', '?1');
       res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-      res.setHeader('Content-Security-Policy', "worker-src 'none'; frame-ancestors 'none'");
+      const csp =
+        process.env.SITES_ALLOW_SHARED_APEX === 'true'
+          ? "worker-src 'none'; frame-ancestors 'none'; connect-src 'self'; form-action 'self'"
+          : "worker-src 'none'; frame-ancestors 'none'";
+      res.setHeader('Content-Security-Policy', csp);
     }
     res.statusCode = object.statusCode;
     res.setHeader('Content-Type', object.contentType);

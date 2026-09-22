@@ -65,7 +65,16 @@ export function assertPrivateSitesReady(contentUrl?: string): void {
     const content = new URL(contentUrl);
     const uiDomain = psl.get(ui.hostname);
     const contentDomain = psl.get(content.hostname);
-    if (content.protocol !== 'https:' || !uiDomain || !contentDomain || uiDomain === contentDomain)
+    // A shared registrable domain lets SameSite treat the UI and hosted content as one site.
+    // Only bypass once the deployment's gateway CSP restricts hosted-content egress and its
+    // auth cookies are confirmed host-only.
+    const sharedApexAllowed = process.env.SITES_ALLOW_SHARED_APEX === 'true';
+    if (
+      content.protocol !== 'https:' ||
+      !uiDomain ||
+      !contentDomain ||
+      (uiDomain === contentDomain && !sharedApexAllowed)
+    )
       throw new SitesBrowserError(503);
   }
 }
