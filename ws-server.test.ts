@@ -16,6 +16,13 @@
 
 type Listener = (...args: any[]) => unknown;
 
+const mockExecHandle = jest.fn(() => false);
+const mockExecDrain = jest.fn();
+const mockSignals: Record<string, Listener> = {};
+jest.mock('server/services/podExec/upgrade', () => ({
+  createExecUpgrade: () => ({ handle: mockExecHandle, drain: mockExecDrain }),
+}));
+
 const mockNextHandler = jest.fn();
 const mockPrepare = jest.fn(() => Promise.resolve());
 const mockMcpHttpRequestHandler = jest.fn();
@@ -72,6 +79,8 @@ let mockHttpHandler: Listener | undefined;
 let mockLifecycleMode = 'web';
 
 const mockHttpServer = {
+  once: jest.fn(),
+  close: jest.fn((done?: () => void) => done?.()),
   listen: jest.fn(),
   on: jest.fn((event: string, listener: Listener) => {
     mockServerListeners[event] = listener;
@@ -360,6 +369,10 @@ function webSocket(readyState = 1) {
 
 async function bootServer() {
   jest.resetModules();
+  const once = jest.spyOn(process, 'once').mockImplementation(((event: string, listener: Listener) => {
+    mockSignals[event] = listener;
+    return process;
+  }) as any);
   require('./ws-server');
   for (let attempt = 0; attempt < 5 && !mockHttpHandler; attempt += 1) {
     await Promise.resolve();
@@ -367,10 +380,48 @@ async function bootServer() {
   if (!mockHttpHandler) {
     throw new Error('ws-server did not register an HTTP handler');
   }
+  once.mockRestore();
   return mockHttpHandler;
 }
 
 describe('ws-server public dispatch', () => {
+  it('drains shells, stops accepting HTTP and exits on SIGTERM', async () => {
+    await bootServer();
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    jest.useFakeTimers();
+    try {
+      mockSignals.SIGTERM();
+      expect(mockExecDrain).toHaveBeenCalled();
+      expect(mockHttpServer.close).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+      exit.mockRestore();
+    }
+  });
+
+  it('leaves process exit to a registered worker draining active jobs', async () => {
+    await bootServer();
+    const worker = jest.fn();
+    const workerGlobal = global as typeof global & { sigtermHandler?: () => void };
+    workerGlobal.sigtermHandler = worker;
+    process.on('SIGTERM', worker);
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    jest.useFakeTimers();
+    try {
+      mockSignals.SIGTERM();
+      jest.advanceTimersByTime(10000);
+      expect(mockHttpServer.close).toHaveBeenCalledWith();
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      process.off('SIGTERM', worker);
+      delete workerGlobal.sigtermHandler;
+      jest.clearAllTimers();
+      jest.useRealTimers();
+      exit.mockRestore();
+    }
+  });
   let setIntervalSpy: jest.SpyInstance;
   const originalEnableAuth = process.env.ENABLE_AUTH;
 
