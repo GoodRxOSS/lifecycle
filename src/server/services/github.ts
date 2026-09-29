@@ -539,8 +539,9 @@ export default class GithubService extends Service {
         }
       }
 
-      // Repo-less services carry their config's repository only for run scoping. Counting them here would make a
-      // config repo holding only such services skip the static-environment fallback below.
+      // Docker and aurora-restore services take their config's repository but track no default branch, so they
+      // can't select a build here. Counting them would make a config repo holding only such services skip the
+      // static-environment fallback below.
       const allDeploys = (
         await models.Deploy.query()
           .where('branchName', branchName)
@@ -550,10 +551,7 @@ export default class GithubService extends Service {
           .withGraphFetched('[build.[pullRequest], deployable]')
       ).filter(
         (deploy) =>
-          !(
-            deploy.deployable?.repositoryId == null &&
-            (deploy.deployable?.type === DeployTypes.DOCKER || deploy.deployable?.type === DeployTypes.AURORA_RESTORE)
-          )
+          deploy.deployable?.type !== DeployTypes.DOCKER && deploy.deployable?.type !== DeployTypes.AURORA_RESTORE
       );
 
       await this.enqueueAutoTrackedApiBuilds(

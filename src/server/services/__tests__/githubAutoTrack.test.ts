@@ -138,8 +138,8 @@ describe('handlePushWebhook auto-track wiring', () => {
       where: jest.fn().mockReturnThis(),
       whereNot: jest.fn().mockReturnThis(),
       withGraphFetched: jest.fn().mockResolvedValue([
-        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: null } },
-        { id: 22, devMode: false, build, deployable: { name: 'db', type: 'aurora-restore', repositoryId: null } },
+        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: '42' } },
+        { id: 22, devMode: false, build, deployable: { name: 'db', type: 'aurora-restore', repositoryId: '42' } },
       ]),
     };
     const db = {
@@ -183,7 +183,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       whereNot: jest.fn().mockReturnThis(),
       withGraphFetched: jest.fn().mockResolvedValue([
         { id: 17, devMode: false, build, deployable: { defaultBranchName: 'other', name: 'app', repositoryId: '42' } },
-        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: null } },
+        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: '42' } },
       ]),
     };
     const failedDeployChain: any = {

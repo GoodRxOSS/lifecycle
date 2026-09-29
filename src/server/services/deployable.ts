@@ -145,8 +145,7 @@ export default class DeployableService extends BaseService {
     service: YamlService.Service,
     active: boolean,
     dependsOnDeployableName: string,
-    build?: Build,
-    configRepositoryId: number | null = null
+    build?: Build
   ): Promise<DeployableAttributes> {
     let attributes: DeployableAttributes;
     let deployment: YamlService.DeploymentConfig;
@@ -217,12 +216,7 @@ export default class DeployableService extends BaseService {
           type: YamlService.getDeployType(service),
           dockerImage: YamlService.getDockerImage(service),
           repositoryId: repositoryId ?? null,
-          resolvedFromRepositoryId:
-            repositoryId != null
-              ? Number(repositoryId)
-              : configRepositoryId != null
-              ? Number(configRepositoryId)
-              : null,
+          resolvedFromRepositoryId: repositoryId != null ? Number(repositoryId) : null,
           branchName,
           defaultBranchName,
           defaultTag: await YamlService.getDefaultTag(service),
@@ -392,23 +386,21 @@ export default class DeployableService extends BaseService {
         }
       }
 
-      // Repo-less services (docker, aurora-restore) belong to the config they were read from, so they inherit
-      // its repository identity and tracked branch.
+      // Docker and aurora-restore services have no repository field; they belong to the repo whose config defines
+      // them, the same as a helm or github service whose repository is that config's own repo.
       const deployType = YamlService.getDeployType(service);
-      const isRepoLess =
+      const inheritsConfigRepository =
         repoName == null && (deployType === DeployTypes.DOCKER || deployType === DeployTypes.AURORA_RESTORE);
-      if (isRepoLess) branch = branchName;
 
       const deployableAttributes: DeployableAttributes = await this.generateAttributesFromYamlConfig(
         buildId,
         buildUUID,
-        repository?.githubRepositoryId ?? null,
-        branch,
+        inheritsConfigRepository ? repositoryId ?? null : repository?.githubRepositoryId ?? null,
+        inheritsConfigRepository ? branchName : branch,
         service,
         active,
         parentDeployableName,
-        build,
-        isRepoLess ? repositoryId ?? null : null
+        build
       );
 
       if (!deployableServices.has(deployableAttributes.name)) {

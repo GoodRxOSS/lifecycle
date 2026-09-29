@@ -1045,26 +1045,46 @@ describe('Deployable Service', () => {
         return deployableServices.get(service.name);
       };
 
-      test('a docker dependency gets the source repository and branch but no repository of its own', async () => {
+      test('a docker dependency takes the repository and branch of the config that defines it', async () => {
         const kv = { name: 'kv', docker: { dockerImage: 'redis', defaultTag: '7.2-alpine', ports: [6379] } };
 
-        expect(await resolve(kv as unknown as YamlService.Service)).toEqual(
+        const attributes = await resolve(kv as unknown as YamlService.Service);
+
+        expect(attributes).toEqual(
           expect.objectContaining({
-            repositoryId: null,
+            repositoryId: 42,
             resolvedFromRepositoryId: 42,
             branchName: 'delivery-branch',
             dependsOnDeployableName: 'api',
           })
         );
+        expect(attributes?.defaultBranchName).toBeUndefined();
         expect(mockResolveRepositoryForAttributes).not.toHaveBeenCalled();
       });
 
-      test('an aurora-restore dependency gets the source repository and branch', async () => {
+      test('an aurora-restore dependency takes the repository and branch of the config that defines it', async () => {
         const db = { name: 'db', auroraRestore: { command: 'restore', arguments: 'db' } };
 
-        expect(await resolve(db as unknown as YamlService.Service)).toEqual(
-          expect.objectContaining({ repositoryId: null, resolvedFromRepositoryId: 42, branchName: 'delivery-branch' })
+        const attributes = await resolve(db as unknown as YamlService.Service);
+
+        expect(attributes).toEqual(
+          expect.objectContaining({ repositoryId: 42, resolvedFromRepositoryId: 42, branchName: 'delivery-branch' })
         );
+        expect(attributes?.defaultBranchName).toBeUndefined();
+      });
+
+      test('a helm service with only a chart and an external http service keep no repository', async () => {
+        const chartOnly = { name: 'cache', helm: { chart: { name: 'bitnami/redis' } } };
+        const external = {
+          name: 'partner',
+          externalHttp: { defaultInternalHostname: 'partner.example.com', defaultPublicUrl: 'partner.example.com' },
+        };
+
+        for (const service of [chartOnly, external]) {
+          expect(await resolve(service as unknown as YamlService.Service)).toEqual(
+            expect.objectContaining({ repositoryId: null, resolvedFromRepositoryId: null })
+          );
+        }
       });
 
       test('a configuration service keeps no source identity', async () => {

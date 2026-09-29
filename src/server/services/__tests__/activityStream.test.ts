@@ -454,6 +454,30 @@ describe('ActivityStream comment overrides', () => {
       '| [local-chart](https://github.com/lifecycle/local-chart/tree/main) | main | https://local-chart.example.com|'
     );
   });
+
+  it('links a docker service to the config repository that defines it', async () => {
+    const service = createActivityStream();
+    const cache = createDeploy({
+      id: 3,
+      branchName: 'feature-x',
+      publicUrl: 'cache.example.com',
+      deployable: {
+        name: 'cache',
+        type: DeployTypes.DOCKER,
+        public: true,
+        repositoryId: 10,
+        repository: { fullName: 'lifecycle/config' },
+      },
+    });
+    mockDetermineChartType.mockResolvedValue('public');
+    const build = createBuild({ deploys: [cache] });
+
+    const block = await (service as any).environmentBlock(build);
+
+    expect(block).toContain(
+      '| [cache](https://github.com/lifecycle/config/tree/feature-x) | feature-x | https://cache.example.com|'
+    );
+  });
 });
 
 describe('ActivityStream.processComments', () => {

@@ -103,14 +103,10 @@ export default class DeployService extends BaseService {
         const uuid = `${deployable.name}-${build?.uuid}`;
         const patchFields: Objection.PartialModelObject<Deploy> = {};
         const deployableRepositoryId = Number(deployable.repositoryId);
-        const scopeRepositoryId =
-          deployable.repositoryId == null && deployable.resolvedFromRepositoryId != null
-            ? Number(deployable.resolvedFromRepositoryId)
-            : deployableRepositoryId;
         const effectiveBranch = deployable.commentBranchName ?? deployable.branchName;
         const isTargetSource =
           !githubRepositoryId ||
-          (scopeRepositoryId === githubRepositoryId && (!sourceBranch || effectiveBranch === sourceBranch));
+          (deployableRepositoryId === githubRepositoryId && (!sourceBranch || effectiveBranch === sourceBranch));
 
         let deploy = existingDeployMap.get(deployable.id) ?? null;
         if (!deploy) {
@@ -135,8 +131,8 @@ export default class DeployService extends BaseService {
           patchFields.uuid = uuid;
           patchFields.branchName = effectiveBranch;
           patchFields.tag = deployable.defaultTag;
-          if (deployable.repositoryId == null && Number(deploy.githubRepositoryId) !== scopeRepositoryId) {
-            patchFields.githubRepositoryId = scopeRepositoryId;
+          if (deployable.repositoryId != null && Number(deploy.githubRepositoryId) !== deployableRepositoryId) {
+            patchFields.githubRepositoryId = deployableRepositoryId;
           }
         } else {
           deploy = await this.db.models.Deploy.create({
@@ -144,7 +140,7 @@ export default class DeployService extends BaseService {
             deployableId: deployable?.id ?? null,
             uuid,
             internalHostname: uuid,
-            githubRepositoryId: scopeRepositoryId,
+            githubRepositoryId: deployableRepositoryId,
             active: deployable.active,
           });
 

@@ -2023,13 +2023,13 @@ describe('DeployService uncovered public behavior', () => {
       $fetchGraph: jest.fn().mockResolvedValue(undefined),
     });
 
-    test('creates a repo-less deploy scoped to the repository that defines it', async () => {
+    test('creates the deploy with the repository of the config that defines the dependency', async () => {
       const { service, db } = harnessWith([]);
       const kv = {
         id: 21,
         name: 'kv',
         type: DeployTypes.DOCKER,
-        repositoryId: null,
+        repositoryId: 42,
         resolvedFromRepositoryId: 42,
         branchName: 'trunk',
         active: true,
@@ -2049,7 +2049,7 @@ describe('DeployService uncovered public behavior', () => {
         id: 21,
         name: 'kv',
         type: DeployTypes.DOCKER,
-        repositoryId: null,
+        repositoryId: 42,
         resolvedFromRepositoryId: 42,
         branchName: 'trunk',
       };
@@ -2068,7 +2068,7 @@ describe('DeployService uncovered public behavior', () => {
         id: 21,
         name: 'kv',
         type: DeployTypes.DOCKER,
-        repositoryId: null,
+        repositoryId: 42,
         resolvedFromRepositoryId: 42,
         branchName: 'trunk',
         commentBranchName: 'redis@7.2-alpine',
@@ -2086,7 +2086,7 @@ describe('DeployService uncovered public behavior', () => {
         id: 21,
         name: 'kv',
         type: DeployTypes.DOCKER,
-        repositoryId: null,
+        repositoryId: 42,
         resolvedFromRepositoryId: 42,
         branchName: 'trunk',
       };
@@ -2096,7 +2096,7 @@ describe('DeployService uncovered public behavior', () => {
       expect(deploy.patch).not.toHaveBeenCalled();
     });
 
-    test('a repo-less row without a known source keeps its legacy repo id and is not targeted', async () => {
+    test('a dependency not yet re-resolved keeps its legacy repo id and is not targeted', async () => {
       const deploy = existingDeploy(21, 0);
       const { service } = harnessWith([deploy]);
       const legacy = {
@@ -2113,8 +2113,8 @@ describe('DeployService uncovered public behavior', () => {
       expect(deploy.patch).not.toHaveBeenCalled();
     });
 
-    test('never rewrites the repo id of a service that has its own repository', async () => {
-      const deploy = existingDeploy(31, 55);
+    test('leaves the repo id of a row that already matches its deployable', async () => {
+      const deploy = existingDeploy(31, 42);
       const { service } = harnessWith([deploy]);
       const api = {
         id: 31,
