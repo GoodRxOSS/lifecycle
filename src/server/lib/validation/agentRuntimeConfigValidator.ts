@@ -206,7 +206,7 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig): void {
 
       if (!isValidProviderBaseUrl(provider.baseUrl)) {
         throw new AgentRuntimeConfigValidationError(
-          `Provider "${providerName}" baseUrl must be an http(s) URL without embedded credentials.`
+          `Provider "${providerName}" baseUrl must be an http(s) URL without credentials, a query, or a fragment.`
         );
       }
     }
