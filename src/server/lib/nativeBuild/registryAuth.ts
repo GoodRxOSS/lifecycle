@@ -130,11 +130,13 @@ export function buildEcrAssumeRoleScript(roleArn: string | undefined, sessionNam
 
   return [
     `echo "Assuming ECR push role ${roleArn}"`,
-    `ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn ${roleArn} --role-session-name ${sessionName} ` +
+    `ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn "${roleArn}" --role-session-name "${sessionName}" ` +
       `--query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)`,
     'export AWS_ACCESS_KEY_ID=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f1)',
     'export AWS_SECRET_ACCESS_KEY=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f2)',
     'export AWS_SESSION_TOKEN=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f3)',
+    'unset ECR_PUSH_CREDENTIALS',
+    'aws sts get-caller-identity',
   ].join('\n');
 }
 

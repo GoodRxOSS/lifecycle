@@ -306,7 +306,7 @@ describe('buildkitBuild', () => {
 
   describe('ecrPushRoleArn', () => {
     const roleArn = 'arn:aws:iam::123456789012:role/ecr-pusher';
-    const assumeRoleCommand = `aws sts assume-role --role-arn ${roleArn} --role-session-name lifecycle-test-service-abc123`;
+    const assumeRoleCommand = `aws sts assume-role --role-arn \\"${roleArn}\\" --role-session-name \\"lifecycle-test-service-abc123\\"`;
 
     const useBuildDefaults = (buildDefaults: Record<string, unknown>) => {
       (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
@@ -1304,13 +1304,27 @@ describe('kaniko registry login bootstrap', () => {
     const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
     const fullCommand = applyCall[0];
     const assumeRoleCommand =
-      'aws sts assume-role --role-arn arn:aws:iam::123456789012:role/ecr-pusher ' +
-      '--role-session-name lifecycle-test-service-abc123';
+      'aws sts assume-role --role-arn \\"arn:aws:iam::123456789012:role/ecr-pusher\\" ' +
+      '--role-session-name \\"lifecycle-test-service-abc123\\"';
 
     expect(fullCommand).toContain(assumeRoleCommand);
     expect(fullCommand.indexOf(assumeRoleCommand)).toBeLessThan(
       fullCommand.indexOf('aws ecr get-login-password --region us-east-1')
     );
+  });
+
+  it('ignores the push role for non-ECR registries', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        buildDefaults: { ecrPushRoleArn: 'arn:aws:iam::123456789012:role/ecr-pusher' },
+      }),
+    });
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, { ...baseOptions, ecrDomain: 'registry.internal.svc.cluster.local' });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+
+    expect(applyCall[0]).not.toContain('aws sts assume-role');
   });
 
   it('keeps non-ECR login bootstrap generic', async () => {

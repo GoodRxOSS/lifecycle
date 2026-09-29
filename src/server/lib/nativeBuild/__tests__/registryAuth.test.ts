@@ -114,12 +114,14 @@ describe('native build registry auth', () => {
       const script = buildEcrAssumeRoleScript('arn:aws:iam::123456789012:role/pusher', 'lifecycle-x');
 
       expect(script).toContain(
-        'ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::123456789012:role/pusher ' +
-          '--role-session-name lifecycle-x --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)'
+        'ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn "arn:aws:iam::123456789012:role/pusher" ' +
+          '--role-session-name "lifecycle-x" --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)'
       );
       expect(script).toContain('export AWS_ACCESS_KEY_ID=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f1)');
       expect(script).toContain('export AWS_SECRET_ACCESS_KEY=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f2)');
       expect(script).toContain('export AWS_SESSION_TOKEN=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f3)');
+      expect(script.indexOf('unset ECR_PUSH_CREDENTIALS')).toBeGreaterThan(script.indexOf('AWS_SESSION_TOKEN'));
+      expect(script.trim().endsWith('aws sts get-caller-identity')).toBe(true);
     });
   });
 
