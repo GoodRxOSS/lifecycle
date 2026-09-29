@@ -29,6 +29,21 @@ export const DEFAULT_PROVIDER_ENV_VARS: Record<SupportedAgentProviderName, strin
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
+export const BASE_URL_CAPABLE_PROVIDER_NAMES: readonly SupportedAgentProviderName[] = ['openai'];
+
+export function isValidProviderBaseUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() !== value || value === '') {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeAgentProviderName(value: unknown): SupportedAgentProviderName | null {
   if (typeof value !== 'string') {
     return null;

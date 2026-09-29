@@ -412,6 +412,33 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       expect(mockStoreKey).not.toHaveBeenCalled();
     });
 
+    it('validates an openai key against the configured baseUrl', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({
+        enabled: true,
+        providers: [
+          {
+            name: 'openai',
+            enabled: true,
+            apiKeyEnvVar: 'GATEWAY_API_KEY',
+            baseUrl: 'https://gateway.example.test/v1/',
+            models: [],
+          },
+        ],
+      });
+      mockFetch.mockResolvedValueOnce({ status: 200 });
+      mockStoreKey.mockResolvedValueOnce(undefined);
+      mockGetMaskedKey.mockResolvedValueOnce({ provider: 'openai', maskedKey: 'masked-key', updatedAt: null });
+
+      const res = await POST(
+        makeRequest({ provider: 'openai', apiKey: 'gateway-key' }, { sub: 'user-1', realm_access: { roles: ['user'] } })
+      );
+
+      expect(res.status).toBe(201);
+      expect(mockFetch).toHaveBeenCalledWith('https://gateway.example.test/v1/models', {
+        headers: { Authorization: 'Bearer gateway-key' },
+      });
+    });
+
     it('rejects a key when provider validation cannot reach the upstream API', async () => {
       mockFetch.mockRejectedValueOnce(new Error('network unavailable'));
 

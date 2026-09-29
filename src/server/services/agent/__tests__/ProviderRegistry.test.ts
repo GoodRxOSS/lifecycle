@@ -22,6 +22,9 @@ const mockWarn = jest.fn();
 const mockImportEsm = jest.fn();
 const mockLanguageModel = { id: 'mock-language-model' };
 const mockLanguageModelProvider = jest.fn(() => mockLanguageModel);
+const mockChatLanguageModel = { id: 'mock-chat-language-model' };
+const mockChatProvider = jest.fn(() => mockChatLanguageModel);
+(mockLanguageModelProvider as unknown as { chat: jest.Mock }).chat = mockChatProvider;
 const mockCreateAnthropic = jest.fn(() => mockLanguageModelProvider);
 const mockCreateOpenAI = jest.fn(() => mockLanguageModelProvider);
 const mockCreateGoogle = jest.fn(() => mockLanguageModelProvider);
@@ -630,9 +633,90 @@ describe('AgentProviderRegistry credential resolution', () => {
       expect(mockImportEsm).toHaveBeenCalledWith(moduleId);
       expect(createProvider).toHaveBeenCalledWith({ apiKey: 'stored-user-key' });
       expect(mockLanguageModelProvider).toHaveBeenCalledWith('selected-model');
-      expect(mockGetEffectiveConfig).not.toHaveBeenCalled();
+      expect(mockChatProvider).not.toHaveBeenCalled();
     }
   );
+
+  it('routes an openai provider with a baseUrl through the chat completions model', async () => {
+    mockGetEffectiveConfig.mockResolvedValue({
+      providers: [
+        {
+          name: 'openai',
+          enabled: true,
+          apiKeyEnvVar: 'GATEWAY_API_KEY',
+          baseUrl: 'https://gateway.example.test/v1',
+          models: [],
+        },
+      ],
+    });
+    process.env.GATEWAY_API_KEY = 'shared-gateway-key';
+
+    try {
+      await expect(
+        AgentProviderRegistry.createLanguageModel({
+          repoFullName: 'example-org/example-repo',
+          selection: { provider: 'openai', modelId: 'gateway-model' },
+          userIdentity: USER_IDENTITY,
+        })
+      ).resolves.toBe(mockChatLanguageModel);
+    } finally {
+      delete process.env.GATEWAY_API_KEY;
+    }
+
+    expect(mockCreateOpenAI).toHaveBeenCalledWith({
+      apiKey: 'shared-gateway-key',
+      baseURL: 'https://gateway.example.test/v1',
+    });
+    expect(mockChatProvider).toHaveBeenCalledWith('gateway-model');
+    expect(mockLanguageModelProvider).not.toHaveBeenCalled();
+  });
+
+  it('sends a stored user key to the configured baseUrl as well', async () => {
+    mockGetEffectiveConfig.mockResolvedValue({
+      providers: [
+        {
+          name: 'openai',
+          enabled: true,
+          apiKeyEnvVar: 'GATEWAY_API_KEY',
+          baseUrl: 'https://gateway.example.test/v1',
+          models: [],
+        },
+      ],
+    });
+    (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValueOnce('user-gateway-key');
+
+    await AgentProviderRegistry.createLanguageModel({
+      selection: { provider: 'openai', modelId: 'gateway-model' },
+      userIdentity: USER_IDENTITY,
+    });
+
+    expect(mockCreateOpenAI).toHaveBeenCalledWith({
+      apiKey: 'user-gateway-key',
+      baseURL: 'https://gateway.example.test/v1',
+    });
+  });
+
+  it('ignores a baseUrl on a provider that cannot target a custom endpoint', async () => {
+    mockGetEffectiveConfig.mockResolvedValue({
+      providers: [
+        {
+          name: 'anthropic',
+          enabled: true,
+          apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+          baseUrl: 'https://gateway.example.test/v1',
+          models: [],
+        },
+      ],
+    });
+    (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValueOnce('stored-user-key');
+
+    await AgentProviderRegistry.createLanguageModel({
+      selection: { provider: 'anthropic', modelId: 'selected-model' },
+      userIdentity: USER_IDENTITY,
+    });
+
+    expect(mockCreateAnthropic).toHaveBeenCalledWith({ apiKey: 'stored-user-key' });
+  });
 
   it('rejects an unsupported provider without importing an SDK', async () => {
     (UserApiKeyService.getDecryptedKey as jest.Mock).mockResolvedValueOnce('stored-user-key');
