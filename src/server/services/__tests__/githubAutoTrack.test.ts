@@ -171,6 +171,58 @@ describe('handlePushWebhook auto-track wiring', () => {
     );
   });
 
+  it('redeploys through the real service when repo-less services also match the push', async () => {
+    const build = {
+      id: 7,
+      isStatic: false,
+      trackDefaultBranches: false,
+      pullRequest: { status: 'open', deployOnUpdate: true },
+    };
+    const activeDeployChain: any = {
+      where: jest.fn().mockReturnThis(),
+      whereNot: jest.fn().mockReturnThis(),
+      withGraphFetched: jest.fn().mockResolvedValue([
+        { id: 17, devMode: false, build, deployable: { defaultBranchName: 'other', name: 'app', repositoryId: '42' } },
+        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: null } },
+      ]),
+    };
+    const failedDeployChain: any = {
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockResolvedValue([]),
+    };
+    const enqueueResolveAndDeployBuild = jest.fn();
+    const db = {
+      models: {
+        PullRequest: { findOne: jest.fn() },
+        Deploy: {
+          query: jest.fn().mockReturnValueOnce(activeDeployChain).mockReturnValueOnce(failedDeployChain),
+        },
+      },
+      services: { BuildService: { enqueueResolveAndDeployBuild } },
+    };
+    const service = new Github(
+      db as any,
+      {} as any,
+      {} as any,
+      { registerQueue: jest.fn(() => ({ add: jest.fn(), on: jest.fn() })) } as any
+    );
+    jest.spyOn(service as any, 'enqueueAutoTrackedApiBuilds').mockResolvedValue(undefined);
+    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(undefined);
+
+    await service.handlePushWebhook({
+      ref: 'refs/heads/main',
+      before: '0000000',
+      after: 'sha123',
+      commits: [],
+      repository: { id: 42, full_name: 'org/repo' },
+    } as any);
+
+    expect(staticFallback).not.toHaveBeenCalled();
+    expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ buildId: 7, sourceGithubRepositoryId: 42, sourceBranch: 'main' })
+    );
+  });
+
   it('continues the existing PR redeploy flow when the API auto-track lookup fails', async () => {
     const build = {
       id: 7,
