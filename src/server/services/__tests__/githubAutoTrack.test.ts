@@ -132,6 +132,45 @@ describe('handlePushWebhook auto-track wiring', () => {
     expect(autoTrack).toHaveBeenCalledWith(42, 'main', 'sha123', 'aaaa111');
   });
 
+  it('falls back to the static environment path when only repo-less services match the push', async () => {
+    const build = { id: 7, isStatic: true, trackDefaultBranches: true, pullRequest: null };
+    const deployChain: any = {
+      where: jest.fn().mockReturnThis(),
+      whereNot: jest.fn().mockReturnThis(),
+      withGraphFetched: jest.fn().mockResolvedValue([
+        { id: 21, devMode: false, build, deployable: { name: 'cache', type: 'docker', repositoryId: null } },
+        { id: 22, devMode: false, build, deployable: { name: 'db', type: 'aurora-restore', repositoryId: null } },
+      ]),
+    };
+    const db = {
+      models: {
+        PullRequest: { findOne: jest.fn().mockResolvedValue(null) },
+        Deploy: { query: jest.fn(() => deployChain) },
+      },
+      services: { BuildService: { enqueueResolveAndDeployBuild: jest.fn() } },
+    };
+    const service = new Github(
+      db as any,
+      {} as any,
+      {} as any,
+      { registerQueue: jest.fn(() => ({ add: jest.fn(), on: jest.fn() })) } as any
+    );
+    jest.spyOn(service as any, 'enqueueAutoTrackedApiBuilds').mockResolvedValue(undefined);
+    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(undefined);
+
+    await service.handlePushWebhook({
+      ref: 'refs/heads/main',
+      before: 'aaaa111',
+      after: 'sha123',
+      commits: [],
+      repository: { id: 42, full_name: 'org/config' },
+    } as any);
+
+    expect(staticFallback).toHaveBeenCalledWith(
+      expect.objectContaining({ githubRepositoryId: 42, branchName: 'main' })
+    );
+  });
+
   it('continues the existing PR redeploy flow when the API auto-track lookup fails', async () => {
     const build = {
       id: 7,

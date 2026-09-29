@@ -145,7 +145,8 @@ export default class DeployableService extends BaseService {
     service: YamlService.Service,
     active: boolean,
     dependsOnDeployableName: string,
-    build?: Build
+    build?: Build,
+    configRepositoryId: number | null = null
   ): Promise<DeployableAttributes> {
     let attributes: DeployableAttributes;
     let deployment: YamlService.DeploymentConfig;
@@ -216,7 +217,12 @@ export default class DeployableService extends BaseService {
           type: YamlService.getDeployType(service),
           dockerImage: YamlService.getDockerImage(service),
           repositoryId: repositoryId ?? null,
-          resolvedFromRepositoryId: repositoryId != null ? Number(repositoryId) : null,
+          resolvedFromRepositoryId:
+            repositoryId != null
+              ? Number(repositoryId)
+              : configRepositoryId != null
+              ? Number(configRepositoryId)
+              : null,
           branchName,
           defaultBranchName,
           defaultTag: await YamlService.getDefaultTag(service),
@@ -386,6 +392,13 @@ export default class DeployableService extends BaseService {
         }
       }
 
+      // Repo-less services (docker, aurora-restore) belong to the config they were read from, so they inherit
+      // its repository identity and tracked branch.
+      const deployType = YamlService.getDeployType(service);
+      const isRepoLess =
+        repoName == null && (deployType === DeployTypes.DOCKER || deployType === DeployTypes.AURORA_RESTORE);
+      if (isRepoLess) branch = branchName;
+
       const deployableAttributes: DeployableAttributes = await this.generateAttributesFromYamlConfig(
         buildId,
         buildUUID,
@@ -394,7 +407,8 @@ export default class DeployableService extends BaseService {
         service,
         active,
         parentDeployableName,
-        build
+        build,
+        isRepoLess ? repositoryId ?? null : null
       );
 
       if (!deployableServices.has(deployableAttributes.name)) {

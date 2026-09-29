@@ -1036,6 +1036,111 @@ describe('BuildService stale deploy reconciliation', () => {
     expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [6] });
   });
 
+  describe('repo-less dependencies owned by their parent config', () => {
+    const scoped = (existing: any[], emitted: any[], staleDeploys: any[] = [], sourceBranch = 'trunk') => {
+      createService(existing, staleDeploys);
+      return (buildService as any).reconcileDeletedDeployables(
+        createBuild(),
+        {
+          canReconcile: true,
+          deployables: [],
+          reconcileEligibleDeployables: emitted.map((entry) => ({ source: 'yaml', reconcileEligible: true, ...entry })),
+        },
+        targetRepoId,
+        sourceBranch
+      );
+    };
+    const api = { name: 'api', resolvedFromRepositoryId: targetRepoId, branchName: 'trunk' };
+
+    test('an aurora dependency still required by its parent is not reaped', async () => {
+      const db = {
+        id: 20,
+        name: 'db',
+        type: 'aurora-restore',
+        resolvedFromRepositoryId: targetRepoId,
+        branchName: 'trunk',
+      };
+
+      await scoped([db], [api, { name: 'db', resolvedFromRepositoryId: targetRepoId, branchName: 'trunk' }]);
+
+      expect(mockCleanupDeploy).not.toHaveBeenCalled();
+      expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+    });
+
+    test('a dependency whose parent tracks another branch is not reaped by a push to this branch', async () => {
+      const wkv = {
+        id: 21,
+        name: 'wkv',
+        type: 'docker',
+        resolvedFromRepositoryId: targetRepoId,
+        branchName: 'feature-x',
+      };
+
+      await scoped([wkv], [api]);
+
+      expect(mockCleanupDeploy).not.toHaveBeenCalled();
+    });
+
+    test('a docker dependency pinned to an image override is invisible to branch-scoped reconciliation', async () => {
+      const kv = {
+        id: 22,
+        name: 'kv',
+        type: 'docker',
+        resolvedFromRepositoryId: targetRepoId,
+        branchName: 'trunk',
+        commentBranchName: 'redis@7.2-alpine',
+      };
+
+      await scoped([kv], [api]);
+
+      expect(mockCleanupDeploy).not.toHaveBeenCalled();
+    });
+
+    test('a shared dependency is not reaped while another parent in the build still requires it', async () => {
+      const redis = {
+        id: 24,
+        name: 'redis',
+        type: 'docker',
+        resolvedFromRepositoryId: targetRepoId,
+        branchName: 'trunk',
+      };
+      createService([redis], [{ id: 91, uuid: 'redis-build-1', deployableId: 24 }]);
+      const build = createBuild({
+        deployables: [{ name: 'api', requires: [] }, { name: 'worker', requires: ['redis'] }, redis],
+      });
+
+      await (buildService as any).reconcileDeletedDeployables(
+        build,
+        {
+          canReconcile: true,
+          deployables: [],
+          reconcileEligibleDeployables: [{ ...api, source: 'yaml', reconcileEligible: true }],
+        },
+        targetRepoId,
+        'trunk'
+      );
+
+      expect(mockCleanupDeploy).not.toHaveBeenCalled();
+      expect(mockDeleteServiceRows).not.toHaveBeenCalled();
+    });
+
+    test('a dependency removed from its parent config is reaped by a scoped run on the parent branch', async () => {
+      const staleDeploy = { id: 90, uuid: 'state-build-1', deployableId: 23 };
+      const state = {
+        id: 23,
+        name: 'state',
+        type: 'docker',
+        resolvedFromRepositoryId: targetRepoId,
+        branchName: 'trunk',
+      };
+
+      await scoped([state], [api], [staleDeploy]);
+
+      expect(mockCleanupDeploy).toHaveBeenCalledWith(staleDeploy, { mode: 'service' });
+      expect(mockDeleteServiceRows).toHaveBeenCalledWith({ buildId: 10, deployableIds: [23] });
+    });
+  });
+
   test('full reconciliation can delete YAML-owned deployables with null repository ownership', async () => {
     const staleDeploy = { id: 80, uuid: 'external-cache-build-1', deployableId: 5 };
     createService([{ id: 5, name: 'external-cache', resolvedFromRepositoryId: null }], [staleDeploy]);

@@ -2426,7 +2426,7 @@ export default class BuildService extends BaseService {
     // A service whose config we could not read is an unknown, not a deletion — never reap it.
     const unresolvedNames = new Set(reconciliationResult.unresolvedServiceNames ?? []);
     const unresolvedRepositoryIds = new Set(reconciliationResult.unresolvedRepositoryIds ?? []);
-    const staleDeployables = existingDeployables.filter(
+    const staleCandidates = existingDeployables.filter(
       (deployable) =>
         !expectedNames.has(deployable.name) &&
         !unresolvedNames.has(deployable.name) &&
@@ -2435,6 +2435,27 @@ export default class BuildService extends BaseService {
           unresolvedRepositoryIds.has(deployable.resolvedFromRepositoryId)
         )
     );
+    // A dependency shared by several parents is one row per build whose owner is whichever scope resolved it last,
+    // so one parent dropping it must not reap it while another parent in the build still requires it.
+    let staleDeployables = staleCandidates;
+    if (staleCandidates.length > 0) {
+      await build.$fetchGraph('deployables');
+      const candidateNames = new Set(staleCandidates.map((deployable) => deployable.name));
+      const stillRequired = new Set(
+        (build.deployables ?? [])
+          .filter((deployable) => !candidateNames.has(deployable.name))
+          .flatMap((deployable) => deployable.requires ?? [])
+      );
+      staleDeployables = staleCandidates.filter((deployable) => !stillRequired.has(deployable.name));
+      if (staleDeployables.length < staleCandidates.length) {
+        getLogger({
+          buildUuid: build.uuid,
+          stillRequiredNames: staleCandidates
+            .filter((deployable) => stillRequired.has(deployable.name))
+            .map((deployable) => deployable.name),
+        }).info('Stale deploy reconciliation: kept deployables still required by another service');
+      }
+    }
 
     if (staleDeployables.length === 0) {
       getLogger({

@@ -1991,6 +1991,146 @@ describe('DeployService uncovered public behavior', () => {
     expect(created.$setRelated).toHaveBeenCalledWith('build', build);
   });
 
+  describe('repo-less dependencies', () => {
+    const harnessWith = (existing: any[]) => {
+      const { service, db } = serviceHarness();
+      const listQuery: any = {
+        where: jest.fn(() => listQuery),
+        withGraphFetched: jest.fn().mockResolvedValue(existing),
+      };
+      const created = {
+        id: 99,
+        $query: jest.fn(() => ({ patch: jest.fn().mockResolvedValue(1) })),
+        $setRelated: jest.fn(),
+      };
+      db.models.Deploy = {
+        query: jest.fn(() => listQuery),
+        findOne: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(created),
+      };
+      db.services.Deploy = { hostForDeployableDeploy: jest.fn(() => 'dep.example.test') };
+      return { service, db };
+    };
+    const existingDeploy = (deployableId: number, githubRepositoryId: number | null) => {
+      const patch = jest.fn().mockResolvedValue(1);
+      return { id: deployableId + 100, deployableId, githubRepositoryId, patch, $query: jest.fn(() => ({ patch })) };
+    };
+    const buildWith = (deployables: any[], deploys: any[]) => ({
+      id: 7,
+      uuid: 'env',
+      deployables,
+      deploys,
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+
+    test('creates a repo-less deploy scoped to the repository that defines it', async () => {
+      const { service, db } = harnessWith([]);
+      const kv = {
+        id: 21,
+        name: 'kv',
+        type: DeployTypes.DOCKER,
+        repositoryId: null,
+        resolvedFromRepositoryId: 42,
+        branchName: 'trunk',
+        active: true,
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([kv], []) as any);
+
+      expect(db.models.Deploy.create).toHaveBeenCalledWith(
+        expect.objectContaining({ deployableId: 21, githubRepositoryId: 42 })
+      );
+    });
+
+    test('a run scoped to the defining repository and branch claims the dependency and corrects its legacy repo id', async () => {
+      const deploy = existingDeploy(21, 0);
+      const { service } = harnessWith([deploy]);
+      const kv = {
+        id: 21,
+        name: 'kv',
+        type: DeployTypes.DOCKER,
+        repositoryId: null,
+        resolvedFromRepositoryId: 42,
+        branchName: 'trunk',
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([kv], [deploy]) as any, 42, 'push-sha', 'trunk');
+
+      expect(deploy.patch).toHaveBeenCalledWith(
+        expect.objectContaining({ githubRepositoryId: 42, branchName: 'trunk' })
+      );
+    });
+
+    test('a branch-scoped run leaves a docker dependency pinned to an image override untouched', async () => {
+      const deploy = existingDeploy(21, 42);
+      const { service } = harnessWith([deploy]);
+      const kv = {
+        id: 21,
+        name: 'kv',
+        type: DeployTypes.DOCKER,
+        repositoryId: null,
+        resolvedFromRepositoryId: 42,
+        branchName: 'trunk',
+        commentBranchName: 'redis@7.2-alpine',
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([kv], [deploy]) as any, 42, 'push-sha', 'trunk');
+
+      expect(deploy.patch).not.toHaveBeenCalled();
+    });
+
+    test('a run for another repository never claims the dependency', async () => {
+      const deploy = existingDeploy(21, 42);
+      const { service } = harnessWith([deploy]);
+      const kv = {
+        id: 21,
+        name: 'kv',
+        type: DeployTypes.DOCKER,
+        repositoryId: null,
+        resolvedFromRepositoryId: 42,
+        branchName: 'trunk',
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([kv], [deploy]) as any, 77, 'push-sha', 'trunk');
+
+      expect(deploy.patch).not.toHaveBeenCalled();
+    });
+
+    test('a repo-less row without a known source keeps its legacy repo id and is not targeted', async () => {
+      const deploy = existingDeploy(21, 0);
+      const { service } = harnessWith([deploy]);
+      const legacy = {
+        id: 21,
+        name: 'kv',
+        type: DeployTypes.DOCKER,
+        repositoryId: null,
+        resolvedFromRepositoryId: null,
+        branchName: 'main',
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([legacy], [deploy]) as any, 42, 'push-sha', 'main');
+
+      expect(deploy.patch).not.toHaveBeenCalled();
+    });
+
+    test('never rewrites the repo id of a service that has its own repository', async () => {
+      const deploy = existingDeploy(31, 55);
+      const { service } = harnessWith([deploy]);
+      const api = {
+        id: 31,
+        name: 'api',
+        type: DeployTypes.GITHUB,
+        repositoryId: 42,
+        resolvedFromRepositoryId: 42,
+        branchName: 'trunk',
+      };
+
+      await service.findOrCreateDeploys({} as any, buildWith([api], [deploy]) as any, 42, 'push-sha', 'trunk');
+
+      expect(deploy.patch).toHaveBeenCalledWith(expect.not.objectContaining({ githubRepositoryId: expect.anything() }));
+    });
+  });
+
   test('findOrCreateDeploys contains one deploy patch failure and still returns the refreshed relation', async () => {
     const { service, db } = serviceHarness();
     const patchError = new Error('deploy patch unavailable');
