@@ -31,7 +31,7 @@ const cache = new Map<string, CacheEntry>();
 
 function getCacheKey(baseUrl: string, apiKey: string): string {
   const keyFingerprint = createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
-  return `${baseUrl}|${keyFingerprint}`;
+  return `${baseUrl.replace(/\/+$/, '')}|${keyFingerprint}`;
 }
 
 function parseModelIds(body: unknown): string[] {
@@ -45,8 +45,12 @@ function parseModelIds(body: unknown): string[] {
     .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
     .map((id) => id.trim());
 
+  if (ids.length === 0) {
+    throw new Error('response lists no models');
+  }
+
   // Endpoints don't guarantee list order, and the first model becomes the default when none is pinned.
-  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+  return [...new Set(ids)].sort();
 }
 
 async function fetchModelIds(baseUrl: string, apiKey: string): Promise<string[]> {

@@ -365,7 +365,7 @@ describe('API /api/v2/ai/agent/api-keys', () => {
         provider: 'openai',
         apiKey: 'sk-openai',
         expectedUrl: 'https://api.openai.com/v1/models',
-        expectedOptions: { headers: { Authorization: 'Bearer sk-openai' } },
+        expectedOptions: { headers: { Authorization: 'Bearer sk-openai' }, signal: expect.any(AbortSignal) },
       },
       {
         provider: 'gemini',
@@ -425,7 +425,7 @@ describe('API /api/v2/ai/agent/api-keys', () => {
           },
         ],
       });
-      mockFetch.mockResolvedValueOnce({ status: 200 });
+      mockFetch.mockResolvedValueOnce({ status: 200, ok: true });
       mockStoreKey.mockResolvedValueOnce(undefined);
       mockGetMaskedKey.mockResolvedValueOnce({ provider: 'openai', maskedKey: 'masked-key', updatedAt: null });
 
@@ -436,7 +436,31 @@ describe('API /api/v2/ai/agent/api-keys', () => {
       expect(res.status).toBe(201);
       expect(mockFetch).toHaveBeenCalledWith('https://gateway.example.test/v1/models', {
         headers: { Authorization: 'Bearer gateway-key' },
+        signal: expect.any(AbortSignal),
       });
+    });
+
+    it.each([404, 429, 500])('rejects a key when the configured baseUrl returns %s', async (status) => {
+      mockGetEffectiveConfig.mockResolvedValue({
+        enabled: true,
+        providers: [
+          {
+            name: 'openai',
+            enabled: true,
+            apiKeyEnvVar: 'GATEWAY_API_KEY',
+            baseUrl: 'https://gateway.example.test/v1',
+            models: [],
+          },
+        ],
+      });
+      mockFetch.mockResolvedValueOnce({ status, ok: false });
+
+      const res = await POST(
+        makeRequest({ provider: 'openai', apiKey: 'gateway-key' }, { sub: 'user-1', realm_access: { roles: ['user'] } })
+      );
+
+      expect(res.status).toBe(400);
+      expect(mockStoreKey).not.toHaveBeenCalled();
     });
 
     it('rejects a key when provider validation cannot reach the upstream API', async () => {
