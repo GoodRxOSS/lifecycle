@@ -105,6 +105,7 @@ export const agentRuntimeConfigSchema = {
           name: { type: 'string' },
           enabled: { type: 'boolean' },
           apiKeyEnvVar: { type: 'string', minLength: 1, pattern: '^[A-Z_][A-Z0-9_]*$' },
+          baseUrl: { type: 'string', minLength: 1 },
           models: {
             type: 'array',
             items: {

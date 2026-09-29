@@ -21,8 +21,10 @@ import type {
 } from 'server/services/types/agentRuntimeConfig';
 import { isAgentCapabilityAvailability, isAgentCapabilityCatalogId } from 'server/services/agent/capabilityCatalog';
 import {
+  BASE_URL_CAPABLE_PROVIDER_NAMES,
   getProviderEnvVarCandidates,
   isValidEnvVarName,
+  isValidProviderBaseUrl,
   normalizeAgentProviderName,
   type SupportedAgentProviderName,
 } from 'server/services/agent/providerConfig';
@@ -191,6 +193,22 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig): void {
       throw new AgentRuntimeConfigValidationError(
         `Provider "${providerName}" apiKeyEnvVar must be an environment variable name like ${exampleEnvVar}.`
       );
+    }
+
+    if (provider.baseUrl !== undefined) {
+      if (!BASE_URL_CAPABLE_PROVIDER_NAMES.includes(providerName)) {
+        throw new AgentRuntimeConfigValidationError(
+          `Provider "${providerName}" does not support baseUrl; only ${BASE_URL_CAPABLE_PROVIDER_NAMES.join(
+            ', '
+          )} can target a custom endpoint.`
+        );
+      }
+
+      if (!isValidProviderBaseUrl(provider.baseUrl)) {
+        throw new AgentRuntimeConfigValidationError(
+          `Provider "${providerName}" baseUrl must be an http(s) URL without embedded credentials.`
+        );
+      }
     }
 
     validateProviderModels(providerName, provider.models || [], provider.enabled !== false);

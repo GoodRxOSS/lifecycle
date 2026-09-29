@@ -68,6 +68,30 @@ describe('validateAgentRuntimeConfig', () => {
     expect(() => validateAgentRuntimeConfig(config)).toThrow('apiKeyEnvVar must be an environment variable name');
   });
 
+  it('accepts an http(s) baseUrl on the openai provider', () => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl: 'https://gateway.example.test/v1' };
+
+    expect(() => validateAgentRuntimeConfig(config)).not.toThrow();
+  });
+
+  it('rejects a baseUrl on a provider that cannot target a custom endpoint', () => {
+    const config = makeConfig();
+    config.providers[0].baseUrl = 'https://gateway.example.test/v1';
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('Provider "anthropic" does not support baseUrl');
+  });
+
+  it.each(['gateway.example.test/v1', 'ftp://gateway.example.test', 'https://user:pass@gateway.example.test/v1', ''])(
+    'rejects an invalid openai baseUrl %j',
+    (baseUrl) => {
+      const config = makeConfig();
+      config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl };
+
+      expect(() => validateAgentRuntimeConfig(config)).toThrow('baseUrl must be an http(s) URL');
+    }
+  );
+
   it('rejects an unsupported provider', () => {
     const config = makeConfig();
     config.providers[0].name = 'sample-provider' as any;
