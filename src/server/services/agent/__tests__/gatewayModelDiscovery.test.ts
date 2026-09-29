@@ -51,6 +51,23 @@ describe('discoverEndpointModelIds', () => {
     });
   });
 
+  it('returns ids in a stable order regardless of endpoint order', async () => {
+    mockFetch
+      .mockResolvedValueOnce(modelsResponse(['model-c', 'model-a', 'model-b']))
+      .mockResolvedValueOnce(modelsResponse(['model-b', 'model-c', 'model-a']));
+
+    await expect(discoverEndpointModelIds({ baseUrl: BASE_URL, apiKey: 'key-1' })).resolves.toEqual([
+      'model-a',
+      'model-b',
+      'model-c',
+    ]);
+    await expect(discoverEndpointModelIds({ baseUrl: BASE_URL, apiKey: 'key-2' })).resolves.toEqual([
+      'model-a',
+      'model-b',
+      'model-c',
+    ]);
+  });
+
   it('serves cached ids without refetching inside the cache window', async () => {
     mockFetch.mockResolvedValueOnce(modelsResponse(['model-a']));
 

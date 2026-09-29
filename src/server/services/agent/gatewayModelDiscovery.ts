@@ -45,7 +45,8 @@ function parseModelIds(body: unknown): string[] {
     .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
     .map((id) => id.trim());
 
-  return [...new Set(ids)];
+  // Endpoints don't guarantee list order, and the first model becomes the default when none is pinned.
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
 }
 
 async function fetchModelIds(baseUrl: string, apiKey: string): Promise<string[]> {
