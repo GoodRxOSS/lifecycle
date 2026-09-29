@@ -53,6 +53,11 @@ jest.mock('server/lib/esmImport', () => ({
   importEsm: (specifier: string) => mockImportEsm(specifier),
 }));
 
+const mockDiscoverEndpointModelIds = jest.fn();
+jest.mock('../gatewayModelDiscovery', () => ({
+  discoverEndpointModelIds: (args: unknown) => mockDiscoverEndpointModelIds(args),
+}));
+
 import AgentProviderRegistry, {
   AgentModelSelectionError,
   MissingAgentProviderApiKeyError,
@@ -636,6 +641,104 @@ describe('AgentProviderRegistry credential resolution', () => {
       expect(mockChatProvider).not.toHaveBeenCalled();
     }
   );
+
+  describe('model discovery', () => {
+    const discoveringProvider = (overrides: Record<string, unknown> = {}) => ({
+      name: 'openai',
+      enabled: true,
+      apiKeyEnvVar: 'GATEWAY_API_KEY',
+      baseUrl: 'https://gateway.example.test/v1',
+      discoverModels: true,
+      models: [],
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      process.env.GATEWAY_API_KEY = 'shared-gateway-key';
+    });
+
+    afterEach(() => {
+      delete process.env.GATEWAY_API_KEY;
+    });
+
+    it('lists every model the endpoint exposes to the shared key', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({ providers: [discoveringProvider()] });
+      mockDiscoverEndpointModelIds.mockResolvedValueOnce(['gateway-a', 'gateway-b']);
+
+      await expect(AgentProviderRegistry.listAvailableModels()).resolves.toEqual([
+        { provider: 'openai', modelId: 'gateway-a', displayName: 'gateway-a', default: false, maxTokens: 8192 },
+        { provider: 'openai', modelId: 'gateway-b', displayName: 'gateway-b', default: false, maxTokens: 8192 },
+      ]);
+      expect(mockDiscoverEndpointModelIds).toHaveBeenCalledWith({
+        baseUrl: 'https://gateway.example.test/v1',
+        apiKey: 'shared-gateway-key',
+      });
+    });
+
+    it('applies configured models as overrides and hides disabled ones', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({
+        providers: [
+          discoveringProvider({
+            models: [
+              { id: 'gateway-b', displayName: 'Gateway B', enabled: true, default: true, maxTokens: 64000 },
+              { id: 'gateway-c', displayName: 'Gateway C', enabled: false, default: false, maxTokens: 1 },
+              { id: 'not-on-gateway', displayName: 'Stale', enabled: true, default: false, maxTokens: 1 },
+            ],
+          }),
+        ],
+      });
+      mockDiscoverEndpointModelIds.mockResolvedValueOnce(['gateway-a', 'gateway-b', 'gateway-c']);
+
+      const models = await AgentProviderRegistry.listAvailableModels();
+
+      expect(models.map((model) => [model.modelId, model.displayName, model.default, model.maxTokens])).toEqual([
+        ['gateway-a', 'gateway-a', false, 8192],
+        ['gateway-b', 'Gateway B', true, 64000],
+      ]);
+    });
+
+    it('falls back to configured models when discovery has never succeeded', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({
+        providers: [
+          discoveringProvider({
+            models: [{ id: 'static-model', displayName: 'Static', enabled: true, default: true, maxTokens: 1000 }],
+          }),
+        ],
+      });
+      mockDiscoverEndpointModelIds.mockResolvedValueOnce(null);
+
+      await expect(AgentProviderRegistry.listAvailableModels()).resolves.toEqual([
+        { provider: 'openai', modelId: 'static-model', displayName: 'Static', default: true, maxTokens: 1000 },
+      ]);
+    });
+
+    it('does not call the endpoint without a shared key', async () => {
+      delete process.env.GATEWAY_API_KEY;
+      mockGetEffectiveConfig.mockResolvedValue({ providers: [discoveringProvider()] });
+
+      await expect(AgentProviderRegistry.listAvailableModels()).resolves.toEqual([]);
+      expect(mockDiscoverEndpointModelIds).not.toHaveBeenCalled();
+    });
+
+    it('does not call the endpoint for a disabled provider or without the flag', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({
+        providers: [discoveringProvider({ enabled: false }), discoveringProvider({ discoverModels: false })],
+      });
+
+      await AgentProviderRegistry.listAvailableModels();
+
+      expect(mockDiscoverEndpointModelIds).not.toHaveBeenCalled();
+    });
+
+    it('resolves a discovered model as a valid selection', async () => {
+      mockGetEffectiveConfig.mockResolvedValue({ providers: [discoveringProvider()] });
+      mockDiscoverEndpointModelIds.mockResolvedValueOnce(['gateway-a']);
+
+      await expect(
+        AgentProviderRegistry.resolveSelection({ requestedProvider: 'openai', requestedModelId: 'gateway-a' })
+      ).resolves.toEqual({ provider: 'openai', modelId: 'gateway-a' });
+    });
+  });
 
   it('routes an openai provider with a baseUrl through the chat completions model', async () => {
     mockGetEffectiveConfig.mockResolvedValue({

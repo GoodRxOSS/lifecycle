@@ -92,6 +92,39 @@ describe('validateAgentRuntimeConfig', () => {
     }
   );
 
+  it('allows a discovering provider with no configured models', () => {
+    const config = makeConfig();
+    config.providers[0] = {
+      ...config.providers[0],
+      name: 'openai',
+      baseUrl: 'https://gateway.example.test/v1',
+      discoverModels: true,
+      models: [],
+    };
+
+    expect(() => validateAgentRuntimeConfig(config)).not.toThrow();
+  });
+
+  it('requires baseUrl for model discovery', () => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', discoverModels: true };
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('discoverModels requires baseUrl');
+  });
+
+  it('still enforces default-model rules on discovery overrides', () => {
+    const config = makeConfig();
+    config.providers[0] = {
+      ...config.providers[0],
+      name: 'openai',
+      baseUrl: 'https://gateway.example.test/v1',
+      discoverModels: true,
+      models: [{ id: 'gateway-a', displayName: 'A', enabled: false, default: true, maxTokens: 1 }],
+    };
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('must also be enabled');
+  });
+
   it('rejects an unsupported provider', () => {
     const config = makeConfig();
     config.providers[0].name = 'sample-provider' as any;

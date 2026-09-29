@@ -22,7 +22,9 @@ import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import { importEsm } from 'server/lib/esmImport';
 import { BadRequestError } from 'server/lib/appError';
+import type { AgentRuntimeModelConfig } from 'server/services/types/agentRuntimeConfig';
 import type { AgentModelSummary, AgentResolvedModelSelection } from './types';
+import { discoverEndpointModelIds } from './gatewayModelDiscovery';
 import {
   BASE_URL_CAPABLE_PROVIDER_NAMES,
   getProviderEnvVarCandidates,
@@ -34,8 +36,12 @@ type ProviderConfig = {
   name: string;
   apiKeyEnvVar?: string;
   baseUrl?: string;
+  discoverModels?: boolean;
   enabled?: boolean;
+  models?: AgentRuntimeModelConfig[];
 };
+
+const DISCOVERED_MODEL_MAX_TOKENS = 8192;
 type LanguageModelProvider = (modelId: string) => LanguageModel;
 
 function normalizeModelProvider(provider: string): string | null {
@@ -126,6 +132,45 @@ function getConfiguredBaseUrl(providerConfig: ProviderConfig | null | undefined)
   }
 
   return providerConfig.baseUrl;
+}
+
+function mergeDiscoveredModels(
+  discoveredIds: string[],
+  overrides: AgentRuntimeModelConfig[] = []
+): AgentRuntimeModelConfig[] {
+  const overridesById = new Map(overrides.map((model) => [model.id, model]));
+
+  return discoveredIds.map((id) => ({
+    id,
+    displayName: id,
+    enabled: true,
+    default: false,
+    maxTokens: DISCOVERED_MODEL_MAX_TOKENS,
+    ...overridesById.get(id),
+  }));
+}
+
+async function withDiscoveredModels(providerConfigs: ProviderConfig[]): Promise<ProviderConfig[]> {
+  return Promise.all(
+    providerConfigs.map(async (provider) => {
+      const baseUrl = getConfiguredBaseUrl(provider);
+      if (!provider?.discoverModels || provider.enabled === false || !baseUrl) {
+        return provider;
+      }
+
+      const apiKey = readSharedProviderApiKey(provider.name, provider.apiKeyEnvVar);
+      if (!apiKey) {
+        return provider;
+      }
+
+      const discoveredIds = await discoverEndpointModelIds({ baseUrl, apiKey });
+      if (!discoveredIds) {
+        return provider;
+      }
+
+      return { ...provider, models: mergeDiscoveredModels(discoveredIds, provider.models) };
+    })
+  );
 }
 
 function toResolvedModelSelection(model: AgentModelSummary): AgentResolvedModelSelection {
@@ -268,7 +313,8 @@ export default class AgentProviderRegistry {
 
   static async listAvailableModels(repoFullName?: string): Promise<AgentModelSummary[]> {
     const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
-    return transformProviderModels(config.providers || []).flatMap((model) => {
+    const providers = await withDiscoveredModels((config.providers || []) as ProviderConfig[]);
+    return transformProviderModels(providers).flatMap((model) => {
       const provider = normalizeModelProvider(model.provider);
       if (!provider) {
         return [];

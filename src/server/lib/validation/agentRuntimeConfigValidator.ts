@@ -211,7 +211,21 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig): void {
       }
     }
 
-    validateProviderModels(providerName, provider.models || [], provider.enabled !== false);
+    if (provider.discoverModels !== undefined && typeof provider.discoverModels !== 'boolean') {
+      throw new AgentRuntimeConfigValidationError(`Provider "${providerName}" discoverModels must be a boolean.`);
+    }
+
+    if (provider.discoverModels && provider.baseUrl === undefined) {
+      throw new AgentRuntimeConfigValidationError(
+        `Provider "${providerName}" discoverModels requires baseUrl, because models are listed from that endpoint.`
+      );
+    }
+
+    validateProviderModels(
+      providerName,
+      provider.models || [],
+      provider.enabled !== false && provider.discoverModels !== true
+    );
   }
 }
 
