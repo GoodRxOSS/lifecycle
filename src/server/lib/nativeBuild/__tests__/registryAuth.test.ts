@@ -50,11 +50,14 @@ jest.mock('server/lib/logger', () => ({
 import * as k8s from '@kubernetes/client-node';
 
 import {
+  buildEcrAssumeRoleScript,
+  buildEcrPushRoleSessionName,
   buildGarDockerConfig,
   buildNativeBuildRegistryAuthSecretName,
   createNativeBuildRegistryAuthSecret,
   deleteNativeBuildRegistryAuthSecret,
   getKanikoInsecureRegistries,
+  normalizeEcrPushRoleArn,
   normalizeNativeBuildRegistryAuth,
 } from '../registryAuth';
 
@@ -64,6 +67,60 @@ describe('native build registry auth', () => {
     mockGetAccessToken.mockResolvedValue('gar-access-token');
     mockCreateSecret.mockResolvedValue({ body: {} });
     mockDeleteSecret.mockResolvedValue({});
+  });
+
+  describe('normalizeEcrPushRoleArn', () => {
+    it('treats a missing role as not configured', () => {
+      expect(normalizeEcrPushRoleArn(undefined)).toBeUndefined();
+      expect(normalizeEcrPushRoleArn(null)).toBeUndefined();
+      expect(normalizeEcrPushRoleArn('')).toBeUndefined();
+    });
+
+    it('accepts IAM role ARNs including paths and partitions', () => {
+      expect(normalizeEcrPushRoleArn(' arn:aws:iam::123456789012:role/ecr-pusher ')).toBe(
+        'arn:aws:iam::123456789012:role/ecr-pusher'
+      );
+      expect(normalizeEcrPushRoleArn('arn:aws-us-gov:iam::123456789012:role/ci/ecr-push')).toBe(
+        'arn:aws-us-gov:iam::123456789012:role/ci/ecr-push'
+      );
+    });
+
+    it.each([
+      'ecr-pusher',
+      'arn:aws:iam::123:role/short-account',
+      'arn:aws:iam::123456789012:user/not-a-role',
+      'arn:aws:iam::123456789012:role/x; curl evil.example',
+      'arn:aws:iam::123456789012:role/$(id)',
+      42,
+    ])('rejects %p', (value) => {
+      expect(() => normalizeEcrPushRoleArn(value)).toThrow('Build: invalid ecrPushRoleArn');
+    });
+  });
+
+  describe('buildEcrPushRoleSessionName', () => {
+    it('prefixes the deploy uuid and stays within the STS session name limit', () => {
+      expect(buildEcrPushRoleSessionName('api-sample-env-123456')).toBe('lifecycle-api-sample-env-123456');
+      expect(buildEcrPushRoleSessionName('a'.repeat(100))).toHaveLength(64);
+      expect(buildEcrPushRoleSessionName('svc/with spaces')).toBe('lifecycle-svc-with-spaces');
+    });
+  });
+
+  describe('buildEcrAssumeRoleScript', () => {
+    it('is empty when no role is configured', () => {
+      expect(buildEcrAssumeRoleScript(undefined, 'lifecycle-x')).toBe('');
+    });
+
+    it('exports the assumed session credentials for the ECR login that follows', () => {
+      const script = buildEcrAssumeRoleScript('arn:aws:iam::123456789012:role/pusher', 'lifecycle-x');
+
+      expect(script).toContain(
+        'ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::123456789012:role/pusher ' +
+          '--role-session-name lifecycle-x --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)'
+      );
+      expect(script).toContain('export AWS_ACCESS_KEY_ID=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f1)');
+      expect(script).toContain('export AWS_SECRET_ACCESS_KEY=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f2)');
+      expect(script).toContain('export AWS_SESSION_TOKEN=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f3)');
+    });
   });
 
   describe('normalizeNativeBuildRegistryAuth', () => {

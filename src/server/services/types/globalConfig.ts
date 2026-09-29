@@ -343,6 +343,7 @@ export type BuildDefaults = {
   serviceAccount?: string;
   cacheRegistry?: string;
   registryAuth?: NativeBuildRegistryAuth[];
+  ecrPushRoleArn?: string;
   podAnnotations?: Record<string, string>;
   resources?: {
     buildkit?: ResourceRequirements;
