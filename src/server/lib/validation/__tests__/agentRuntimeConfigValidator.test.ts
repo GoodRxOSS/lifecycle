@@ -82,15 +82,19 @@ describe('validateAgentRuntimeConfig', () => {
     expect(() => validateAgentRuntimeConfig(config)).toThrow('Provider "anthropic" does not support baseUrl');
   });
 
-  it.each(['gateway.example.test/v1', 'ftp://gateway.example.test', 'https://user:pass@gateway.example.test/v1', ''])(
-    'rejects an invalid openai baseUrl %j',
-    (baseUrl) => {
-      const config = makeConfig();
-      config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl };
+  it.each([
+    'gateway.example.test/v1',
+    'ftp://gateway.example.test',
+    'https://user:pass@gateway.example.test/v1',
+    'https://gateway.example.test/v1?token=abc',
+    'https://gateway.example.test/v1#models',
+    '',
+  ])('rejects an invalid openai baseUrl %j', (baseUrl) => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl };
 
-      expect(() => validateAgentRuntimeConfig(config)).toThrow('baseUrl must be an http(s) URL');
-    }
-  );
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('baseUrl must be an http(s) URL');
+  });
 
   it('allows a discovering provider with no configured models', () => {
     const config = makeConfig();

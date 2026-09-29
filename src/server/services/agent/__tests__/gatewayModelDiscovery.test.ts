@@ -114,6 +114,21 @@ describe('discoverEndpointModelIds', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  it('treats an empty model list as a failure', async () => {
+    mockFetch.mockResolvedValueOnce(modelsResponse([]));
+
+    await expect(discoverEndpointModelIds({ baseUrl: BASE_URL, apiKey: 'key-1' })).resolves.toBeNull();
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares the cache between a baseUrl with and without a trailing slash', async () => {
+    mockFetch.mockResolvedValueOnce(modelsResponse(['model-a']));
+
+    await discoverEndpointModelIds({ baseUrl: BASE_URL, apiKey: 'key-1' });
+    await expect(discoverEndpointModelIds({ baseUrl: `${BASE_URL}/`, apiKey: 'key-1' })).resolves.toEqual(['model-a']);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('treats a response without a data array as a failure', async () => {
     mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ models: [] }) });
 

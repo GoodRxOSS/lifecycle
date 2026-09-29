@@ -83,8 +83,9 @@ async function validateProviderKey(provider: SupportedProvider, apiKey: string, 
           headers: {
             Authorization: `Bearer ${apiKey}`,
           },
+          signal: AbortSignal.timeout(10_000),
         });
-        return response.status !== 401 && response.status !== 403;
+        return baseUrl ? response.ok : response.status !== 401 && response.status !== 403;
       }
       case 'gemini': {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
