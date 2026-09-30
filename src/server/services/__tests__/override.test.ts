@@ -288,6 +288,19 @@ describe('OverrideService.applyBuildOverrides', () => {
     });
   });
 
+  it('ignores the image label of a docker service while applying its active state', async () => {
+    const { service } = createService();
+    const args = createFullYamlArgs({
+      serviceOverrides: [{ active: false, serviceName: 'api', branchOrExternalUrl: 'redis@7.2-alpine' }],
+    });
+    args.deploys[0]!.deployable!.type = DeployTypes.DOCKER;
+
+    await service.applyBuildOverrides(args);
+
+    expect(args.deploys[0]!.deployable!.$query().patch).not.toHaveBeenCalled();
+    expect(args.deploys[0]!.$query().patch).toHaveBeenCalledWith({ active: false });
+  });
+
   it('cascades only active state to dependent deploys', async () => {
     const { service } = createService();
     const args = createFullYamlArgs({
