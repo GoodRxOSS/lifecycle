@@ -1027,6 +1027,75 @@ describe('Deployable Service', () => {
       );
     });
 
+    describe('repo-less services inherit the identity of the config that defines them', () => {
+      const build = { enabledFeatures: [], $fetchGraph: jest.fn().mockResolvedValue(undefined) } as unknown as Build;
+      const resolve = async (service: YamlService.Service) => {
+        const deployableServices = new Map<string, DeployableAttributes>();
+        await deployableService.updateOrCreateDeployableAttributesUsingYAMLConfig(
+          deployableServices,
+          100,
+          'unit-test-12345',
+          service,
+          42,
+          'delivery-branch',
+          true,
+          'api',
+          build
+        );
+        return deployableServices.get(service.name);
+      };
+
+      test('a docker dependency takes the repository and branch of the config that defines it', async () => {
+        const kv = { name: 'kv', docker: { dockerImage: 'redis', defaultTag: '7.2-alpine', ports: [6379] } };
+
+        const attributes = await resolve(kv as unknown as YamlService.Service);
+
+        expect(attributes).toEqual(
+          expect.objectContaining({
+            repositoryId: 42,
+            resolvedFromRepositoryId: 42,
+            branchName: 'delivery-branch',
+            dependsOnDeployableName: 'api',
+          })
+        );
+        expect(attributes?.defaultBranchName).toBeUndefined();
+        expect(mockResolveRepositoryForAttributes).not.toHaveBeenCalled();
+      });
+
+      test('an aurora-restore dependency takes the repository and branch of the config that defines it', async () => {
+        const db = { name: 'db', auroraRestore: { command: 'restore', arguments: 'db' } };
+
+        const attributes = await resolve(db as unknown as YamlService.Service);
+
+        expect(attributes).toEqual(
+          expect.objectContaining({ repositoryId: 42, resolvedFromRepositoryId: 42, branchName: 'delivery-branch' })
+        );
+        expect(attributes?.defaultBranchName).toBeUndefined();
+      });
+
+      test('a helm service with only a chart and an external http service keep no repository', async () => {
+        const chartOnly = { name: 'cache', helm: { chart: { name: 'bitnami/redis' } } };
+        const external = {
+          name: 'partner',
+          externalHttp: { defaultInternalHostname: 'partner.example.com', defaultPublicUrl: 'partner.example.com' },
+        };
+
+        for (const service of [chartOnly, external]) {
+          expect(await resolve(service as unknown as YamlService.Service)).toEqual(
+            expect.objectContaining({ repositoryId: null, resolvedFromRepositoryId: null })
+          );
+        }
+      });
+
+      test('a configuration service keeps no source identity', async () => {
+        const config = { name: 'settings', configuration: { defaultTag: 'main', branchName: 'main' } };
+
+        expect(await resolve(config as unknown as YamlService.Service)).toEqual(
+          expect.objectContaining({ repositoryId: null, resolvedFromRepositoryId: null })
+        );
+      });
+    });
+
     test('preserves YAML resolution errors without mutating the in-memory deployable set', async () => {
       const resolutionError = new Error('global defaults unavailable');
       mockResolveRepositoryForAttributes.mockResolvedValue({ githubRepositoryId: 42 });

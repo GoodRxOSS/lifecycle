@@ -410,6 +410,9 @@ export default class OverrideService extends BaseService {
     }
 
     const deployable = deploy.deployable!;
+    // A Docker row's value in the comment is its image@tag display label, not a branch. Saving it as a branch
+    // override would pin the service to that label and drop it from its config's branch-scoped runs.
+    if (deployable.type === DeployTypes.DOCKER) branchOrExternalUrl = undefined;
 
     if (branchOrExternalUrl != null && psl.isValid(branchOrExternalUrl)) {
       await this.patchWithFailureMode(

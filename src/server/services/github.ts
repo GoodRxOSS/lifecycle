@@ -31,6 +31,7 @@ import {
   FallbackLabels,
   DeployStatus,
   BuildStatus,
+  DeployTypes,
 } from 'shared/constants';
 import { QUEUE_NAMES } from 'shared/config';
 import { NextApiRequest } from 'next';
@@ -538,12 +539,20 @@ export default class GithubService extends Service {
         }
       }
 
-      const allDeploys = await models.Deploy.query()
-        .where('branchName', branchName)
-        .where('githubRepositoryId', githubRepositoryId)
-        .where('active', true)
-        .whereNot('status', 'torn_down')
-        .withGraphFetched('[build.[pullRequest], deployable]');
+      // Docker and aurora-restore services take their config's repository but track no default branch, so they
+      // can't select a build here. Counting them would make a config repo holding only such services skip the
+      // static-environment fallback below.
+      const allDeploys = (
+        await models.Deploy.query()
+          .where('branchName', branchName)
+          .where('githubRepositoryId', githubRepositoryId)
+          .where('active', true)
+          .whereNot('status', 'torn_down')
+          .withGraphFetched('[build.[pullRequest], deployable]')
+      ).filter(
+        (deploy) =>
+          deploy.deployable?.type !== DeployTypes.DOCKER && deploy.deployable?.type !== DeployTypes.AURORA_RESTORE
+      );
 
       await this.enqueueAutoTrackedApiBuilds(
         githubRepositoryId,

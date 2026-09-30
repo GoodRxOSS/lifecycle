@@ -386,11 +386,17 @@ export default class DeployableService extends BaseService {
         }
       }
 
+      // Docker and aurora-restore services have no repository field; they belong to the repo whose config defines
+      // them, the same as a helm or github service whose repository is that config's own repo.
+      const deployType = YamlService.getDeployType(service);
+      const inheritsConfigRepository =
+        repoName == null && (deployType === DeployTypes.DOCKER || deployType === DeployTypes.AURORA_RESTORE);
+
       const deployableAttributes: DeployableAttributes = await this.generateAttributesFromYamlConfig(
         buildId,
         buildUUID,
-        repository?.githubRepositoryId ?? null,
-        branch,
+        inheritsConfigRepository ? repositoryId ?? null : repository?.githubRepositoryId ?? null,
+        inheritsConfigRepository ? branchName : branch,
         service,
         active,
         parentDeployableName,

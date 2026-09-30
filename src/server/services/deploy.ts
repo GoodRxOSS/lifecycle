@@ -131,6 +131,9 @@ export default class DeployService extends BaseService {
           patchFields.uuid = uuid;
           patchFields.branchName = effectiveBranch;
           patchFields.tag = deployable.defaultTag;
+          if (deployable.repositoryId != null && Number(deploy.githubRepositoryId) !== deployableRepositoryId) {
+            patchFields.githubRepositoryId = deployableRepositoryId;
+          }
         } else {
           deploy = await this.db.models.Deploy.create({
             buildId,
