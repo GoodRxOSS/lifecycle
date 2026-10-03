@@ -7,6 +7,7 @@ import EnvironmentAnalyticsService, {
   parseEnvironmentAnalyticsQuery,
   parseEnvironmentAnalyticsScope,
   parseEnvironmentAnalyticsRecordsQuery,
+  parseManagedServiceRecordsQuery,
 } from './EnvironmentAnalyticsService';
 import { resolveAnalyticsRange, type ResolvedAnalyticsRange } from './query';
 
@@ -93,6 +94,21 @@ describe('EnvironmentAnalyticsService contracts', () => {
       expect(() => parseEnvironmentAnalyticsRecordsQuery(new URLSearchParams(query))).toThrow();
     }
   );
+
+  it.each(['type=configuration', 'type=codefresh', 'type=externalHTTP', 'limit=101', 'page=0', 'page=1.5'])(
+    'rejects invalid managed Service query %s',
+    (query) => expect(() => parseManagedServiceRecordsQuery(new URLSearchParams(query))).toThrow()
+  );
+
+  it('keeps Services current-only with the existing bounded owning-environment scope', () => {
+    expect(parseManagedServiceRecordsQuery(new URLSearchParams('from=invalid&type=helm&repositoryId=4'))).toEqual({
+      ...scope,
+      repositoryId: 4,
+      type: 'helm',
+      page: 1,
+      limit: 25,
+    });
+  });
 
   it('current drilldown keeps independent scope and ignores historical dates', () => {
     const query = parseEnvironmentAnalyticsRecordsQuery(
@@ -258,5 +274,160 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(result.totals.observedPullRequests).toBeNull();
     expect(result.buckets.every((bucket) => bucket.observedPullRequests === null)).toBe(true);
     expect(result.previousTotals).toBeNull();
+  });
+
+  it('adds independent managed Service coverage and per-environment instances without changing readiness', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.sql.includes(' AS deploys')) return [row(1), row(2, { repositoryId: null })];
+      if (query.sql.includes('AS "environmentsWithServices"'))
+        return [
+          {
+            distinctServices: '1',
+            instances: '3',
+            readyInstances: '2',
+            environmentsWithServices: '2',
+            unresolvedIdentityInstances: '1',
+            externalInstances: '1',
+            buildOnlyInstances: '2',
+            unknownTypeInstances: '0',
+          },
+        ];
+      if (query.sql.includes('group by "s"."environmentId"'))
+        return [
+          { environmentId: 1, type: 'docker', instances: '2' },
+          { environmentId: 2, type: 'docker', instances: '1' },
+        ];
+      return [{ type: 'docker', distinctServices: '1', instances: '3', readyInstances: '2' }];
+    });
+    const result = await service.getInventory(scope);
+    expect(result.totals).toMatchObject({ current: 2, ready: 2 });
+    expect(result.services).toEqual({
+      distinctServices: 1,
+      instances: 3,
+      readyInstances: 2,
+      environmentsWithServices: 2,
+      unresolvedIdentityInstances: 1,
+      byType: [
+        { type: 'docker', distinctServices: 1, instances: 3, readyInstances: 2 },
+        { type: 'github', distinctServices: 0, instances: 0, readyInstances: 0 },
+        { type: 'helm', distinctServices: 0, instances: 0, readyInstances: 0 },
+        { type: 'aurora-restore', distinctServices: 0, instances: 0, readyInstances: 0 },
+      ],
+      excluded: { externalInstances: 1, buildOnlyInstances: 2, unknownTypeInstances: 0 },
+    });
+    expect(queries.some((query) => query.sql.includes('group by "s"."environmentId"'))).toBe(false);
+  });
+
+  it('SQL-pages stable configured Service groups and converts independent nullable identities', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.method === 'first') return { total: '30' };
+      return [
+        {
+          repositoryId: null,
+          fullName: null,
+          githubInstallationId: null,
+          key: '["environment",12,"github:unrecorded","db","helm"]',
+          name: 'db',
+          type: 'helm',
+          sourceGithubRepositoryId: null,
+          serviceId: null,
+          identityResolved: false,
+          instances: '1',
+          readyInstances: '0',
+          environments: '1',
+        },
+      ];
+    });
+    const result = await service.getServices(parseManagedServiceRecordsQuery(new URLSearchParams('type=helm&page=2')));
+    expect(result.pagination).toEqual({
+      page: 2,
+      limit: 25,
+      total: 30,
+      hasMore: true,
+      maxPage: 1_000_000,
+      truncated: false,
+    });
+    expect(result.records[0]).toMatchObject({
+      repositoryId: null,
+      identityResolved: false,
+      instances: 1,
+      readyInstances: 0,
+      sourceGithubRepositoryId: null,
+    });
+    const pageQuery = queries.find((query) => query.sql.includes('order by "instances"'))!;
+    expect(pageQuery.sql).toContain('order by "instances" desc, "key" asc limit ? offset ?');
+    expect(pageQuery.bindings.slice(-2)).toEqual([25, 25]);
+    expect(pageQuery.bindings).toContain('helm');
+    expect(pageQuery.sql).toContain('COALESCE(s."repositoryId", s."environmentId")');
+    expect(pageQuery.sql).not.toContain('"e"."createdAt" >=');
+  });
+
+  it.each([
+    [1_000_000, 1_000_001, false, true],
+    [1_000_000, 1_000_000, false, false],
+    [999_999, 1_000_001, true, true],
+  ])('reports Services paging bounds at page %i with total %i', async (page, total, hasMore, truncated) => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.method === 'first') return { total: String(total) };
+      return [
+        {
+          repositoryId: 4,
+          fullName: 'org/repo',
+          githubInstallationId: 8,
+          key: '["repository",4,"github:5","api","docker"]',
+          name: 'api',
+          type: 'docker',
+          sourceGithubRepositoryId: 5,
+          serviceId: null,
+          identityResolved: true,
+          instances: '1',
+          readyInstances: '1',
+          environments: '1',
+        },
+      ];
+    });
+    const result = await service.getServices(
+      parseManagedServiceRecordsQuery(new URLSearchParams(`page=${page}&limit=1`))
+    );
+    expect(result.pagination).toEqual({ page, limit: 1, total, hasMore, maxPage: 1_000_000, truncated });
+    const pageQuery = queries.find((query) => query.sql.includes('order by "instances"'))!;
+    expect(pageQuery.bindings.slice(-2)).toEqual([1, page - 1]);
+  });
+
+  it('loads service counts only for the current environment page and leaves historical counts unknown', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.method === 'first') return { total: '1' };
+      if (query.sql.includes('service_deployables')) return [{ environmentId: 26, type: 'helm', instances: '2' }];
+      return [row(26)];
+    });
+    const current = await service.getRecords(
+      parseEnvironmentAnalyticsRecordsQuery(new URLSearchParams('cohort=current'))
+    );
+    expect(current.records[0]).toMatchObject({ serviceInstances: 2, serviceTypes: [{ type: 'helm', instances: 2 }] });
+    const serviceQuery = queries.find((query) => query.sql.includes('service_deployables'))!;
+    expect(serviceQuery.bindings).toContain(26);
+    expect(serviceQuery.sql).toContain('a."buildUUID" = e.uuid');
+    expect(serviceQuery.sql).toContain('a."deletedAt" IS NULL');
+    expect(serviceQuery.sql).toContain('d."deletedAt" IS NULL');
+    expect(serviceQuery.sql).toContain('PARTITION BY a."buildId", a.name ORDER BY a.id DESC');
+    expect(serviceQuery.sql).toContain('PARTITION BY d."buildId", d."deployableId" ORDER BY d.id DESC');
+    expect(serviceQuery.bindings).toEqual(
+      expect.arrayContaining(['torn_down', 'docker', 'github', 'helm', 'aurora-restore'])
+    );
+    expect(serviceQuery.bindings).not.toEqual(expect.arrayContaining(['configuration', 'codefresh', 'externalHTTP']));
+    queries.length = 0;
+    const historical = await service.getRecords(
+      parseEnvironmentAnalyticsRecordsQuery(new URLSearchParams('from=2026-09-30&to=2026-10-02'))
+    );
+    expect(historical.records[0]).toMatchObject({ serviceInstances: null, serviceTypes: null });
+    expect(queries.some((query) => query.sql.includes('service_deployables'))).toBe(false);
   });
 });

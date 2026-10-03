@@ -16,7 +16,7 @@ import type Build from 'server/models/Build';
 import { defaultDb } from 'server/lib/dependencies';
 import { BadRequestError } from 'server/lib/appError';
 import { getEnvironmentPhase, type EnvironmentPhase, type ReadinessDeploy } from 'server/lib/environments/readiness';
-import { BuildKind, BuildStatus } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
 import {
   analyticsBucketDates,
   analyticsBucketExpression,
@@ -102,6 +102,54 @@ export type InventoryTotals = {
   ambiguous: number;
 };
 export type InventoryRepository = AnalyticsRepositoryIdentity & InventoryTotals;
+export type ManagedServiceType =
+  | DeployTypes.DOCKER
+  | DeployTypes.GITHUB
+  | DeployTypes.HELM
+  | DeployTypes.AURORA_RESTORE;
+export type ManagedServiceTypeCounts = {
+  type: ManagedServiceType;
+  distinctServices: number;
+  instances: number;
+  readyInstances: number;
+};
+export type ManagedServiceInventory = {
+  distinctServices: number;
+  instances: number;
+  readyInstances: number;
+  environmentsWithServices: number;
+  unresolvedIdentityInstances: number;
+  byType: ManagedServiceTypeCounts[];
+  excluded: { externalInstances: number; buildOnlyInstances: number; unknownTypeInstances: number };
+};
+export type ManagedServiceRecord = AnalyticsRepositoryIdentity & {
+  key: string;
+  name: string;
+  type: ManagedServiceType;
+  sourceGithubRepositoryId: number | null;
+  serviceId: number | null;
+  identityResolved: boolean;
+  instances: number;
+  readyInstances: number;
+  environments: number;
+};
+export type ManagedServiceRecordsQuery = EnvironmentAnalyticsScope & {
+  type: ManagedServiceType | null;
+  page: number;
+  limit: number;
+};
+export type ManagedServiceRecords = {
+  asOf: string;
+  scope: EnvironmentAnalyticsScope;
+  type: ManagedServiceType | null;
+  records: ManagedServiceRecord[];
+  pagination: { page: number; limit: number; total: number; hasMore: boolean; maxPage: number; truncated: boolean };
+  caveats: string[];
+};
+type EnvironmentServiceCounts = {
+  instances: number;
+  byType: Array<{ type: ManagedServiceType; instances: number }>;
+};
 export type EnvironmentAnalyticsRecord = AnalyticsRepositoryIdentity & {
   id: number;
   uuid: string | null;
@@ -117,12 +165,15 @@ export type EnvironmentAnalyticsRecord = AnalyticsRepositoryIdentity & {
   deletedAt: string | null;
   resourceAvailable: boolean;
   repositoryAmbiguous: boolean;
+  serviceInstances: number | null;
+  serviceTypes: EnvironmentServiceCounts['byType'] | null;
   pullRequest: { number: number | null; title: string | null; author: string | null } | null;
 };
 export type InventoryAnalytics = {
   asOf: string;
   scope: EnvironmentAnalyticsScope;
   totals: InventoryTotals;
+  services: ManagedServiceInventory;
   repositories: InventoryRepository[];
   exceptions: EnvironmentAnalyticsRecord[];
   truncated: boolean;
@@ -178,6 +229,19 @@ type CountRow = AnalyticsRepositoryIdentity & {
 const BATCH_SIZE = 1000;
 const RANKING_LIMIT = 100;
 const EXCEPTION_LIMIT = 20;
+const MANAGED_SERVICE_MAX_PAGE = 1_000_000;
+const MANAGED_SERVICE_TYPES: ManagedServiceType[] = [
+  DeployTypes.DOCKER,
+  DeployTypes.GITHUB,
+  DeployTypes.HELM,
+  DeployTypes.AURORA_RESTORE,
+];
+const SERVICE_CAVEATS = [
+  'Service counts are current selected runtime units, including queued and failed instances, not deployment events or live resources.',
+  'Unique configured Services are grouped by owning repository, source or database template, name, and type; shared apps in different owning repositories remain separate.',
+  'Instances with unresolved owning repository identity are excluded from unique Service counts and remain separate in drilldown.',
+  'External connections, configuration units, and Codefresh build-only units are excluded from managed Service counts.',
+];
 const CURRENT_PHASES: EnvironmentPhase[] = [
   'ready',
   'deployed_not_ready',
@@ -210,6 +274,15 @@ const emptyInventory = (): InventoryTotals => ({
   tearingDown: 0,
   unattributed: 0,
   ambiguous: 0,
+});
+const emptyServiceInventory = (): ManagedServiceInventory => ({
+  distinctServices: 0,
+  instances: 0,
+  readyInstances: 0,
+  environmentsWithServices: 0,
+  unresolvedIdentityInstances: 0,
+  byType: MANAGED_SERVICE_TYPES.map((type) => ({ type, distinctServices: 0, instances: 0, readyInstances: 0 })),
+  excluded: { externalInstances: 0, buildOnlyInstances: 0, unknownTypeInstances: 0 },
 });
 
 function optionalText(params: URLSearchParams, name: string, maximum = 128): string | null {
@@ -282,7 +355,25 @@ export function parseEnvironmentAnalyticsRecordsQuery(params: URLSearchParams): 
   return { ...query, cohort, phase, page, limit };
 }
 
-function environmentBase(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.QueryBuilder {
+export function parseManagedServiceRecordsQuery(params: URLSearchParams): ManagedServiceRecordsQuery {
+  const type = params.get('type') as ManagedServiceType | null;
+  if (type !== null && !MANAGED_SERVICE_TYPES.includes(type))
+    throw new BadRequestError('type must be a managed runtime Service type.', 'invalid_query');
+  const page = Number(params.get('page') ?? 1),
+    limit = Number(params.get('limit') ?? 25);
+  if (
+    !Number.isSafeInteger(page) ||
+    page < 1 ||
+    page > MANAGED_SERVICE_MAX_PAGE ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  )
+    throw new BadRequestError('page must be positive and limit must be between 1 and 100.', 'invalid_query');
+  return { ...parseEnvironmentAnalyticsScope(params), type, page, limit };
+}
+
+export function environmentBase(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.QueryBuilder {
   const repositories = knex('repositories')
     .select('githubRepositoryId')
     .count('* as matches')
@@ -292,7 +383,7 @@ function environmentBase(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.Que
   const base = knex.raw(
     `
     SELECT b.id, b.uuid, b.namespace, b.status, b."isStatic", b."triggerType", b."createdAt", b."updatedAt",
-      b."deletedAt", b."expiresAt", b."deployEnabled", b."pullRequestId", p."deployOnUpdate" AS "prDeployOnUpdate",
+      b."deletedAt", b."expiresAt", b."deployEnabled", b."pullRequestId", (p.id IS NOT NULL) AS "hasPullRequest", p."deployOnUpdate" AS "prDeployOnUpdate",
       p."githubLogin" AS "prAuthor", p."pullRequestNumber", p.title AS "prTitle",
       COALESCE(b."createdByGithubLogin", p."githubLogin") AS author,
       CASE WHEN p.id IS NOT NULL THEN p."repositoryId" WHEN rc.matches = 1 THEN rc."repositoryId" END AS "repositoryId",
@@ -342,9 +433,56 @@ function projection(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.QueryBui
     );
 }
 
-function currentEnvironmentQuery(query: Knex.QueryBuilder): Knex.QueryBuilder {
+export function currentEnvironmentQuery(query: Knex.QueryBuilder): Knex.QueryBuilder {
   return query.whereNull('e.deletedAt').whereRaw('(e.status IS NULL OR e.status <> ?)', [BuildStatus.TORN_DOWN]);
 }
+
+function serviceInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environmentIds?: number[]): Knex.QueryBuilder {
+  const environments = currentEnvironmentQuery(environmentBase(knex, scope)).select(
+    'e.id as environmentId',
+    'e.uuid',
+    'e.repositoryId',
+    'r.fullName',
+    'r.githubInstallationId'
+  );
+  if (environmentIds) environments.whereIn('e.id', environmentIds);
+  const deployables = knex.raw(`
+    SELECT a.id, a.name, a.type, a.active, a."serviceId", e.*,
+      COALESCE(NULLIF(a."resolvedFromRepositoryId", 0)::bigint,
+        CASE WHEN btrim(a."repositoryId") ~ '^[0-9]{1,10}$' THEN NULLIF(btrim(a."repositoryId")::bigint, 0) END)
+        AS "sourceGithubRepositoryId",
+      row_number() OVER (PARTITION BY a."buildId", a.name ORDER BY a.id DESC) AS ordinal
+    FROM deployables a JOIN service_environments e ON a."buildId" = e."environmentId" AND a."buildUUID" = e.uuid
+    WHERE a."deletedAt" IS NULL AND NULLIF(btrim(a.name), '') IS NOT NULL
+  `);
+  const deploys = knex.raw(`
+    SELECT d."deployableId", d.status,
+      row_number() OVER (PARTITION BY d."buildId", d."deployableId" ORDER BY d.id DESC) AS ordinal
+    FROM deploys d JOIN service_deployables a ON a.id = d."deployableId" AND a."environmentId" = d."buildId"
+    WHERE a.ordinal = 1 AND a.active = true AND d.active = true AND d."deletedAt" IS NULL
+  `);
+  return knex
+    .with('service_environments', environments)
+    .with('service_deployables', deployables)
+    .with('service_deploys', deploys)
+    .from('service_deployables as s')
+    .join('service_deploys as d', 'd.deployableId', 's.id')
+    .where('s.ordinal', 1)
+    .where('d.ordinal', 1)
+    .where('s.active', true)
+    .whereRaw('(d.status IS NULL OR d.status <> ?)', [DeployStatus.TORN_DOWN]);
+}
+
+function managedInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environmentIds?: number[]): Knex.QueryBuilder {
+  return serviceInstances(knex, scope, environmentIds).whereIn('s.type', MANAGED_SERVICE_TYPES);
+}
+
+const serviceKeySql = `jsonb_build_array(
+  CASE WHEN s."repositoryId" IS NULL THEN 'environment' ELSE 'repository' END,
+  COALESCE(s."repositoryId", s."environmentId"),
+  CASE WHEN s."serviceId" IS NOT NULL THEN 'db:' || s."serviceId"::text
+    ELSE 'github:' || COALESCE(s."sourceGithubRepositoryId"::text, 'unrecorded') END,
+  s.name, s.type)::text`;
 
 export function analyticsEnvironmentRecord(row: Projection): EnvironmentAnalyticsRecord {
   const build = {
@@ -368,6 +506,8 @@ export function analyticsEnvironmentRecord(row: Projection): EnvironmentAnalytic
     deletedAt: timestamp(row.deletedAt),
     resourceAvailable: Boolean(row.uuid) && row.deletedAt == null && row.status !== BuildStatus.TORN_DOWN,
     repositoryAmbiguous: row.repositoryAmbiguous === true,
+    serviceInstances: null,
+    serviceTypes: null,
     pullRequest:
       row.pullRequestId == null ? null : { number: row.pullRequestNumber, title: row.prTitle, author: row.prAuthor },
   };
@@ -448,6 +588,101 @@ export default class EnvironmentAnalyticsService {
       }
     });
     return { totals, repositories, exceptions, exceptionTotal };
+  }
+
+  private async addServiceCounts(
+    knex: Knex,
+    scope: EnvironmentAnalyticsScope,
+    rows: EnvironmentAnalyticsRecord[]
+  ): Promise<void> {
+    if (!rows.length) return;
+    const counts = (await managedInstances(
+      knex,
+      scope,
+      rows.map((row) => Number(row.id))
+    )
+      .select('s.environmentId', 's.type')
+      .count('* as instances')
+      .groupBy('s.environmentId', 's.type')) as Array<{
+      environmentId: number;
+      type: ManagedServiceType;
+      instances: string;
+    }>;
+    const byEnvironment = new Map<number, EnvironmentServiceCounts>();
+    for (const row of counts) {
+      const current = byEnvironment.get(Number(row.environmentId)) ?? { instances: 0, byType: [] };
+      current.instances += count(row.instances);
+      current.byType.push({ type: row.type, instances: count(row.instances) });
+      byEnvironment.set(Number(row.environmentId), current);
+    }
+    for (const row of rows) {
+      const counts = byEnvironment.get(Number(row.id)) ?? { instances: 0, byType: [] };
+      counts.byType.sort((a, b) => MANAGED_SERVICE_TYPES.indexOf(a.type) - MANAGED_SERVICE_TYPES.indexOf(b.type));
+      row.serviceInstances = counts.instances;
+      row.serviceTypes = counts.byType;
+    }
+  }
+
+  private async serviceInventory(knex: Knex, scope: EnvironmentAnalyticsScope): Promise<ManagedServiceInventory> {
+    const result = emptyServiceInventory();
+    const [totals] = await serviceInstances(knex, scope).select(
+      knex.raw(
+        `
+      count(*) FILTER (WHERE s.type = ANY(?::text[])) AS instances,
+      count(DISTINCT ${serviceKeySql}) FILTER (WHERE s.type = ANY(?::text[]) AND s."repositoryId" IS NOT NULL) AS "distinctServices",
+      count(*) FILTER (WHERE s.type = ANY(?::text[]) AND d.status = ?) AS "readyInstances",
+      count(DISTINCT s."environmentId") FILTER (WHERE s.type = ANY(?::text[])) AS "environmentsWithServices",
+      count(*) FILTER (WHERE s.type = ANY(?::text[]) AND s."repositoryId" IS NULL) AS "unresolvedIdentityInstances",
+      count(*) FILTER (WHERE s.type = ?) AS "externalInstances",
+      count(*) FILTER (WHERE s.type = ANY(?::text[])) AS "buildOnlyInstances",
+      count(*) FILTER (WHERE s.type IS NULL OR s.type <> ALL(?::text[])) AS "unknownTypeInstances"
+    `,
+        [
+          MANAGED_SERVICE_TYPES,
+          MANAGED_SERVICE_TYPES,
+          MANAGED_SERVICE_TYPES,
+          DeployStatus.READY,
+          MANAGED_SERVICE_TYPES,
+          MANAGED_SERVICE_TYPES,
+          DeployTypes.EXTERNAL_HTTP,
+          [DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
+          [...MANAGED_SERVICE_TYPES, DeployTypes.EXTERNAL_HTTP, DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
+        ]
+      )
+    );
+    const types = (await managedInstances(knex, scope)
+      .select('s.type')
+      .count('* as instances')
+      .select(
+        knex.raw(
+          `count(DISTINCT ${serviceKeySql}) FILTER (WHERE s."repositoryId" IS NOT NULL) AS "distinctServices",
+        count(*) FILTER (WHERE d.status = ?) AS "readyInstances"`,
+          [DeployStatus.READY]
+        )
+      )
+      .groupBy('s.type')) as Array<ManagedServiceTypeCounts>;
+    for (const field of [
+      'distinctServices',
+      'instances',
+      'readyInstances',
+      'environmentsWithServices',
+      'unresolvedIdentityInstances',
+    ] as const)
+      result[field] = count(totals?.[field]);
+    for (const field of ['externalInstances', 'buildOnlyInstances', 'unknownTypeInstances'] as const)
+      result.excluded[field] = count(totals?.[field]);
+    result.byType = result.byType.map((empty) => {
+      const row = types.find((type) => type.type === empty.type);
+      return row
+        ? {
+            type: empty.type,
+            distinctServices: count(row.distinctServices),
+            instances: count(row.instances),
+            readyInstances: count(row.readyInstances),
+          }
+        : empty;
+    });
+    return result;
   }
 
   private async period(knex: Knex, query: EnvironmentAnalyticsQuery, range: ResolvedAnalyticsRange, prior: boolean) {
@@ -609,6 +844,8 @@ export default class EnvironmentAnalyticsService {
     return this.transaction(async (knex) => {
       const [asOf] = await knex.select(knex.raw('CURRENT_TIMESTAMP AS "asOf"'));
       const result = await this.inventory(knex, scope);
+      await this.addServiceCounts(knex, scope, result.exceptions);
+      const services = await this.serviceInventory(knex, scope);
       const repositories = [...result.repositories.values()].sort(
         (a, b) => b.current - a.current || (a.fullName ?? '\uffff').localeCompare(b.fullName ?? '\uffff')
       );
@@ -616,6 +853,7 @@ export default class EnvironmentAnalyticsService {
         asOf: timestamp(asOf.asOf)!,
         scope: this.scope(scope),
         totals: result.totals,
+        services,
         repositories: repositories.slice(0, RANKING_LIMIT),
         exceptions: result.exceptions,
         truncated: result.exceptionTotal > EXCEPTION_LIMIT,
@@ -624,6 +862,66 @@ export default class EnvironmentAnalyticsService {
         caveats: [
           ...CAVEATS,
           'Current inventory ignores historical date controls. Readiness reflects recorded state, not a live Kubernetes probe.',
+          ...SERVICE_CAVEATS,
+        ],
+      };
+    });
+  }
+
+  async getServices(query: ManagedServiceRecordsQuery): Promise<ManagedServiceRecords> {
+    return this.transaction(async (knex) => {
+      const [asOf] = await knex.select(knex.raw('CURRENT_TIMESTAMP AS "asOf"'));
+      const grouped = managedInstances(knex, query)
+        .select('s.repositoryId', 's.fullName', 's.githubInstallationId', 's.name', 's.type')
+        .select(
+          knex.raw(
+            `${serviceKeySql} AS key,
+          CASE WHEN count(DISTINCT s."sourceGithubRepositoryId") = 1 THEN min(s."sourceGithubRepositoryId") END AS "sourceGithubRepositoryId",
+          min(s."serviceId") AS "serviceId", (s."repositoryId" IS NOT NULL) AS "identityResolved",
+          count(*) AS instances, count(*) FILTER (WHERE d.status = ?) AS "readyInstances",
+          count(DISTINCT s."environmentId") AS environments`,
+            [DeployStatus.READY]
+          )
+        )
+        .groupBy('s.repositoryId', 's.fullName', 's.githubInstallationId', 's.name', 's.type')
+        .groupByRaw(serviceKeySql);
+      if (query.type) grouped.where('s.type', query.type);
+      const totalRow = await knex.from(grouped.clone().as('services')).count('* as total').first();
+      const offset = (query.page - 1) * query.limit;
+      const rows = (await grouped
+        .orderBy('instances', 'desc')
+        .orderBy('key')
+        .offset(offset)
+        .limit(query.limit)) as ManagedServiceRecord[];
+      const records = rows.map((row) => ({
+        ...identity(row),
+        key: row.key,
+        name: row.name,
+        type: row.type,
+        sourceGithubRepositoryId: row.sourceGithubRepositoryId == null ? null : Number(row.sourceGithubRepositoryId),
+        serviceId: row.serviceId == null ? null : Number(row.serviceId),
+        identityResolved: row.identityResolved === true,
+        instances: count(row.instances),
+        readyInstances: count(row.readyInstances),
+        environments: count(row.environments),
+      }));
+      const total = count(totalRow?.total);
+      return {
+        asOf: timestamp(asOf.asOf)!,
+        scope: this.scope(query),
+        type: query.type,
+        records,
+        pagination: {
+          page: query.page,
+          limit: query.limit,
+          total,
+          hasMore: query.page < MANAGED_SERVICE_MAX_PAGE && offset + records.length < total,
+          maxPage: MANAGED_SERVICE_MAX_PAGE,
+          truncated: total > MANAGED_SERVICE_MAX_PAGE * query.limit,
+        },
+        caveats: [
+          'Current Services ignore historical date controls. Ready counts reflect recorded READY state.',
+          ...SERVICE_CAVEATS,
         ],
       };
     });
@@ -713,6 +1011,7 @@ export default class EnvironmentAnalyticsService {
           .limit(query.limit)) as Projection[];
         records.push(...rows.map(analyticsEnvironmentRecord));
       }
+      if (query.cohort === 'current') await this.addServiceCounts(knex, query, records);
       return {
         asOf,
         scope: this.scope(query),

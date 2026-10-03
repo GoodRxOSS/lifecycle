@@ -54,6 +54,8 @@ const phase = {
   type: 'string',
   enum: ['ready', 'deployed_not_ready', 'in_progress', 'paused', 'failed', 'tearing_down', 'torn_down'],
 };
+const managedServiceType = { type: 'string', enum: ['docker', 'github', 'helm', 'aurora-restore'] };
+const serviceInstanceType = object({ type: managedServiceType, instances: integer });
 
 export const environmentAnalyticsSchemas = {
   AnalyticsPeriod: object(periodProperties),
@@ -124,6 +126,58 @@ export const environmentAnalyticsSchemas = {
   }),
   InventoryAnalyticsTotals: object(inventoryProperties),
   InventoryAnalyticsRepository: object({ ...repositoryProperties, ...inventoryProperties }),
+  ManagedServiceTypeCounts: object({
+    type: managedServiceType,
+    distinctServices: integer,
+    instances: integer,
+    readyInstances: integer,
+  }),
+  ManagedServiceInventory: object({
+    distinctServices: {
+      ...integer,
+      description: 'Identified configured Services by owning repository, source or template, name, and type.',
+    },
+    instances: {
+      ...integer,
+      description: 'Selected current managed runtime units; includes queued and failed units, not deployment events.',
+    },
+    readyInstances: { ...integer, description: 'Instances with recorded READY status.' },
+    environmentsWithServices: integer,
+    unresolvedIdentityInstances: {
+      ...integer,
+      description: 'Instances excluded from unique counts because the owning repository is unresolved.',
+    },
+    byType: array(ref('ManagedServiceTypeCounts')),
+    excluded: object({ externalInstances: integer, buildOnlyInstances: integer, unknownTypeInstances: integer }),
+  }),
+  ManagedServiceRecord: object({
+    ...repositoryProperties,
+    key: { ...text, description: 'Opaque configured identity; unresolved identities remain separate by environment.' },
+    name: text,
+    type: managedServiceType,
+    sourceGithubRepositoryId: nullableInteger,
+    serviceId: nullableInteger,
+    identityResolved: boolean,
+    instances: integer,
+    readyInstances: integer,
+    environments: integer,
+  }),
+  ManagedServiceRecords: object({
+    asOf: instant,
+    scope: ref('EnvironmentAnalyticsScope'),
+    type: { ...managedServiceType, nullable: true },
+    records: array(ref('ManagedServiceRecord')),
+    pagination: ref('ManagedServicePagination'),
+    caveats: array(text),
+  }),
+  ManagedServicePagination: object({
+    page: { type: 'integer', minimum: 1, maximum: 1000000 },
+    limit: { type: 'integer', minimum: 1, maximum: 100 },
+    total: integer,
+    hasMore: boolean,
+    maxPage: { type: 'integer', enum: [1000000] },
+    truncated: boolean,
+  }),
   EnvironmentAnalyticsPullRequest: object({ number: nullableInteger, title: nullableText, author: nullableText }),
   EnvironmentAnalyticsRecord: object({
     ...repositoryProperties,
@@ -141,12 +195,19 @@ export const environmentAnalyticsSchemas = {
     deletedAt: nullableInstant,
     resourceAvailable: boolean,
     repositoryAmbiguous: boolean,
+    serviceInstances: {
+      ...nullableInteger,
+      description:
+        'Current managed runtime instances; null when the historical cohort does not request current service inventory.',
+    },
+    serviceTypes: { ...array(serviceInstanceType), nullable: true },
     pullRequest: nullableRef('EnvironmentAnalyticsPullRequest'),
   }),
   InventoryAnalytics: object({
     asOf: instant,
     scope: ref('EnvironmentAnalyticsScope'),
     totals: ref('InventoryAnalyticsTotals'),
+    services: ref('ManagedServiceInventory'),
     repositories: array(ref('InventoryAnalyticsRepository')),
     exceptions: array(ref('EnvironmentAnalyticsRecord')),
     truncated: boolean,
@@ -183,5 +244,6 @@ export const environmentAnalyticsSchemas = {
   GetAnalyticsOptionsSuccessResponse: success('AnalyticsOptions'),
   GetEnvironmentAnalyticsSuccessResponse: success('EnvironmentAnalytics'),
   GetInventoryAnalyticsSuccessResponse: success('InventoryAnalytics'),
+  GetManagedServiceRecordsSuccessResponse: success('ManagedServiceRecords'),
   GetEnvironmentAnalyticsRecordsSuccessResponse: success('EnvironmentAnalyticsRecords'),
 };

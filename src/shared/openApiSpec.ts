@@ -1,5 +1,6 @@
 import { OAS3Options } from 'swagger-jsdoc';
 import { environmentAnalyticsSchemas } from './environmentAnalyticsOpenApi';
+import { environmentLifetimeAnalyticsSchemas } from './environmentLifetimeAnalyticsOpenApi';
 import { agentAnalyticsSchemas } from './agentAnalyticsOpenApi';
 import {
   AGENT_FEEDBACK_SCOPES,
@@ -172,6 +173,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
       },
       schemas: {
         ...environmentAnalyticsSchemas,
+        ...environmentLifetimeAnalyticsSchemas,
         ...agentAnalyticsSchemas,
         SitesBrowserMintRequest: {
           type: 'object',

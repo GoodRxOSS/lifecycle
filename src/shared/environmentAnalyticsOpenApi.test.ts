@@ -10,6 +10,7 @@ describe('Admin environment analytics OpenAPI contract', () => {
     ['inventory', 'getInventoryAnalytics', 'GetInventoryAnalyticsSuccessResponse'],
     ['options', 'getAnalyticsOptions', 'GetAnalyticsOptionsSuccessResponse'],
     ['environments/records', 'getEnvironmentAnalyticsRecords', 'GetEnvironmentAnalyticsRecordsSuccessResponse'],
+    ['services', 'getManagedServiceRecords', 'GetManagedServiceRecordsSuccessResponse'],
   ])('documents %s with a concrete generated response and session authentication', (path, operationId, response) => {
     const operation = spec.paths[`/api/v2/admin/analytics/${path}`].get;
     expect(operation.operationId).toBe(operationId);
@@ -70,5 +71,27 @@ describe('Admin environment analytics OpenAPI contract', () => {
     expect(schemas.InventoryAnalytics.required).toEqual(
       expect.arrayContaining(['repositoryTotal', 'repositoriesTruncated', 'truncated'])
     );
+  });
+
+  it('separates unique configured Services, runtime instances, exclusions, and current-only environment counts', () => {
+    expect(schemas.InventoryAnalytics.properties.services.$ref).toBe('#/components/schemas/ManagedServiceInventory');
+    expect(schemas.ManagedServiceInventory.properties.distinctServices.description).toContain('owning repository');
+    expect(schemas.ManagedServiceInventory.required).toEqual(
+      expect.arrayContaining(['instances', 'unresolvedIdentityInstances', 'excluded', 'byType'])
+    );
+    expect(schemas.ManagedServiceInventory.properties.excluded.required).toEqual([
+      'externalInstances',
+      'buildOnlyInstances',
+      'unknownTypeInstances',
+    ]);
+    expect(schemas.ManagedServiceRecord.properties.type.enum).toEqual(['docker', 'github', 'helm', 'aurora-restore']);
+    expect(schemas.ManagedServiceRecord.required).toEqual(
+      expect.arrayContaining(['identityResolved', 'sourceGithubRepositoryId', 'serviceId', 'key'])
+    );
+    expect(schemas.EnvironmentAnalyticsRecord.properties.serviceInstances.nullable).toBe(true);
+    expect(schemas.EnvironmentAnalyticsRecord.properties.serviceTypes.nullable).toBe(true);
+    const operation = spec.paths['/api/v2/admin/analytics/services'].get;
+    expect(operation.description).toContain('Historical date controls are ignored');
+    expect(operation.parameters.find((param: any) => param.name === 'limit').schema.maximum).toBe(100);
   });
 });
