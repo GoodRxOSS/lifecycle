@@ -1,0 +1,262 @@
+jest.mock('server/lib/dependencies', () => ({ defaultDb: {} }));
+jest.mock('./query', () => ({ ...jest.requireActual('./query'), resolveAnalyticsRange: jest.fn() }));
+
+import knexFactory, { type Knex } from 'knex';
+import EnvironmentAnalyticsService, {
+  analyticsEnvironmentRecord,
+  parseEnvironmentAnalyticsQuery,
+  parseEnvironmentAnalyticsScope,
+  parseEnvironmentAnalyticsRecordsQuery,
+} from './EnvironmentAnalyticsService';
+import { resolveAnalyticsRange, type ResolvedAnalyticsRange } from './query';
+
+const scope = parseEnvironmentAnalyticsScope(new URLSearchParams());
+const range: ResolvedAnalyticsRange = {
+  from: '2026-09-30',
+  to: '2026-10-02',
+  fromUtc: '2026-09-30T00:00:00.000Z',
+  toUtc: '2026-10-02T00:00:00.000Z',
+  dates: ['2026-09-30', '2026-10-01'],
+  timezone: 'UTC',
+  interval: 'day',
+  compare: false,
+  calendarDays: 2,
+  previous: null,
+  asOf: '2026-10-02T12:00:00.000Z',
+};
+function row(id: number, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    uuid: `env-${id}`,
+    namespace: `env-${id}`,
+    status: 'deployed',
+    isStatic: false,
+    triggerType: 'github_pr',
+    createdAt: '2026-09-30T10:00:00Z',
+    updatedAt: '2026-10-01T10:00:00Z',
+    deletedAt: null,
+    expiresAt: null,
+    deployEnabled: true,
+    pullRequestId: 1,
+    prDeployOnUpdate: true,
+    prAuthor: 'Alice',
+    pullRequestNumber: 12,
+    prTitle: 'Change',
+    repositoryId: 4,
+    fullName: 'org/repo',
+    githubInstallationId: 8,
+    author: 'Alice',
+    repositoryAmbiguous: false,
+    deploys: [{ active: true, status: 'ready', publicUrl: '', deployable: { type: 'docker' } }],
+    ...overrides,
+  };
+}
+function serviceWithExecutor(
+  execute: (query: { sql: string; bindings: readonly unknown[]; method: string }) => unknown
+) {
+  const knex = knexFactory({ client: 'pg' });
+  const queries: Array<{ sql: string; bindings: readonly unknown[]; method: string }> = [];
+  jest.spyOn(knex.client, 'runner').mockImplementation(
+    (builder: any) =>
+      ({
+        run: async () => {
+          const query = builder.toSQL();
+          queries.push(query);
+          return execute(query);
+        },
+      } as any)
+  );
+  const transaction = async (work: (transaction: Knex) => Promise<unknown>) => work(knex);
+  return { service: new EnvironmentAnalyticsService({ knex: { transaction } } as any), queries };
+}
+
+describe('EnvironmentAnalyticsService contracts', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (resolveAnalyticsRange as jest.Mock).mockResolvedValue(range);
+  });
+
+  it.each([
+    'repositoryId=0',
+    'repositoryId=1.5',
+    'repositoryId=4&unattributed=true',
+    'environmentType=sandbox',
+    'environmentAuthor=',
+    'rankBy=attempts',
+  ])('rejects invalid scope %s', (query) => {
+    expect(() => parseEnvironmentAnalyticsQuery(new URLSearchParams(query))).toThrow();
+  });
+
+  it.each(['cohort=history', 'phase=failed', 'cohort=current&phase=unknown', 'cohort=current&limit=101', 'page=0'])(
+    'rejects invalid drilldown %s',
+    (query) => {
+      expect(() => parseEnvironmentAnalyticsRecordsQuery(new URLSearchParams(query))).toThrow();
+    }
+  );
+
+  it('current drilldown keeps independent scope and ignores historical dates', () => {
+    const query = parseEnvironmentAnalyticsRecordsQuery(
+      new URLSearchParams('cohort=current&phase=failed&from=invalid&environmentType=static')
+    );
+    expect(query).toMatchObject({ cohort: 'current', phase: 'failed', page: 1, limit: 25, environmentType: 'static' });
+    expect(query.from).toBeUndefined();
+  });
+
+  it('uses service-aware readiness and the correct PR/API pause gate', () => {
+    expect(analyticsEnvironmentRecord(row(1) as any).phase).toBe('ready');
+    expect(
+      analyticsEnvironmentRecord(
+        row(2, { deploys: [{ active: true, status: 'built', publicUrl: '', deployable: { type: 'docker' } }] }) as any
+      ).phase
+    ).toBe('deployed_not_ready');
+    expect(
+      analyticsEnvironmentRecord(
+        row(3, {
+          deploys: [{ active: true, status: 'built', publicUrl: '', deployable: { type: 'configuration' } }],
+        }) as any
+      ).phase
+    ).toBe('ready');
+    expect(
+      analyticsEnvironmentRecord(
+        row(4, {
+          deploys: [
+            { active: true, status: 'pending', publicUrl: 'https://external', deployable: { type: 'externalHTTP' } },
+          ],
+        }) as any
+      ).phase
+    ).toBe('ready');
+    expect(
+      analyticsEnvironmentRecord(row(5, { status: 'pending', prDeployOnUpdate: false, deployEnabled: true }) as any)
+        .phase
+    ).toBe('paused');
+    expect(
+      analyticsEnvironmentRecord(
+        row(6, { status: 'pending', pullRequestId: null, prDeployOnUpdate: true, deployEnabled: false }) as any
+      ).phase
+    ).toBe('paused');
+    expect(analyticsEnvironmentRecord(row(7, { status: 'config_error' }) as any).phase).toBe('failed');
+    expect(analyticsEnvironmentRecord(row(8, { status: 'tearing_down' }) as any).phase).toBe('tearing_down');
+  });
+
+  it('retains history metadata without claiming a live UUID resource', () => {
+    const record = analyticsEnvironmentRecord(
+      row(9, {
+        deletedAt: '2026-10-01T12:00:00Z',
+        status: 'torn_down',
+        repositoryId: null,
+        repositoryAmbiguous: true,
+      }) as any
+    );
+    expect(record).toMatchObject({
+      id: 9,
+      phase: 'torn_down',
+      repositoryId: null,
+      repositoryAmbiguous: true,
+      deletedAt: '2026-10-01T12:00:00.000Z',
+      resourceAvailable: false,
+    });
+    expect(analyticsEnvironmentRecord(row(10, { uuid: null }) as any).resourceAvailable).toBe(false);
+  });
+
+  it('processes all inventory batches while bounding exception output', async () => {
+    const rows = Array.from({ length: 1005 }, (_, index) =>
+      row(index + 1, {
+        status: index % 2 ? 'error' : 'deployed',
+        repositoryId: index === 1004 ? null : 4,
+        repositoryAmbiguous: index === 1004,
+      })
+    );
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      const lastId = Number(query.bindings.at(-2));
+      return rows.filter((record) => record.id > lastId).slice(0, 1000);
+    });
+    const result = await service.getInventory(scope);
+    expect(result.totals).toMatchObject({ current: 1005, failed: 502, ready: 503, unattributed: 1, ambiguous: 1 });
+    expect(result.exceptions).toHaveLength(20);
+    expect(result.truncated).toBe(true);
+    expect(queries.filter((query) => query.sql.includes(' AS deploys'))).toHaveLength(2);
+    expect(queries[0].sql).toBe('SET TRANSACTION READ ONLY');
+  });
+
+  it('pages current records without a full readiness scan when no phase filter is requested', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.sql.includes('count("e"."id")')) return { total: '1005' };
+      return [row(26), row(27)];
+    });
+    const result = await service.getRecords(
+      parseEnvironmentAnalyticsRecordsQuery(new URLSearchParams('cohort=current&page=2&limit=25'))
+    );
+    expect(result.pagination).toEqual({ page: 2, limit: 25, total: 1005, hasMore: true });
+    expect(result.records.map((record) => record.id)).toEqual([26, 27]);
+    expect(result.range).toBeNull();
+    const projections = queries.filter((query) => query.sql.includes(' AS deploys'));
+    expect(projections).toHaveLength(1);
+    expect(projections[0].sql).toContain('order by "e"."id" asc limit ? offset ?');
+    expect(projections[0].bindings.slice(-2)).toEqual([25, 25]);
+    expect(projections[0].sql).not.toContain('"e"."id" >');
+  });
+
+  it('deduplicates PR coverage with EXISTS and preserves independent source-repository aggregates', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes(' AS deploys'))
+        return [row(1), row(2), row(3, { repositoryId: null, repositoryAmbiguous: true })];
+      if (query.method === 'first') return { earliest: '2026-09-01T00:00:00Z' };
+      if (query.sql.includes('group by "date"'))
+        return [{ date: '2026-09-30', count: query.sql.includes('"pull_requests" as "p"') ? '1' : '3' }];
+      if (query.sql.includes('AS covered'))
+        return [{ repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: '1', covered: '1' }];
+      return [
+        { repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: '2', ambiguous: '0' },
+        { repositoryId: null, fullName: null, githubInstallationId: null, count: '1', ambiguous: '1' },
+      ];
+    });
+    const result = await service.getEnvironments({
+      ...scope,
+      from: range.from,
+      to: range.to,
+      compare: false,
+      rankBy: 'first_seen',
+    });
+    expect(result.totals).toMatchObject({
+      firstSeenEnvironments: 3,
+      observedPullRequests: 1,
+      pullRequestsWithEnvironments: 1,
+      activeRepositories: 1,
+      unattributedEnvironments: 1,
+      ambiguousRepositoryEnvironments: 1,
+    });
+    expect(result.repositories[0]).toMatchObject({
+      repositoryId: 4,
+      firstSeenEnvironments: 2,
+      observedPullRequests: 1,
+      pullRequestCoverage: 1,
+    });
+    expect(result.buckets.map((bucket) => bucket.firstSeenEnvironments)).toEqual([3, 0]);
+    const coverage = queries.find((query) => query.sql.includes('AS covered'))!;
+    expect(coverage.sql).toContain('WHERE EXISTS (');
+    expect(coverage.sql).toContain('coverage."pullRequestId" = p.id');
+    expect(coverage.sql).not.toContain('"coverage"."createdAt"');
+    expect(coverage.sql).not.toContain('join "builds"');
+    const envs = queries.find((query) => query.sql.includes('AS ambiguous'))!;
+    expect(envs.sql).toContain('WHEN rc.matches = 1');
+    expect(envs.sql).not.toContain('join "deploys"');
+  });
+
+  it('returns null PR measures for static-only scope instead of a false zero', async () => {
+    const { service } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.includes(' AS deploys')) return [];
+      if (query.method === 'first') return { earliest: null };
+      return [];
+    });
+    const result = await service.getEnvironments({ ...scope, environmentType: 'static', rankBy: 'first_seen' });
+    expect(result.totals.observedPullRequests).toBeNull();
+    expect(result.buckets.every((bucket) => bucket.observedPullRequests === null)).toBe(true);
+    expect(result.previousTotals).toBeNull();
+  });
+});

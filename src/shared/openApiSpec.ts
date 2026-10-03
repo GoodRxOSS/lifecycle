@@ -1,4 +1,6 @@
 import { OAS3Options } from 'swagger-jsdoc';
+import { environmentAnalyticsSchemas } from './environmentAnalyticsOpenApi';
+import { agentAnalyticsSchemas } from './agentAnalyticsOpenApi';
 import {
   AGENT_FEEDBACK_SCOPES,
   MAX_AGENT_FEEDBACK_TEXT_LENGTH,
@@ -169,6 +171,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
       },
       schemas: {
+        ...environmentAnalyticsSchemas,
+        ...agentAnalyticsSchemas,
         SitesBrowserMintRequest: {
           type: 'object',
           additionalProperties: false,
