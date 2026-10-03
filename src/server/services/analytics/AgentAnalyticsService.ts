@@ -14,6 +14,7 @@ import type { Knex } from 'knex';
 import type Database from 'server/database';
 import { defaultDb } from 'server/lib/dependencies';
 import { BadRequestError } from 'server/lib/appError';
+import { analyticsTransaction } from './execution';
 import {
   parseAnalyticsCalendarQuery,
   resolveAnalyticsRange,
@@ -340,8 +341,7 @@ export default class AgentAnalyticsService {
   constructor(private readonly db: Pick<Database, 'knex'> = defaultDb) {}
 
   async getSummary(query: AgentAnalyticsQuery): Promise<AgentAnalyticsSummary> {
-    return this.db.knex.transaction(async (trx) => {
-      await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return analyticsTransaction(this.db.knex, async (trx) => {
       const range = await resolveAnalyticsRange(trx, query);
       const scope = scopeSql(query);
       const from = range.previous?.fromUtc ?? range.fromUtc;
@@ -481,8 +481,7 @@ export default class AgentAnalyticsService {
   async listRuns(query: AgentAnalyticsRunsQuery, page = 1, limit = 25): Promise<AgentAnalyticsRuns> {
     if (!Number.isInteger(page) || page < 1 || page > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new BadRequestError('Invalid run pagination.');
-    return this.db.knex.transaction(async (trx) => {
-      await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return analyticsTransaction(this.db.knex, async (trx) => {
       const range = await resolveAnalyticsRange(trx, query);
       const scope = scopeSql(query);
       const statusCondition = query.runStatus ? `${scope.sql ? ' AND' : ' WHERE'} status = ?` : '';
@@ -540,8 +539,9 @@ export default class AgentAnalyticsService {
 
   async getOptions(): Promise<AgentAnalyticsOptions> {
     const limit = 200;
-    const result = await this.db.knex.raw(
-      `
+    return analyticsTransaction(this.db.knex, async (trx) => {
+      const result = await trx.raw(
+        `
       WITH facts AS MATERIALIZED (SELECT ${RUN_DIMENSIONS} FROM agent_runs r),
       repositories AS (SELECT DISTINCT repository FROM facts WHERE repository IS NOT NULL),
       models AS (SELECT DISTINCT provider, model FROM facts),
@@ -559,28 +559,29 @@ export default class AgentAnalyticsService {
         COALESCE((SELECT jsonb_agg(m ORDER BY provider, model) FROM (SELECT * FROM models ORDER BY provider, model LIMIT ?) m), '[]'::jsonb) AS models,
         COALESCE((SELECT jsonb_agg(o ORDER BY "githubUsername" NULLS LAST, id) FROM (SELECT * FROM owners ORDER BY "githubUsername" NULLS LAST, id LIMIT ?) o), '[]'::jsonb) AS owners
     `,
-      [limit, limit, limit]
-    );
-    const row = result.rows[0];
-    const totals = {
-      repositories: number(row.repositories_total),
-      models: number(row.models_total),
-      owners: number(row.owners_total),
-    };
-    return {
-      asOf: timestamp(row.as_of)!,
-      repositoryScope: 'recorded_name',
-      repositories: row.repositories,
-      owners: row.owners,
-      models: row.models,
-      hasUnattributed: Boolean(row.has_unattributed),
-      limit,
-      totals,
-      truncated: {
-        repositories: totals.repositories > limit,
-        owners: totals.owners > limit,
-        models: totals.models > limit,
-      },
-    };
+        [limit, limit, limit]
+      );
+      const row = result.rows[0];
+      const totals = {
+        repositories: number(row.repositories_total),
+        models: number(row.models_total),
+        owners: number(row.owners_total),
+      };
+      return {
+        asOf: timestamp(row.as_of)!,
+        repositoryScope: 'recorded_name',
+        repositories: row.repositories,
+        owners: row.owners,
+        models: row.models,
+        hasUnattributed: Boolean(row.has_unattributed),
+        limit,
+        totals,
+        truncated: {
+          repositories: totals.repositories > limit,
+          owners: totals.owners > limit,
+          models: totals.models > limit,
+        },
+      };
+    });
   }
 }

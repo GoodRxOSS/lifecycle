@@ -14,6 +14,7 @@ import type { Knex } from 'knex';
 import type Database from 'server/database';
 import { defaultDb } from 'server/lib/dependencies';
 import { BadRequestError } from 'server/lib/appError';
+import { analyticsTransaction } from './execution';
 import { BuildStatus } from 'shared/constants';
 import {
   environmentBase,
@@ -288,8 +289,7 @@ export default class EnvironmentLifetimeAnalyticsService {
   constructor(private readonly db: Pick<Database, 'knex'> = defaultDb) {}
 
   async getSummary(query: EnvironmentAnalyticsQuery): Promise<EnvironmentLifetimeAnalytics> {
-    return this.db.knex.transaction(async (trx) => {
-      await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return analyticsTransaction(this.db.knex, async (trx) => {
       const range = await resolveAnalyticsRange(trx, query);
       const scope = scopeOf(query);
       const completed = factsSql(trx, scope, 'completed');
@@ -374,8 +374,7 @@ export default class EnvironmentLifetimeAnalyticsService {
   }
 
   async getRecords(query: EnvironmentLifetimeRecordsQuery): Promise<EnvironmentLifetimeRecords> {
-    return this.db.knex.transaction(async (trx) => {
-      await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return analyticsTransaction(this.db.knex, async (trx) => {
       const range = query.cohort === 'completed' ? await resolveAnalyticsRange(trx, query) : null;
       const asOf = range?.asOf ?? timestamp((await trx.raw('SELECT CURRENT_TIMESTAMP AS "asOf"')).rows[0].asOf)!;
       const scope = scopeOf(query);

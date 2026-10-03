@@ -47,9 +47,7 @@ const range: ResolvedAnalyticsRange = {
 };
 
 function serviceWithRows(results: unknown[][]) {
-  const raw = jest.fn(async (sql: string) =>
-    sql.startsWith('SET TRANSACTION') ? undefined : { rows: results.shift() }
-  );
+  const raw = jest.fn(async (sql: string) => (sql.startsWith('SET ') ? undefined : { rows: results.shift() }));
   const transaction = jest.fn(async (callback) => callback({ raw }));
   const service = new AgentAnalyticsService({ knex: { transaction } } as any);
   return { service, raw };
@@ -181,7 +179,10 @@ describe('AgentAnalyticsService', () => {
     expect(result.rankingTotal.repositories).toBe(23);
     expect(result.rankingTruncated.repositories).toBe(true);
     expect(result.earliestRunAt).toBe('2025-04-01T00:00:00.000Z');
-    const [sql, bindings] = raw.mock.calls[1] as unknown as [string, unknown[]];
+    const [sql, bindings] = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0] as unknown as [
+      string,
+      unknown[]
+    ];
     expect(sql).toContain('COUNT(DISTINCT session_id)');
     expect(sql).toContain("jsonb_typeof(r.\"usageSummary\"->'totalTokens') = 'number'");
     expect(sql).toContain("'{source,repoFullName}'");
@@ -201,8 +202,10 @@ describe('AgentAnalyticsService', () => {
       'org/repo',
       20,
     ]);
-    expect(raw.mock.calls[2][0]).toContain('ORDER BY r."createdAt", r.id LIMIT 1');
-    expect(raw.mock.calls[3][0]).toContain('min("createdAt")');
+    expect(raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[1][0]).toContain(
+      'ORDER BY r."createdAt", r.id LIMIT 1'
+    );
+    expect(raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[2][0]).toContain('min("createdAt")');
   });
 
   it('omits previous results when comparison is disabled and preserves empty runs beyond the last page', async () => {
@@ -211,7 +214,10 @@ describe('AgentAnalyticsService', () => {
     const result = await service.listRuns({ repository: 'unattributed', runStatus: 'failed' }, 2, 25);
     expect(result.runs).toEqual([]);
     expect(result.pagination).toEqual({ page: 2, limit: 25, total: 1, hasMore: false });
-    const [sql, bindings] = raw.mock.calls[1] as unknown as [string, unknown[]];
+    const [sql, bindings] = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0] as unknown as [
+      string,
+      unknown[]
+    ];
     expect(sql).toContain('repository IS NULL AND status = ?');
     expect(sql).toContain('ORDER BY submitted_at DESC, id DESC LIMIT ? OFFSET ?');
     expect(bindings).toEqual([range.fromUtc, range.toUtc, 'failed', 25, 25]);
@@ -283,7 +289,7 @@ describe('AgentAnalyticsService', () => {
     ]);
     const result = await service.listRuns({}, 1, 25);
     expect(result.runs[0]).toMatchObject({ submittedAt: range.fromUtc, queuedAt: requeuedAt, tokens: { total: 300 } });
-    const sql = raw.mock.calls[1][0];
+    const sql = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0][0];
     expect(sql).toContain('r."createdAt" AS submitted_at');
     expect(sql).toContain('r."queuedAt" AS queued_at');
     expect(sql).toContain('r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz');
@@ -307,11 +313,13 @@ describe('AgentAnalyticsService', () => {
         },
       ],
     });
-    const result = await new AgentAnalyticsService({ knex: { raw } } as any).getOptions();
+    const result = await new AgentAnalyticsService({
+      knex: { transaction: async (callback: any) => callback({ raw }) },
+    } as any).getOptions();
     expect(result.truncated).toEqual({ repositories: true, owners: false, models: false });
     expect(result.owners).toEqual([{ id: 'owner', githubUsername: null }]);
     expect(result.hasUnattributed).toBe(true);
-    expect(raw.mock.calls[0][1]).toEqual([200, 200, 200]);
+    expect(raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0][1]).toEqual([200, 200, 200]);
   });
 });
 

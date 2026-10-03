@@ -183,7 +183,7 @@ describe('EnvironmentAnalyticsService contracts', () => {
       })
     );
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       const lastId = Number(query.bindings.at(-2));
       return rows.filter((record) => record.id > lastId).slice(0, 1000);
@@ -193,12 +193,13 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(result.exceptions).toHaveLength(20);
     expect(result.truncated).toBe(true);
     expect(queries.filter((query) => query.sql.includes(' AS deploys'))).toHaveLength(2);
-    expect(queries[0].sql).toBe('SET TRANSACTION READ ONLY');
+    expect(queries[0].sql).toBe('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(queries[1].sql).toBe("SET LOCAL statement_timeout = '10s'");
   });
 
   it('pages current records without a full readiness scan when no phase filter is requested', async () => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       if (query.sql.includes('count("e"."id")')) return { total: '1005' };
       return [row(26), row(27)];
@@ -216,9 +217,9 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(projections[0].sql).not.toContain('"e"."id" >');
   });
 
-  it('deduplicates PR coverage with EXISTS and preserves independent source-repository aggregates', async () => {
+  it('deduplicates retained PR coverage in one relation and preserves independent source-repository aggregates', async () => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes(' AS deploys'))
         return [row(1), row(2), row(3, { repositoryId: null, repositoryAmbiguous: true })];
       if (query.method === 'first') return { earliest: '2026-09-01T00:00:00Z' };
@@ -254,8 +255,10 @@ describe('EnvironmentAnalyticsService contracts', () => {
     });
     expect(result.buckets.map((bucket) => bucket.firstSeenEnvironments)).toEqual([3, 0]);
     const coverage = queries.find((query) => query.sql.includes('AS covered'))!;
-    expect(coverage.sql).toContain('WHERE EXISTS (');
-    expect(coverage.sql).toContain('coverage."pullRequestId" = p.id');
+    expect(coverage.sql).toContain('left join (select distinct "coverage"."pullRequestId"');
+    expect(coverage.sql).toContain('"coverage"."pullRequestId" = "p"."id"');
+    expect(coverage.sql).toContain('count(*) FILTER (WHERE coverage."pullRequestId" IS NOT NULL) AS covered');
+    expect(coverage.sql).not.toContain('EXISTS');
     expect(coverage.sql).not.toContain('"coverage"."createdAt"');
     expect(coverage.sql).not.toContain('join "builds"');
     const envs = queries.find((query) => query.sql.includes('AS ambiguous'))!;
@@ -265,7 +268,7 @@ describe('EnvironmentAnalyticsService contracts', () => {
 
   it('returns null PR measures for static-only scope instead of a false zero', async () => {
     const { service } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes(' AS deploys')) return [];
       if (query.method === 'first') return { earliest: null };
       return [];
@@ -278,12 +281,13 @@ describe('EnvironmentAnalyticsService contracts', () => {
 
   it('adds independent managed Service coverage and per-environment instances without changing readiness', async () => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       if (query.sql.includes(' AS deploys')) return [row(1), row(2, { repositoryId: null })];
       if (query.sql.includes('AS "environmentsWithServices"'))
         return [
           {
+            isTotal: 1,
             distinctServices: '1',
             instances: '3',
             readyInstances: '2',
@@ -293,6 +297,7 @@ describe('EnvironmentAnalyticsService contracts', () => {
             buildOnlyInstances: '2',
             unknownTypeInstances: '0',
           },
+          { isTotal: 0, type: 'docker', distinctServices: '1', instances: '3', readyInstances: '2' },
         ];
       if (query.sql.includes('group by "s"."environmentId"'))
         return [
@@ -318,11 +323,45 @@ describe('EnvironmentAnalyticsService contracts', () => {
       excluded: { externalInstances: 1, buildOnlyInstances: 2, unknownTypeInstances: 0 },
     });
     expect(queries.some((query) => query.sql.includes('group by "s"."environmentId"'))).toBe(false);
+    const aggregates = queries.filter((query) => query.sql.includes('AS "environmentsWithServices"'));
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0].sql).toContain('GROUPING(s.type) AS "isTotal"');
+    expect(aggregates[0].sql).toContain('group by GROUPING SETS ((s.type), ())');
+  });
+
+  it('keeps a real null component type separate from the aggregate total', async () => {
+    const { service } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.sql.includes(' AS deploys')) return [];
+      return [
+        { isTotal: 0, type: null, unknownTypeInstances: '2' },
+        { isTotal: 0, type: 'helm', instances: '1', readyInstances: '0', distinctServices: '1' },
+        {
+          isTotal: 1,
+          type: null,
+          instances: '1',
+          readyInstances: '0',
+          distinctServices: '1',
+          environmentsWithServices: '1',
+          unresolvedIdentityInstances: '0',
+          unknownTypeInstances: '2',
+        },
+      ];
+    });
+    const { services } = await service.getInventory(scope);
+    expect(services).toMatchObject({ instances: 1, distinctServices: 1, excluded: { unknownTypeInstances: 2 } });
+    expect(services.byType.find((row) => row.type === 'helm')).toEqual({
+      type: 'helm',
+      instances: 1,
+      readyInstances: 0,
+      distinctServices: 1,
+    });
   });
 
   it('SQL-pages stable configured Service groups and converts independent nullable identities', async () => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       if (query.method === 'first') return { total: '30' };
       return [
@@ -372,7 +411,7 @@ describe('EnvironmentAnalyticsService contracts', () => {
     [999_999, 1_000_001, true, true],
   ])('reports Services paging bounds at page %i with total %i', async (page, total, hasMore, truncated) => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       if (query.method === 'first') return { total: String(total) };
       return [
@@ -402,7 +441,7 @@ describe('EnvironmentAnalyticsService contracts', () => {
 
   it('loads service counts only for the current environment page and leaves historical counts unknown', async () => {
     const { service, queries } = serviceWithExecutor((query) => {
-      if (query.sql.startsWith('SET TRANSACTION')) return { rows: [] };
+      if (query.sql.startsWith('SET ')) return { rows: [] };
       if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
       if (query.method === 'first') return { total: '1' };
       if (query.sql.includes('service_deployables')) return [{ environmentId: 26, type: 'helm', instances: '2' }];
@@ -417,8 +456,13 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(serviceQuery.sql).toContain('a."buildUUID" = e.uuid');
     expect(serviceQuery.sql).toContain('a."deletedAt" IS NULL');
     expect(serviceQuery.sql).toContain('d."deletedAt" IS NULL');
-    expect(serviceQuery.sql).toContain('PARTITION BY a."buildId", a.name ORDER BY a.id DESC');
-    expect(serviceQuery.sql).toContain('PARTITION BY d."buildId", d."deployableId" ORDER BY d.id DESC');
+    expect(serviceQuery.sql).toContain('SELECT max(a.id) AS id');
+    expect(serviceQuery.sql).toContain('GROUP BY a."buildId", a.name');
+    expect(serviceQuery.sql).toContain('selected.id = a.id');
+    expect(serviceQuery.sql).toContain('SELECT max(d.id) AS id');
+    expect(serviceQuery.sql).toContain('GROUP BY d."buildId", d."deployableId"');
+    expect(serviceQuery.sql).toContain('selected.id = d.id');
+    expect(serviceQuery.sql).not.toContain('row_number()');
     expect(serviceQuery.bindings).toEqual(
       expect.arrayContaining(['torn_down', 'docker', 'github', 'helm', 'aurora-restore'])
     );

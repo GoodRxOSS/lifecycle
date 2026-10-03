@@ -17,6 +17,7 @@ import { defaultDb } from 'server/lib/dependencies';
 import { BadRequestError } from 'server/lib/appError';
 import { getEnvironmentPhase, type EnvironmentPhase, type ReadinessDeploy } from 'server/lib/environments/readiness';
 import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
+import { analyticsTransaction } from './execution';
 import {
   analyticsBucketDates,
   analyticsBucketExpression,
@@ -446,29 +447,38 @@ function serviceInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environm
     'r.githubInstallationId'
   );
   if (environmentIds) environments.whereIn('e.id', environmentIds);
+  const latestDeployables = knex.raw(`
+    SELECT max(a.id) AS id
+    FROM deployables a JOIN service_environments e ON a."buildId" = e."environmentId" AND a."buildUUID" = e.uuid
+    WHERE a."deletedAt" IS NULL AND NULLIF(btrim(a.name), '') IS NOT NULL
+    GROUP BY a."buildId", a.name
+  `);
   const deployables = knex.raw(`
     SELECT a.id, a.name, a.type, a.active, a."serviceId", e.*,
       COALESCE(NULLIF(a."resolvedFromRepositoryId", 0)::bigint,
         CASE WHEN btrim(a."repositoryId") ~ '^[0-9]{1,10}$' THEN NULLIF(btrim(a."repositoryId")::bigint, 0) END)
-        AS "sourceGithubRepositoryId",
-      row_number() OVER (PARTITION BY a."buildId", a.name ORDER BY a.id DESC) AS ordinal
-    FROM deployables a JOIN service_environments e ON a."buildId" = e."environmentId" AND a."buildUUID" = e.uuid
-    WHERE a."deletedAt" IS NULL AND NULLIF(btrim(a.name), '') IS NOT NULL
+        AS "sourceGithubRepositoryId"
+    FROM deployables a JOIN service_latest_deployable_ids selected ON selected.id = a.id
+    JOIN service_environments e ON a."buildId" = e."environmentId"
+  `);
+  const latestDeploys = knex.raw(`
+    SELECT max(d.id) AS id
+    FROM deploys d JOIN service_deployables a ON a.id = d."deployableId" AND a."environmentId" = d."buildId"
+    WHERE a.active = true AND d.active = true AND d."deletedAt" IS NULL
+    GROUP BY d."buildId", d."deployableId"
   `);
   const deploys = knex.raw(`
-    SELECT d."deployableId", d.status,
-      row_number() OVER (PARTITION BY d."buildId", d."deployableId" ORDER BY d.id DESC) AS ordinal
-    FROM deploys d JOIN service_deployables a ON a.id = d."deployableId" AND a."environmentId" = d."buildId"
-    WHERE a.ordinal = 1 AND a.active = true AND d.active = true AND d."deletedAt" IS NULL
+    SELECT d."deployableId", d.status
+    FROM deploys d JOIN service_latest_deploy_ids selected ON selected.id = d.id
   `);
   return knex
     .with('service_environments', environments)
+    .with('service_latest_deployable_ids', latestDeployables)
     .with('service_deployables', deployables)
+    .with('service_latest_deploy_ids', latestDeploys)
     .with('service_deploys', deploys)
     .from('service_deployables as s')
     .join('service_deploys as d', 'd.deployableId', 's.id')
-    .where('s.ordinal', 1)
-    .where('d.ordinal', 1)
     .where('s.active', true)
     .whereRaw('(d.status IS NULL OR d.status <> ?)', [DeployStatus.TORN_DOWN]);
 }
@@ -535,13 +545,7 @@ export default class EnvironmentAnalyticsService {
   constructor(private readonly db: Pick<Database, 'knex'> = defaultDb) {}
 
   private async transaction<T>(work: (knex: Knex) => Promise<T>): Promise<T> {
-    return this.db.knex.transaction(
-      async (trx) => {
-        await trx.raw('SET TRANSACTION READ ONLY');
-        return work(trx);
-      },
-      { isolationLevel: 'repeatable read' }
-    );
+    return analyticsTransaction(this.db.knex, work);
   }
 
   private async visitCurrent(
@@ -625,9 +629,11 @@ export default class EnvironmentAnalyticsService {
 
   private async serviceInventory(knex: Knex, scope: EnvironmentAnalyticsScope): Promise<ManagedServiceInventory> {
     const result = emptyServiceInventory();
-    const [totals] = await serviceInstances(knex, scope).select(
-      knex.raw(
-        `
+    const rows = await serviceInstances(knex, scope)
+      .select(
+        knex.raw(
+          `
+      s.type, GROUPING(s.type) AS "isTotal",
       count(*) FILTER (WHERE s.type = ANY(?::text[])) AS instances,
       count(DISTINCT ${serviceKeySql}) FILTER (WHERE s.type = ANY(?::text[]) AND s."repositoryId" IS NOT NULL) AS "distinctServices",
       count(*) FILTER (WHERE s.type = ANY(?::text[]) AND d.status = ?) AS "readyInstances",
@@ -637,30 +643,22 @@ export default class EnvironmentAnalyticsService {
       count(*) FILTER (WHERE s.type = ANY(?::text[])) AS "buildOnlyInstances",
       count(*) FILTER (WHERE s.type IS NULL OR s.type <> ALL(?::text[])) AS "unknownTypeInstances"
     `,
-        [
-          MANAGED_SERVICE_TYPES,
-          MANAGED_SERVICE_TYPES,
-          MANAGED_SERVICE_TYPES,
-          DeployStatus.READY,
-          MANAGED_SERVICE_TYPES,
-          MANAGED_SERVICE_TYPES,
-          DeployTypes.EXTERNAL_HTTP,
-          [DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
-          [...MANAGED_SERVICE_TYPES, DeployTypes.EXTERNAL_HTTP, DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
-        ]
-      )
-    );
-    const types = (await managedInstances(knex, scope)
-      .select('s.type')
-      .count('* as instances')
-      .select(
-        knex.raw(
-          `count(DISTINCT ${serviceKeySql}) FILTER (WHERE s."repositoryId" IS NOT NULL) AS "distinctServices",
-        count(*) FILTER (WHERE d.status = ?) AS "readyInstances"`,
-          [DeployStatus.READY]
+          [
+            MANAGED_SERVICE_TYPES,
+            MANAGED_SERVICE_TYPES,
+            MANAGED_SERVICE_TYPES,
+            DeployStatus.READY,
+            MANAGED_SERVICE_TYPES,
+            MANAGED_SERVICE_TYPES,
+            DeployTypes.EXTERNAL_HTTP,
+            [DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
+            [...MANAGED_SERVICE_TYPES, DeployTypes.EXTERNAL_HTTP, DeployTypes.CONFIGURATION, DeployTypes.CODEFRESH],
+          ]
         )
       )
-      .groupBy('s.type')) as Array<ManagedServiceTypeCounts>;
+      .groupByRaw('GROUPING SETS ((s.type), ())');
+    const totals = rows.find((row) => Number(row.isTotal) === 1);
+    const types = rows.filter((row) => Number(row.isTotal) === 0) as Array<ManagedServiceTypeCounts>;
     for (const field of [
       'distinctServices',
       'instances',
@@ -710,15 +708,16 @@ export default class EnvironmentAnalyticsService {
         .where('p.createdAt', '>=', period.fromUtc)
         .where('p.createdAt', '<', period.toUtc);
       const coverage = knex('builds as coverage')
-        .select(knex.raw('1'))
-        .whereRaw('coverage."pullRequestId" = p.id')
+        .distinct('coverage.pullRequestId')
+        .whereNotNull('coverage.pullRequestId')
         .where('coverage.kind', BuildKind.ENVIRONMENT);
       if (query.environmentType === 'ephemeral') coverage.whereRaw('COALESCE(coverage."isStatic", false) = false');
       prRows = (await prs
         .clone()
+        .leftJoin(coverage.as('coverage'), 'coverage.pullRequestId', 'p.id')
         .select('p.repositoryId', 'r.fullName', 'r.githubInstallationId')
         .count('p.id as count')
-        .select(knex.raw('count(*) FILTER (WHERE EXISTS (?)) AS covered', [coverage]))
+        .select(knex.raw('count(*) FILTER (WHERE coverage."pullRequestId" IS NOT NULL) AS covered'))
         .groupBy('p.repositoryId', 'r.fullName', 'r.githubInstallationId')) as CountRow[];
       prBuckets = (await prs
         .clone()

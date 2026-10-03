@@ -48,7 +48,7 @@ const range: ResolvedAnalyticsRange = {
 const compiler = knexFactory({ client: 'pg' });
 function serviceWithRows(results: unknown[][]) {
   const raw = jest.fn((sql: string, bindings?: unknown[]) => {
-    if (sql.startsWith('SET TRANSACTION')) return Promise.resolve();
+    if (sql.startsWith('SET ')) return Promise.resolve();
     if (sql.includes('lifetime_source AS')) return Promise.resolve({ rows: results.shift() });
     if (sql === 'SELECT CURRENT_TIMESTAMP AS "asOf"') return Promise.resolve({ rows: [{ asOf: range.asOf }] });
     return compiler.raw(sql, bindings as any);
