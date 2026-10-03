@@ -405,6 +405,28 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(pageQuery.sql).not.toContain('"e"."createdAt" >=');
   });
 
+  it('carries selected deployment state into aggregation without rejoining the selected component relation', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.method === 'first') return { total: '0' };
+      return [];
+    });
+    await service.getServices(parseManagedServiceRecordsQuery(new URLSearchParams()));
+    const selectedQueries = queries.filter((query) => query.sql.includes('service_instances'));
+    expect(selectedQueries).toHaveLength(2);
+    for (const { sql } of selectedQueries) {
+      expect(sql.match(/JOIN service_deployables a/g)).toHaveLength(1);
+      expect(sql).toContain('SELECT DISTINCT ON (a.id) a.*, d.status AS "deployStatus"');
+      expect(sql).toContain('WHERE a.active = true AND d.active = true AND d."deletedAt" IS NULL');
+      expect(sql).toContain('ORDER BY a.id, d.id DESC');
+      expect(sql).toContain('from "service_instances" as "s"');
+      expect(sql).not.toContain('d.status <>');
+      expect(sql).not.toContain('join "service_deploys"');
+      expect(sql.indexOf('s."deployStatus" IS NULL')).toBeGreaterThan(sql.indexOf('ORDER BY a.id, d.id DESC'));
+    }
+  });
+
   it.each([
     [1_000_000, 1_000_001, false, true],
     [1_000_000, 1_000_000, false, false],
@@ -459,9 +481,11 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(serviceQuery.sql).toContain('SELECT max(a.id) AS id');
     expect(serviceQuery.sql).toContain('GROUP BY a."buildId", a.name');
     expect(serviceQuery.sql).toContain('selected.id = a.id');
-    expect(serviceQuery.sql).toContain('SELECT max(d.id) AS id');
-    expect(serviceQuery.sql).toContain('GROUP BY d."buildId", d."deployableId"');
-    expect(serviceQuery.sql).toContain('selected.id = d.id');
+    expect(serviceQuery.sql).toContain('SELECT DISTINCT ON (a.id) a.*, d.status AS "deployStatus"');
+    expect(serviceQuery.sql).toContain('ORDER BY a.id, d.id DESC');
+    expect(serviceQuery.sql).toContain('from "service_instances" as "s"');
+    expect(serviceQuery.sql).not.toContain('join "service_deploys"');
+    expect(serviceQuery.sql).not.toContain('service_latest_deploy_ids');
     expect(serviceQuery.sql).not.toContain('row_number()');
     expect(serviceQuery.bindings).toEqual(
       expect.arrayContaining(['torn_down', 'docker', 'github', 'helm', 'aurora-restore'])

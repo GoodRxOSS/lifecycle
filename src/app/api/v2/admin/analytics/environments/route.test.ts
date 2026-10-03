@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { AppError } from 'server/lib/appError';
 
 const mockIdentity = jest.fn(),
   mockGetUser = jest.fn();
@@ -130,5 +131,26 @@ describe('environment analytics administrator boundaries', () => {
     expect((await inventory(request())).status).toBe(500);
     expect((await environments(request())).status).toBe(200);
     expect((await options(request())).status).toBe(200);
+  });
+
+  it('returns the specific inventory time-limit response without database details', async () => {
+    mockInventory.mockRejectedValueOnce(
+      new AppError({
+        httpStatus: 503,
+        code: 'analytics_timeout',
+        message: 'Analytics request did not complete before the time limit.',
+        nextAction: { kind: 'retry', label: 'Try again' },
+        retryable: true,
+        cause: new Error('SELECT private_data'),
+      })
+    );
+    const response = await inventory(request());
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toEqual({
+      code: 'analytics_timeout',
+      message: 'Analytics request did not complete before the time limit.',
+      nextAction: { kind: 'retry', label: 'Try again' },
+    });
+    expect((await environments(request())).status).toBe(200);
   });
 });

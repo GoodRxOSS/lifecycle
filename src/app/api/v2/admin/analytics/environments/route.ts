@@ -40,6 +40,7 @@ export const runtime = 'nodejs';
  *       - { in: query, name: interval, schema: { type: string, enum: [day, week], default: day } }
  *       - { in: query, name: rankBy, schema: { type: string, enum: [first_seen, observed_prs, pr_coverage], default: first_seen } }
  *     responses:
+ *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
  *         description: Analytics result.
  *         content:

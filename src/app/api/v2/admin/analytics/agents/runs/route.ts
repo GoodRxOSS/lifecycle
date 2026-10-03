@@ -42,6 +42,7 @@ import AgentAnalyticsService, {
  *       - {in: query, name: page, schema: {type: integer, minimum: 1, maximum: 10000, default: 1}}
  *       - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
  *     responses:
+ *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
  *         description: SQL-paginated run metadata and recorded usage.
  *         content:

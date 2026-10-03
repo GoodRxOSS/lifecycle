@@ -461,26 +461,20 @@ function serviceInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environm
     FROM deployables a JOIN service_latest_deployable_ids selected ON selected.id = a.id
     JOIN service_environments e ON a."buildId" = e."environmentId"
   `);
-  const latestDeploys = knex.raw(`
-    SELECT max(d.id) AS id
+  const instances = knex.raw(`
+    SELECT DISTINCT ON (a.id) a.*, d.status AS "deployStatus"
     FROM deploys d JOIN service_deployables a ON a.id = d."deployableId" AND a."environmentId" = d."buildId"
     WHERE a.active = true AND d.active = true AND d."deletedAt" IS NULL
-    GROUP BY d."buildId", d."deployableId"
-  `);
-  const deploys = knex.raw(`
-    SELECT d."deployableId", d.status
-    FROM deploys d JOIN service_latest_deploy_ids selected ON selected.id = d.id
+    ORDER BY a.id, d.id DESC
   `);
   return knex
     .with('service_environments', environments)
     .with('service_latest_deployable_ids', latestDeployables)
     .with('service_deployables', deployables)
-    .with('service_latest_deploy_ids', latestDeploys)
-    .with('service_deploys', deploys)
-    .from('service_deployables as s')
-    .join('service_deploys as d', 'd.deployableId', 's.id')
+    .with('service_instances', instances)
+    .from('service_instances as s')
     .where('s.active', true)
-    .whereRaw('(d.status IS NULL OR d.status <> ?)', [DeployStatus.TORN_DOWN]);
+    .whereRaw('(s."deployStatus" IS NULL OR s."deployStatus" <> ?)', [DeployStatus.TORN_DOWN]);
 }
 
 function managedInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environmentIds?: number[]): Knex.QueryBuilder {
@@ -636,7 +630,7 @@ export default class EnvironmentAnalyticsService {
       s.type, GROUPING(s.type) AS "isTotal",
       count(*) FILTER (WHERE s.type = ANY(?::text[])) AS instances,
       count(DISTINCT ${serviceKeySql}) FILTER (WHERE s.type = ANY(?::text[]) AND s."repositoryId" IS NOT NULL) AS "distinctServices",
-      count(*) FILTER (WHERE s.type = ANY(?::text[]) AND d.status = ?) AS "readyInstances",
+      count(*) FILTER (WHERE s.type = ANY(?::text[]) AND s."deployStatus" = ?) AS "readyInstances",
       count(DISTINCT s."environmentId") FILTER (WHERE s.type = ANY(?::text[])) AS "environmentsWithServices",
       count(*) FILTER (WHERE s.type = ANY(?::text[]) AND s."repositoryId" IS NULL) AS "unresolvedIdentityInstances",
       count(*) FILTER (WHERE s.type = ?) AS "externalInstances",
@@ -877,7 +871,7 @@ export default class EnvironmentAnalyticsService {
             `${serviceKeySql} AS key,
           CASE WHEN count(DISTINCT s."sourceGithubRepositoryId") = 1 THEN min(s."sourceGithubRepositoryId") END AS "sourceGithubRepositoryId",
           min(s."serviceId") AS "serviceId", (s."repositoryId" IS NOT NULL) AS "identityResolved",
-          count(*) AS instances, count(*) FILTER (WHERE d.status = ?) AS "readyInstances",
+          count(*) AS instances, count(*) FILTER (WHERE s."deployStatus" = ?) AS "readyInstances",
           count(DISTINCT s."environmentId") AS environments`,
             [DeployStatus.READY]
           )

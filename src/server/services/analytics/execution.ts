@@ -11,11 +11,30 @@
  */
 
 import type { Knex } from 'knex';
+import { AppError } from 'server/lib/appError';
 
-export function analyticsTransaction<T>(knex: Knex, work: (trx: Knex.Transaction) => Promise<T>): Promise<T> {
-  return knex.transaction(async (trx) => {
-    await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    await trx.raw("SET LOCAL statement_timeout = '10s'");
-    return work(trx);
-  });
+export async function analyticsTransaction<T>(knex: Knex, work: (trx: Knex.Transaction) => Promise<T>): Promise<T> {
+  try {
+    return await knex.transaction(async (trx) => {
+      await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      await trx.raw("SET LOCAL statement_timeout = '10s'");
+      return work(trx);
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error as { code?: string }).code === '57014' &&
+      error.message.endsWith('canceling statement due to statement timeout')
+    ) {
+      throw new AppError({
+        httpStatus: 503,
+        code: 'analytics_timeout',
+        message: 'Analytics request did not complete before the time limit.',
+        nextAction: { kind: 'retry', label: 'Try again' },
+        retryable: true,
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }

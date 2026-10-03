@@ -36,6 +36,7 @@ export const runtime = 'nodejs';
 
 
  *     responses:
+ *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
  *         description: Analytics result.
  *         content:

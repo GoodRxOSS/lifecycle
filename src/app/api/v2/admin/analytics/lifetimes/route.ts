@@ -38,6 +38,7 @@ export const runtime = 'nodejs';
  *       - { in: query, name: compare, schema: { type: boolean, default: true } }
  *       - { in: query, name: interval, schema: { type: string, enum: [day, week], default: day } }
  *     responses:
+ *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
  *         description: Lifetime analytics result.
  *         content:
