@@ -104,6 +104,7 @@ export type EnvironmentLifetimeRecordsQuery = EnvironmentAnalyticsScope & {
 export type EnvironmentLifetimeRecord = AnalyticsRepositoryIdentity & {
   id: number;
   uuid: string | null;
+  namespace: string | null;
   status: string | null;
   isStatic: boolean;
   author: string | null;
@@ -158,8 +159,8 @@ export type EnvironmentLifetimeScatter = {
 
 const MAX_PAGE = 10_000;
 const CAVEATS = [
-  'API lifetime is the recorded time from first creation to identity release, not ready time or live resource uptime.',
-  'PR lifetime is an estimate from first creation to the latest update of a currently torn-down record. Later edits and reused records can include inactive gaps.',
+  'API record duration measures creation to recorded deletion. It includes records that never deployed and does not measure runtime lifetime.',
+  'PR record duration estimates creation to the latest update of a torn-down record. It includes records that never deployed. Waiting time, later edits and reuse gaps can increase it.',
   'Current age is time since the first retained record. It includes queued, paused and failed time and can include earlier PR episodes.',
   'Retirement dates select completed samples. Missing or nonfinite end dates cannot be placed in a window; unplaced counts cover the entire selected scope.',
   'Counts cover retained environment records, not deployment attempts. Collection start and history completeness are unknown.',
@@ -332,7 +333,7 @@ function aggregateSql(cohort: 'completed' | 'current'): string {
 }
 
 const RECORD_JSON_SQL = `jsonb_build_object(
-  'id', id, 'uuid', uuid, 'status', status, 'isStatic', COALESCE("isStatic", false),
+  'id', id, 'uuid', uuid, 'namespace', namespace, 'status', status, 'isStatic', COALESCE("isStatic", false),
   'author', author, 'repositoryId', "repositoryId", 'fullName', "fullName",
   'githubInstallationId', "githubInstallationId", 'repositoryAmbiguous', "repositoryAmbiguous",
   'resourceAvailable', ("deletedAt" IS NULL AND (status IS NULL OR status <> ?) AND NULLIF(uuid, '') IS NOT NULL),
@@ -351,6 +352,7 @@ function serializeRecord(
     ...record,
     ...method(record.group, cohort),
     id: count(record.id),
+    namespace: record.namespace ?? null,
     repositoryId: record.repositoryId == null ? null : count(record.repositoryId),
     githubInstallationId: record.githubInstallationId == null ? null : count(record.githubInstallationId),
     durationHours: nullableNumber(record.durationHours),
@@ -465,7 +467,7 @@ export default class EnvironmentLifetimeAnalyticsService {
       const groupPredicate = query.group === 'all' ? '' : 'AND group_name = ?';
       const result = await trx.raw(
         `WITH ${facts.sql}, windowed AS MATERIALIZED (
-          SELECT id, uuid, status, "isStatic", author, "repositoryId", "fullName", "githubInstallationId",
+          SELECT id, uuid, namespace, status, "isStatic", author, "repositoryId", "fullName", "githubInstallationId",
             "repositoryAmbiguous", "deletedAt", "pullRequestNumber", "prTitle", "prAuthor",
             group_name, start_at, end_at, sample_state, duration_hours
           FROM facts WHERE group_name IN ('api','pr') AND isfinite(end_at)

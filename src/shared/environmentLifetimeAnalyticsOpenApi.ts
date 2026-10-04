@@ -113,6 +113,7 @@ export const environmentLifetimeAnalyticsSchemas = {
   EnvironmentLifetimeRecord: object({
     id: integer,
     uuid: nullableText,
+    namespace: nullableText,
     status: nullableText,
     isStatic: boolean,
     author: nullableText,

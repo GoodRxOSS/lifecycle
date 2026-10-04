@@ -87,6 +87,15 @@ describe('Admin environment analytics OpenAPI contract', () => {
     );
   });
 
+  it.each(['EnvironmentLifetimeRecord', 'EnvironmentLifetimeScatterPoint'])(
+    'includes the nullable full environment namespace in %s',
+    (name) => {
+      expect(schemas[name].properties.namespace).toEqual({ type: 'string', nullable: true });
+      expect(schemas[name].required).toContain('namespace');
+      expect(schemas[name].properties.uuid).toEqual({ type: 'string', nullable: true });
+    }
+  );
+
   it('documents exact session drilldown and session totals before bounded paging', () => {
     const sessions = spec.paths['/api/v2/admin/analytics/agents/sessions'].get;
     expect(sessions.operationId).toBe('getAgentAnalyticsSessions');

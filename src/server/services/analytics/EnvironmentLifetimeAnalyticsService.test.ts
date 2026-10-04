@@ -277,6 +277,60 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
       truncated: false,
     });
   });
+  it.each(['current', 'completed'] as const)(
+    'preserves the full environment identity in %s lifetime records without an extra query',
+    async (cohort) => {
+      const record = {
+        id: 12,
+        uuid: 'lifetime-environment-with-a-full-retained-name-123456',
+        namespace: 'env-lifetime-environment-with-a-full-retained-name-123456',
+        status: cohort === 'completed' ? 'torn_down' : 'deployed',
+        group: 'pr',
+        resourceAvailable: cohort === 'current',
+        sampleState: 'valid',
+        durationHours: 24,
+        startedAt: '2026-03-08T12:00:00Z',
+        measuredUntilAt: '2026-03-09T12:00:00Z',
+        repositoryId: 4,
+        githubInstallationId: 8,
+      };
+      const { service, raw } = serviceWithRows([[{ total: 1, records: [record] }]]);
+      const result = await service.getRecords(parseEnvironmentLifetimeRecordsQuery(params(`cohort=${cohort}`)));
+      expect(result.records[0]).toMatchObject({
+        uuid: record.uuid,
+        namespace: record.namespace,
+        status: record.status,
+        resourceAvailable: record.resourceAvailable,
+      });
+      const calls = raw.mock.calls.filter(([sql]) => sql.includes('lifetime_source AS'));
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toContain('b.namespace');
+      expect(calls[0][0]).toContain("'namespace', namespace");
+    }
+  );
+  it('preserves a missing namespace as null without shortening the retained UUID', async () => {
+    const uuid = 'lifetime-environment-without-a-namespace-123456';
+    const { service } = serviceWithRows([
+      [
+        {
+          total: 1,
+          records: [
+            {
+              id: 12,
+              uuid,
+              namespace: null,
+              group: 'pr',
+              resourceAvailable: false,
+              repositoryId: null,
+              githubInstallationId: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    const result = await service.getRecords(parseEnvironmentLifetimeRecordsQuery(params()));
+    expect(result.records[0]).toMatchObject({ uuid, namespace: null, resourceAvailable: false });
+  });
   it('stops at the supported page bound while reporting uncapped totals', async () => {
     const { service } = serviceWithRows([[{ total: 1000001, records: [] }]]);
     const result = await service.getRecords(parseEnvironmentLifetimeRecordsQuery(params('page=10000&limit=100')));
@@ -373,6 +427,36 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
     expect(call[0]).toContain('ORDER BY end_at, id LIMIT ?');
     expect(call[1]).toEqual(expect.arrayContaining([4, range.fromUtc, range.toUtc, 'api', 5000]));
     expect(call[1]).not.toContain(range.previous!.fromUtc);
+  });
+  it('preserves a retired environment name in scatter points through the existing projection', async () => {
+    const point = {
+      id: 12,
+      uuid: 'lifetime-environment-with-a-full-retained-name-123456',
+      namespace: 'env-lifetime-environment-with-a-full-retained-name-123456',
+      group: 'pr',
+      resourceAvailable: false,
+      status: 'torn_down',
+      sampleState: 'valid',
+      durationHours: 24,
+      startedAt: '2026-03-08T12:00:00Z',
+      measuredUntilAt: '2026-03-09T12:00:00Z',
+      repositoryId: 4,
+      githubInstallationId: 8,
+    };
+    const { service, raw } = serviceWithRows([
+      [{ total: 1, points: [point], coverage: [{ group_name: 'pr', eligible: 1, samples: 1 }] }],
+    ]);
+    const result = await service.getScatter(parseEnvironmentLifetimeScatterQuery(params('group=pr')));
+    expect(result.points[0]).toMatchObject({
+      uuid: point.uuid,
+      namespace: point.namespace,
+      resourceAvailable: false,
+      status: 'torn_down',
+    });
+    const calls = raw.mock.calls.filter(([sql]) => sql.includes('lifetime_source AS'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toContain('SELECT id, uuid, namespace, status');
+    expect(calls[0][0]).toContain("'namespace', namespace");
   });
   it.each([0, 5000, 5001])('scatter returns all or none at a total of %i, without a biased sample', async (total) => {
     const points =
