@@ -21,10 +21,10 @@ const boolean = { type: 'boolean' };
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const nullableRef = (name: string) => ({ allOf: [ref(name)], nullable: true });
 const array = (items: object) => ({ type: 'array', items });
-const object = (properties: Record<string, object>) => ({
+const object = (properties: Record<string, object>, optional: string[] = []) => ({
   type: 'object',
   properties,
-  required: Object.keys(properties),
+  required: Object.keys(properties).filter((name) => !optional.includes(name)),
   additionalProperties: false,
 });
 const success = (name: string) => ({
@@ -99,6 +99,31 @@ export const environmentAnalyticsSchemas = {
     previousFirstSeenEnvironments: nullableInteger,
     previousObservedPullRequests: nullableInteger,
   }),
+  EnvironmentActivityAnalyticsBucket: object({
+    date,
+    firstSeenEnvironments: integer,
+    previousFirstSeenEnvironments: nullableInteger,
+  }),
+  EnvironmentActivityAnalyticsSeries: object({
+    ...repositoryProperties,
+    key: { ...text, description: 'Stable repository row identity or the other or unattributed group.' },
+    kind: { type: 'string', enum: ['repository', 'other', 'unattributed'] },
+    firstSeenEnvironments: integer,
+    previousFirstSeenEnvironments: nullableInteger,
+    buckets: { ...array(ref('EnvironmentActivityAnalyticsBucket')), maxItems: 365 },
+  }),
+  EnvironmentActivityBreakdown: object({
+    repositoryLimit: { type: 'integer', enum: [5] },
+    repositoryTotal: {
+      ...integer,
+      description: 'Distinct attributed repository row identities with activity in either requested period.',
+    },
+    groupedRepositories: {
+      ...integer,
+      description: 'Attributed repository identities included in Other repositories.',
+    },
+    series: { ...array(ref('EnvironmentActivityAnalyticsSeries')), maxItems: 7 },
+  }),
   EnvironmentAnalyticsRetention: object({
     earliestRetainedEnvironmentAt: nullableInstant,
     earliestRetainedPullRequestAt: nullableInstant,
@@ -111,19 +136,23 @@ export const environmentAnalyticsSchemas = {
       description: 'Unknown; no retention completeness boundary is established.',
     },
   }),
-  EnvironmentAnalytics: object({
-    range: ref('AnalyticsRange'),
-    scope: ref('EnvironmentAnalyticsScope'),
-    retention: ref('EnvironmentAnalyticsRetention'),
-    totals: ref('EnvironmentAnalyticsTotals'),
-    previousTotals: nullableRef('EnvironmentAnalyticsTotals'),
-    buckets: array(ref('EnvironmentAnalyticsBucket')),
-    repositories: array(ref('EnvironmentAnalyticsRepository')),
-    rankingTotal: integer,
-    rankingTruncated: boolean,
-    rankBy: { type: 'string', enum: ['first_seen', 'observed_prs', 'pr_coverage'] },
-    caveats: array(text),
-  }),
+  EnvironmentAnalytics: object(
+    {
+      range: ref('AnalyticsRange'),
+      scope: ref('EnvironmentAnalyticsScope'),
+      retention: ref('EnvironmentAnalyticsRetention'),
+      totals: ref('EnvironmentAnalyticsTotals'),
+      previousTotals: nullableRef('EnvironmentAnalyticsTotals'),
+      buckets: array(ref('EnvironmentAnalyticsBucket')),
+      activity: ref('EnvironmentActivityBreakdown'),
+      repositories: array(ref('EnvironmentAnalyticsRepository')),
+      rankingTotal: integer,
+      rankingTruncated: boolean,
+      rankBy: { type: 'string', enum: ['first_seen', 'observed_prs', 'pr_coverage'] },
+      caveats: array(text),
+    },
+    ['activity']
+  ),
   InventoryAnalyticsTotals: object(inventoryProperties),
   InventoryAnalyticsRepository: object({ ...repositoryProperties, ...inventoryProperties }),
   ManagedServiceTypeCounts: object({

@@ -71,6 +71,45 @@ function serviceWithExecutor(
   return { service: new EnvironmentAnalyticsService({ knex: { transaction } } as any), queries };
 }
 
+type ActivityFixtureBucket = {
+  date: string;
+  repositoryId: number | null;
+  fullName: string | null;
+  githubInstallationId: number | null;
+  count: number;
+};
+function activityFixture(current: ActivityFixtureBucket[], previous: ActivityFixtureBucket[] = [], calendar = range) {
+  return serviceWithExecutor((query) => {
+    if (query.sql.startsWith('SET ')) return { rows: [] };
+    if (query.sql.includes(' AS deploys') || query.sql.includes('"pull_requests" as "p"')) return [];
+    if (query.method === 'first') return { earliest: null };
+    const rows = calendar.previous && query.bindings.includes(calendar.previous.fromUtc) ? previous : current;
+    if (query.sql.includes('AS ambiguous')) {
+      const totals = new Map<number | null, ActivityFixtureBucket>();
+      for (const row of rows) {
+        const prior = totals.get(row.repositoryId);
+        totals.set(row.repositoryId, { ...row, count: (prior?.count ?? 0) + row.count });
+      }
+      return [...totals.values()].map((row) => ({ ...row, ambiguous: 0 }));
+    }
+    const ids = query.bindings.find((value) => Array.isArray(value)) as number[] | undefined;
+    const counts = new Map<string, { date: string; key?: string; count: number }>();
+    for (const row of rows) {
+      const key = ids
+        ? row.repositoryId == null
+          ? 'unattributed'
+          : ids.includes(row.repositoryId)
+          ? `repository:${row.repositoryId}`
+          : 'other'
+        : undefined;
+      const identity = `${row.date}:${key ?? ''}`;
+      const prior = counts.get(identity);
+      counts.set(identity, { date: row.date, ...(key ? { key } : {}), count: (prior?.count ?? 0) + row.count });
+    }
+    return [...counts.values()];
+  });
+}
+
 describe('EnvironmentAnalyticsService contracts', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -277,6 +316,217 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(result.totals.observedPullRequests).toBeNull();
     expect(result.buckets.every((bucket) => bucket.observedPullRequests === null)).toBe(true);
     expect(result.previousTotals).toBeNull();
+  });
+
+  it('adds repository activity only when requested and keeps parser defaults unchanged', async () => {
+    const plain = parseEnvironmentAnalyticsQuery(new URLSearchParams());
+    expect(parseEnvironmentAnalyticsQuery(new URLSearchParams('activityBreakdown=none'))).toEqual(plain);
+    expect(plain).not.toHaveProperty('activityBreakdown');
+    expect(parseEnvironmentAnalyticsQuery(new URLSearchParams('activityBreakdown=repositories'))).toEqual({
+      ...plain,
+      activityBreakdown: 'repositories',
+    });
+    expect(() => parseEnvironmentAnalyticsQuery(new URLSearchParams('activityBreakdown=components'))).toThrow(
+      'activityBreakdown must be none or repositories.'
+    );
+    const plainResult = await activityFixture([]).service.getEnvironments(plain);
+    expect(plainResult).not.toHaveProperty('activity');
+    const result = await activityFixture([]).service.getEnvironments({ ...plain, activityBreakdown: 'repositories' });
+    expect(result.activity).toEqual({ repositoryLimit: 5, repositoryTotal: 0, groupedRepositories: 0, series: [] });
+    const { activity, ...existing } = result;
+    expect(existing).toEqual(plainResult);
+    expect(activity?.series).toEqual([]);
+  });
+
+  it('replaces the total bucket scans without changing query counts or any existing result', async () => {
+    const current: ActivityFixtureBucket[] = Array.from({ length: 7 }, (_, index) => ({
+      date: range.dates[index % 2],
+      repositoryId: index + 1,
+      fullName: `org/repo-${index + 1}`,
+      githubInstallationId: 8,
+      count: 7 - index,
+    }));
+    current.push({
+      date: range.dates[0],
+      repositoryId: null,
+      fullName: null,
+      githubInstallationId: null,
+      count: 3,
+    });
+    const plain = activityFixture(current);
+    const opted = activityFixture(current);
+    const query = { ...scope, rankBy: 'first_seen' as const };
+    const expected = await plain.service.getEnvironments(query);
+    const result = await opted.service.getEnvironments({ ...query, activityBreakdown: 'repositories' });
+    const { activity, ...existing } = result;
+    expect(existing).toEqual(expected);
+    expect(opted.queries).toHaveLength(plain.queries.length);
+    expect(opted.queries.filter((query) => query.sql.includes('AS key'))).toHaveLength(1);
+    expect(opted.queries.filter((query) => query.sql.includes('group by "date"'))).toHaveLength(1);
+    expect(activity?.series.map((series) => series.key)).toEqual([
+      'repository:1',
+      'repository:2',
+      'repository:3',
+      'repository:4',
+      'repository:5',
+      'other',
+      'unattributed',
+    ]);
+    expect(activity?.repositoryTotal).toBe(7);
+    expect(activity?.groupedRepositories).toBe(2);
+    expect(activity?.series.find((series) => series.kind === 'other')?.firstSeenEnvironments).toBe(3);
+    expect(activity?.series.find((series) => series.kind === 'unattributed')?.firstSeenEnvironments).toBe(3);
+    for (const [index, bucket] of result.buckets.entries())
+      expect(activity?.series.reduce((sum, series) => sum + series.buckets[index].firstSeenEnvironments, 0)).toBe(
+        bucket.firstSeenEnvironments
+      );
+    expect(activity?.series.reduce((sum, series) => sum + series.firstSeenEnvironments, 0)).toBe(
+      result.totals.firstSeenEnvironments
+    );
+    expect(activity?.series.every((series) => series.previousFirstSeenEnvironments === null)).toBe(true);
+  });
+
+  it('ranks current activity before previous ties and keeps installation identities and complete comparison', async () => {
+    const calendar = {
+      ...range,
+      compare: true,
+      previous: {
+        from: '2026-09-28',
+        to: range.from,
+        fromUtc: '2026-09-28T00:00:00.000Z',
+        toUtc: range.fromUtc,
+        dates: ['2026-09-28', '2026-09-29'],
+      },
+    };
+    (resolveAnalyticsRange as jest.Mock).mockResolvedValue(calendar);
+    const current: ActivityFixtureBucket[] = [
+      { date: range.dates[0], repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: 10 },
+      { date: range.dates[1], repositoryId: 12, fullName: 'org/repo', githubInstallationId: 18, count: 10 },
+      ...[2, 3, 5, 6, 7].map((repositoryId) => ({
+        date: range.dates[0],
+        repositoryId,
+        fullName: `org/repo-${repositoryId}`,
+        githubInstallationId: 8,
+        count: 1,
+      })),
+    ];
+    const previous: ActivityFixtureBucket[] = [
+      { date: range.dates[0], repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: 1 },
+      { date: range.dates[1], repositoryId: 12, fullName: 'org/repo', githubInstallationId: 18, count: 2 },
+      { date: range.dates[0], repositoryId: 19, fullName: 'prior/repo', githubInstallationId: 9, count: 100 },
+    ];
+    const plain = activityFixture(current, previous, calendar);
+    const opted = activityFixture(current, previous, calendar);
+    const query = { ...scope, compare: true, rankBy: 'first_seen' as const };
+    const expected = await plain.service.getEnvironments(query);
+    const result = await opted.service.getEnvironments({ ...query, activityBreakdown: 'repositories' });
+    const { activity, ...existing } = result;
+    expect(existing).toEqual(expected);
+    expect(opted.queries).toHaveLength(plain.queries.length);
+    expect(opted.queries.filter((query) => query.sql.includes('AS key'))).toHaveLength(2);
+    expect(activity?.series.slice(0, 2).map((series) => [series.key, series.githubInstallationId])).toEqual([
+      ['repository:12', 18],
+      ['repository:4', 8],
+    ]);
+    expect(activity?.series.find((series) => series.kind === 'other')?.previousFirstSeenEnvironments).toBe(100);
+    for (const [index, bucket] of result.buckets.entries())
+      expect(
+        activity?.series.reduce((sum, series) => sum + series.buckets[index].previousFirstSeenEnvironments!, 0)
+      ).toBe(bucket.previousFirstSeenEnvironments);
+    expect(activity?.series.reduce((sum, series) => sum + series.previousFirstSeenEnvironments!, 0)).toBe(
+      result.previousTotals?.firstSeenEnvironments
+    );
+    expect(activity?.repositoryTotal).toBe(8);
+  });
+
+  it('keeps previous-only repositories and zero-filled current buckets when the selected period is empty', async () => {
+    const calendar = {
+      ...range,
+      compare: true,
+      previous: {
+        from: '2026-09-28',
+        to: range.from,
+        fromUtc: '2026-09-28T00:00:00.000Z',
+        toUtc: range.fromUtc,
+        dates: ['2026-09-28', '2026-09-29'],
+      },
+    };
+    (resolveAnalyticsRange as jest.Mock).mockResolvedValue(calendar);
+    const previous: ActivityFixtureBucket[] = [
+      { date: range.dates[1], repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: 7 },
+    ];
+    const result = await activityFixture([], previous, calendar).service.getEnvironments({
+      ...scope,
+      compare: true,
+      rankBy: 'first_seen',
+      activityBreakdown: 'repositories',
+    });
+    expect(result.activity?.series).toMatchObject([
+      { key: 'repository:4', firstSeenEnvironments: 0, previousFirstSeenEnvironments: 7 },
+    ]);
+    expect(result.activity?.series[0].buckets).toEqual(
+      range.dates.map((date, index) => ({
+        date,
+        firstSeenEnvironments: 0,
+        previousFirstSeenEnvironments: index === 1 ? 7 : 0,
+      }))
+    );
+    expect(result.activity?.groupedRepositories).toBe(0);
+  });
+
+  it('keeps scoped historical attribution and the existing DST and weekly bucket expressions', async () => {
+    const calendar = {
+      ...range,
+      from: '2026-03-08',
+      to: '2026-03-10',
+      fromUtc: '2026-03-08T08:00:00.000Z',
+      toUtc: '2026-03-10T07:00:00.000Z',
+      dates: ['2026-03-08', '2026-03-09'],
+      interval: 'week' as const,
+      timezone: 'America/Los_Angeles',
+      compare: true,
+      previous: {
+        from: '2026-03-06',
+        to: '2026-03-08',
+        fromUtc: '2026-03-06T08:00:00.000Z',
+        toUtc: '2026-03-08T08:00:00.000Z',
+        dates: ['2026-03-06', '2026-03-07'],
+      },
+    };
+    (resolveAnalyticsRange as jest.Mock).mockResolvedValue(calendar);
+    const rows = [
+      { date: '2026-03-02', repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: 2 },
+      { date: '2026-03-09', repositoryId: 4, fullName: 'org/repo', githubInstallationId: 8, count: 3 },
+    ];
+    const { service, queries } = activityFixture(rows, rows, calendar);
+    const result = await service.getEnvironments({
+      ...scope,
+      repositoryId: 4,
+      organization: 'org',
+      environmentType: 'static',
+      environmentAuthor: 'Alice',
+      rankBy: 'first_seen',
+      activityBreakdown: 'repositories',
+    });
+    expect(result.activity?.series[0].buckets).toEqual([
+      { date: '2026-03-02', firstSeenEnvironments: 2, previousFirstSeenEnvironments: 2 },
+      { date: '2026-03-09', firstSeenEnvironments: 3, previousFirstSeenEnvironments: 3 },
+    ]);
+    const grouped = queries.filter((query) => query.sql.includes('AS key'));
+    expect(grouped).toHaveLength(2);
+    for (const query of grouped) {
+      expect(query.sql).toContain('WHEN rc.matches = 1');
+      expect(query.sql).toContain('group by "key", "date"');
+      expect(query.sql).not.toMatch(/\b(deploys|deployables)\b/);
+      expect(query.bindings).toEqual(expect.arrayContaining([[4], 'org', true, 'Alice']));
+      expect(query.sql).not.toContain('"e"."deletedAt" is null');
+    }
+    expect(grouped[0].bindings).toEqual(
+      expect.arrayContaining(['week', 'America/Los_Angeles', 0, calendar.fromUtc, calendar.toUtc])
+    );
+    expect(grouped[1].bindings).toEqual(
+      expect.arrayContaining(['week', 'America/Los_Angeles', 2, calendar.previous.fromUtc, calendar.previous.toUtc])
+    );
   });
 
   it('adds independent managed Service coverage and per-environment instances without changing readiness', async () => {

@@ -37,6 +37,7 @@ export type EnvironmentAnalyticsScope = {
 export type EnvironmentAnalyticsQuery = AnalyticsCalendarQuery &
   EnvironmentAnalyticsScope & {
     rankBy: 'first_seen' | 'observed_prs' | 'pr_coverage';
+    activityBreakdown?: 'repositories';
   };
 export type EnvironmentAnalyticsRecordsQuery = EnvironmentAnalyticsQuery & {
   cohort: 'first_seen' | 'current';
@@ -65,6 +66,24 @@ export type EnvironmentAnalyticsRepository = AnalyticsRepositoryIdentity & {
   currentEnvironments: number;
   readyEnvironments: number;
 };
+export type EnvironmentActivityAnalyticsBucket = {
+  date: string;
+  firstSeenEnvironments: number;
+  previousFirstSeenEnvironments: number | null;
+};
+export type EnvironmentActivityAnalyticsSeries = AnalyticsRepositoryIdentity & {
+  key: string;
+  kind: 'repository' | 'other' | 'unattributed';
+  firstSeenEnvironments: number;
+  previousFirstSeenEnvironments: number | null;
+  buckets: EnvironmentActivityAnalyticsBucket[];
+};
+export type EnvironmentActivityBreakdown = {
+  series: EnvironmentActivityAnalyticsSeries[];
+  repositoryLimit: number;
+  repositoryTotal: number;
+  groupedRepositories: number;
+};
 export type EnvironmentAnalytics = {
   range: ResolvedAnalyticsRange;
   scope: EnvironmentAnalyticsScope;
@@ -83,6 +102,7 @@ export type EnvironmentAnalytics = {
     previousFirstSeenEnvironments: number | null;
     previousObservedPullRequests: number | null;
   }>;
+  activity?: EnvironmentActivityBreakdown;
   repositories: EnvironmentAnalyticsRepository[];
   rankingTotal: number;
   rankingTruncated: boolean;
@@ -227,8 +247,10 @@ type CountRow = AnalyticsRepositoryIdentity & {
   covered?: number | string;
   ambiguous?: number | string;
 };
+type EnvironmentBucketRow = { date: string; count: number | string; key?: string };
 const BATCH_SIZE = 1000;
 const RANKING_LIMIT = 100;
+const ACTIVITY_REPOSITORY_LIMIT = 5;
 const EXCEPTION_LIMIT = 20;
 const MANAGED_SERVICE_MAX_PAGE = 1_000_000;
 const MANAGED_SERVICE_TYPES: ManagedServiceType[] = [
@@ -321,10 +343,14 @@ export function parseEnvironmentAnalyticsQuery(params: URLSearchParams): Environ
   const rankBy = params.get('rankBy') ?? 'first_seen';
   if (!['first_seen', 'observed_prs', 'pr_coverage'].includes(rankBy))
     throw new BadRequestError('rankBy must be first_seen, observed_prs or pr_coverage.', 'invalid_query');
+  const activityBreakdown = params.get('activityBreakdown') ?? 'none';
+  if (activityBreakdown !== 'none' && activityBreakdown !== 'repositories')
+    throw new BadRequestError('activityBreakdown must be none or repositories.', 'invalid_query');
   return {
     ...parseAnalyticsCalendarQuery(params),
     ...parseEnvironmentAnalyticsScope(params),
     rankBy: rankBy as EnvironmentAnalyticsQuery['rankBy'],
+    ...(activityBreakdown === 'repositories' ? { activityBreakdown } : {}),
   };
 }
 
@@ -676,7 +702,135 @@ export default class EnvironmentAnalyticsService {
     return result;
   }
 
-  private async period(knex: Knex, query: EnvironmentAnalyticsQuery, range: ResolvedAnalyticsRange, prior: boolean) {
+  private async environmentBuckets(
+    knex: Knex,
+    query: EnvironmentAnalyticsQuery,
+    range: ResolvedAnalyticsRange,
+    prior: boolean,
+    repositoryIds?: number[]
+  ): Promise<EnvironmentBucketRow[]> {
+    const period = prior ? range.previous! : range;
+    const buckets = environmentBase(knex, query)
+      .where('e.createdAt', '>=', period.fromUtc)
+      .where('e.createdAt', '<', period.toUtc)
+      .select(
+        analyticsBucketExpression(knex, range, 'e.createdAt', prior ? 'previous' : 'current').wrap('', ' AS date')
+      )
+      .count('e.id as count');
+    if (repositoryIds) {
+      buckets
+        .select(
+          knex.raw(
+            `CASE WHEN e."repositoryId" IS NULL THEN 'unattributed'
+              WHEN e."repositoryId" = ANY (?::bigint[]) THEN 'repository:' || e."repositoryId"::text
+              ELSE 'other' END AS key`,
+            [repositoryIds]
+          )
+        )
+        .groupBy('key');
+    }
+    return buckets.groupBy('date');
+  }
+
+  private async activityBreakdown(
+    knex: Knex,
+    query: EnvironmentAnalyticsQuery,
+    range: ResolvedAnalyticsRange,
+    currentRows: CountRow[],
+    previousRows: CountRow[]
+  ) {
+    const repositories = new Map<number, AnalyticsRepositoryIdentity & { current: number; previous: number }>();
+    for (const [rows, period] of [
+      [currentRows, 'current'],
+      [previousRows, 'previous'],
+    ] as const) {
+      for (const row of rows) {
+        if (row.repositoryId == null) continue;
+        const repositoryId = Number(row.repositoryId);
+        const item = repositories.get(repositoryId) ?? { ...identity(row), current: 0, previous: 0 };
+        item[period] += count(row.count);
+        repositories.set(repositoryId, item);
+      }
+    }
+    const named = [...repositories.values()]
+      .sort(
+        (a, b) =>
+          b.current - a.current ||
+          b.previous - a.previous ||
+          (a.fullName ?? '\uffff').localeCompare(b.fullName ?? '\uffff') ||
+          a.repositoryId! - b.repositoryId!
+      )
+      .slice(0, ACTIVITY_REPOSITORY_LIMIT);
+    const repositoryIds = named.map((row) => row.repositoryId!);
+    const currentBuckets = await this.environmentBuckets(knex, query, range, false, repositoryIds);
+    const previousBuckets = range.previous
+      ? await this.environmentBuckets(knex, query, range, true, repositoryIds)
+      : [];
+    const dates = analyticsBucketDates(range);
+    const dateIndexes = new Map(dates.map((date, index) => [date, index]));
+    const series = new Map<string, EnvironmentActivityAnalyticsSeries>();
+    const addSeries = (
+      key: string,
+      row: AnalyticsRepositoryIdentity,
+      kind: EnvironmentActivityAnalyticsSeries['kind']
+    ) => {
+      const item: EnvironmentActivityAnalyticsSeries = {
+        ...identity(row),
+        key,
+        kind,
+        firstSeenEnvironments: 0,
+        previousFirstSeenEnvironments: range.previous ? 0 : null,
+        buckets: dates.map((date) => ({
+          date,
+          firstSeenEnvironments: 0,
+          previousFirstSeenEnvironments: range.previous ? 0 : null,
+        })),
+      };
+      series.set(key, item);
+      return item;
+    };
+    for (const row of named) addSeries(`repository:${row.repositoryId}`, row, 'repository');
+    for (const key of ['other', 'unattributed'] as const) {
+      if ([...currentBuckets, ...previousBuckets].some((row) => row.key === key))
+        addSeries(key, { repositoryId: null, fullName: null, githubInstallationId: null }, key);
+    }
+    const collect = (rows: EnvironmentBucketRow[], previous: boolean) => {
+      const totals = new Map<string, number>();
+      for (const row of rows) {
+        const index = dateIndexes.get(row.date);
+        const item = series.get(row.key!);
+        if (index === undefined || !item)
+          throw new Error('Environment activity bucket does not match its range or repository.');
+        const value = count(row.count);
+        totals.set(row.date, (totals.get(row.date) ?? 0) + value);
+        if (previous) {
+          item.previousFirstSeenEnvironments! += value;
+          item.buckets[index].previousFirstSeenEnvironments! += value;
+        } else {
+          item.firstSeenEnvironments += value;
+          item.buckets[index].firstSeenEnvironments += value;
+        }
+      }
+      return [...totals].map(([date, value]) => ({ date, count: value }));
+    };
+    const envBuckets = collect(currentBuckets, false);
+    const previousEnvBuckets = collect(previousBuckets, true);
+    const activity: EnvironmentActivityBreakdown = {
+      repositoryLimit: ACTIVITY_REPOSITORY_LIMIT,
+      repositoryTotal: repositories.size,
+      groupedRepositories: Math.max(0, repositories.size - named.length),
+      series: [...series.values()],
+    };
+    return { activity, envBuckets, previousEnvBuckets };
+  }
+
+  private async period(
+    knex: Knex,
+    query: EnvironmentAnalyticsQuery,
+    range: ResolvedAnalyticsRange,
+    prior: boolean,
+    includeEnvBuckets = true
+  ) {
     const period = prior ? range.previous! : range;
     const environments = environmentBase(knex, query)
       .where('e.createdAt', '>=', period.fromUtc)
@@ -687,13 +841,7 @@ export default class EnvironmentAnalyticsService {
       .count('e.id as count')
       .select(knex.raw('count(*) FILTER (WHERE e."repositoryAmbiguous") AS ambiguous'))
       .groupBy('e.repositoryId', 'r.fullName', 'r.githubInstallationId')) as CountRow[];
-    const envBuckets = (await environments
-      .clone()
-      .select(
-        analyticsBucketExpression(knex, range, 'e.createdAt', prior ? 'previous' : 'current').wrap('', ' AS date')
-      )
-      .count('e.id as count')
-      .groupBy('date')) as { date: string; count: number | string }[];
+    const envBuckets = includeEnvBuckets ? await this.environmentBuckets(knex, query, range, prior) : [];
     let prRows: CountRow[] = [],
       prBuckets: { date: string; count: number | string }[] = [];
     if (query.environmentType !== 'static') {
@@ -737,8 +885,16 @@ export default class EnvironmentAnalyticsService {
   async getEnvironments(query: EnvironmentAnalyticsQuery): Promise<EnvironmentAnalytics> {
     return this.transaction(async (knex) => {
       const range = await resolveAnalyticsRange(knex, query);
-      const current = await this.period(knex, query, range, false);
-      const previous = range.previous ? await this.period(knex, query, range, true) : null;
+      const withActivity = query.activityBreakdown === 'repositories';
+      const current = await this.period(knex, query, range, false, !withActivity);
+      const previous = range.previous ? await this.period(knex, query, range, true, !withActivity) : null;
+      const breakdown = withActivity
+        ? await this.activityBreakdown(knex, query, range, current.envRows, previous?.envRows ?? [])
+        : null;
+      if (breakdown) {
+        current.envBuckets = breakdown.envBuckets;
+        if (previous) previous.envBuckets = breakdown.previousEnvBuckets;
+      }
       const inventory = await this.inventory(knex, query);
       const applicable = query.environmentType !== 'static';
       const repositories = new Map<string, EnvironmentAnalyticsRepository>();
@@ -810,6 +966,7 @@ export default class EnvironmentAnalyticsService {
           previousFirstSeenEnvironments: previous ? previousEnvs.get(date) ?? 0 : null,
           previousObservedPullRequests: previous && applicable ? previousPrs.get(date) ?? 0 : null,
         })),
+        ...(breakdown ? { activity: breakdown.activity } : {}),
         repositories: ranking.slice(0, RANKING_LIMIT),
         rankingTotal: ranking.length,
         rankingTruncated: ranking.length > RANKING_LIMIT,

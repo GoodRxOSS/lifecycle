@@ -117,6 +117,16 @@ describe('environment analytics administrator boundaries', () => {
       })
     );
   });
+
+  it('adds repository activity to the existing administrator route only when requested', async () => {
+    expect((await environments(request('?activityBreakdown=none'))).status).toBe(200);
+    expect(mockEnvironments.mock.calls[0][0]).not.toHaveProperty('activityBreakdown');
+    expect((await environments(request('?activityBreakdown=repositories'))).status).toBe(200);
+    expect(mockEnvironments.mock.calls[1][0].activityBreakdown).toBe('repositories');
+    mockEnvironments.mockClear();
+    expect((await environments(request('?activityBreakdown=components'))).status).toBe(400);
+    expectNoAccess();
+  });
   it.each([
     '?from=2026-02-30&to=2026-03-02',
     '?from=2025-01-01&to=2026-01-02',

@@ -44,6 +44,30 @@ describe('Admin environment analytics OpenAPI contract', () => {
     expect(schemas.EnvironmentAnalyticsPagination.properties.limit.maximum).toBe(100);
   });
 
+  it('bounds activity series while preserving installation identity and complete comparison buckets', () => {
+    const activity = schemas.EnvironmentActivityBreakdown;
+    expect(activity.properties.repositoryLimit.enum).toEqual([5]);
+    expect(activity.properties.series.maxItems).toBe(7);
+    expect(activity.required).toEqual(expect.arrayContaining(['series', 'repositoryTotal', 'groupedRepositories']));
+    expect(schemas.EnvironmentActivityAnalyticsSeries.properties.kind.enum).toEqual([
+      'repository',
+      'other',
+      'unattributed',
+    ]);
+    expect(schemas.EnvironmentActivityAnalyticsSeries.required).toEqual(
+      expect.arrayContaining(['key', 'repositoryId', 'githubInstallationId', 'buckets'])
+    );
+    expect(schemas.EnvironmentActivityAnalyticsBucket.properties.previousFirstSeenEnvironments.nullable).toBe(true);
+    expect(schemas.EnvironmentAnalytics.required).not.toContain('activity');
+    expect(schemas.EnvironmentAnalytics.properties.activity.$ref).toBe(
+      '#/components/schemas/EnvironmentActivityBreakdown'
+    );
+    const operation = spec.paths['/api/v2/admin/analytics/environments'].get;
+    const breakdown = operation.parameters.find((param: any) => param.name === 'activityBreakdown');
+    expect(breakdown.schema.enum).toEqual(['none', 'repositories']);
+    expect(breakdown.schema.default).toBe('none');
+  });
+
   it('documents complete bounded lifetime points and preserves distinct current-age bands', () => {
     expect(schemas.EnvironmentLifetimeScatter.properties.pointLimit.enum).toEqual([5000]);
     expect(schemas.EnvironmentLifetimeScatter.properties.state.enum).toEqual(['ready', 'empty', 'over_limit']);

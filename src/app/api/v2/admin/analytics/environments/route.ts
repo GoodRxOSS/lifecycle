@@ -39,6 +39,7 @@ export const runtime = 'nodejs';
  *       - { in: query, name: compare, schema: { type: boolean, default: true } }
  *       - { in: query, name: interval, schema: { type: string, enum: [day, week], default: day } }
  *       - { in: query, name: rankBy, schema: { type: string, enum: [first_seen, observed_prs, pr_coverage], default: first_seen } }
+ *       - { in: query, name: activityBreakdown, schema: { type: string, enum: [none, repositories], default: none }, description: 'Repository stacks name five repositories by selected-period activity. Previous activity resolves ties. Other repositories and Unattributed preserve remaining counts. Omitted or none preserves the existing result.' }
  *     responses:
  *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
