@@ -136,6 +136,26 @@ export const agentAnalyticsSchemas = {
     runs: array(ref('AgentAnalyticsRun')),
     pagination: object({ page: count, limit: count, total: count, hasMore: { type: 'boolean' } }),
   }),
+  AgentAnalyticsSession: object({
+    ...metricProperties,
+    sessionId: { type: 'string', format: 'uuid' },
+    title: nullableString,
+    ownerId: { type: 'string' },
+    ownerGithubUsername: nullableString,
+    sessionKind: { type: 'string' },
+    sessionStatus: { type: 'string' },
+    repositories: { ...array({ type: 'string' }), maxItems: 5 },
+    repositoryCount: count,
+    firstSubmittedAt: { type: 'string', format: 'date-time' },
+    lastSubmittedAt: { type: 'string', format: 'date-time' },
+  }),
+  AgentAnalyticsSessions: object({
+    range: ref('AnalyticsRange'),
+    asOf: { type: 'string', format: 'date-time' },
+    caveats: array({ type: 'string' }),
+    sessions: array(ref('AgentAnalyticsSession')),
+    pagination: object({ page: count, limit: count, total: count, hasMore: { type: 'boolean' } }),
+  }),
   AgentAnalyticsOptions: object({
     asOf: { type: 'string', format: 'date-time' },
     repositoryScope: { type: 'string', enum: ['recorded_name'] },
@@ -149,5 +169,6 @@ export const agentAnalyticsSchemas = {
   }),
   GetAgentAnalyticsSuccessResponse: success('AgentAnalyticsSummary'),
   GetAgentAnalyticsRunsSuccessResponse: success('AgentAnalyticsRuns'),
+  GetAgentAnalyticsSessionsSuccessResponse: success('AgentAnalyticsSessions'),
   GetAgentAnalyticsOptionsSuccessResponse: success('AgentAnalyticsOptions'),
 };

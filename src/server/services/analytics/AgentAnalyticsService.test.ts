@@ -298,6 +298,82 @@ describe('AgentAnalyticsService', () => {
     expect(sql).not.toContain('ORDER BY queued_at');
   });
 
+  it('aggregates all matching runs into a session before paging and keeps independent missing cost', async () => {
+    const { service, raw } = serviceWithRows([
+      [
+        {
+          total: 3,
+          sessions: [
+            {
+              session_uuid: '00000000-0000-4000-8000-000000000001',
+              title: 'Review changes',
+              owner_id: 'owner',
+              owner_github_username: 'alice',
+              session_kind: 'chat',
+              session_status: 'active',
+              repositories: ['org/one', 'org/two'],
+              repository_count: 2,
+              first_submitted_at: range.fromUtc,
+              last_submitted_at: range.toUtc,
+              runs: 3,
+              sessions: 1,
+              owners: 1,
+              completed: 2,
+              failed: 1,
+              total_tokens: 0,
+              total_reported_runs: 1,
+              input_tokens: 7,
+              input_reported_runs: 2,
+              output_tokens: null,
+              output_reported_runs: 0,
+              estimated_cost: '0.02',
+              estimated_cost_runs: 2,
+            },
+          ],
+        },
+      ],
+    ]);
+    const result = await service.listSessions(
+      { repository: 'org/one', owner: 'owner', provider: 'openai', model: 'm' },
+      2,
+      1
+    );
+    expect(result.pagination).toEqual({ page: 2, limit: 1, total: 3, hasMore: true });
+    expect(result.sessions[0]).toMatchObject({
+      runs: 3,
+      sessions: 1,
+      repositories: ['org/one', 'org/two'],
+      repositoryCount: 2,
+      outcomes: { completed: 2, failed: 1 },
+      tokens: { total: 0, input: 7, output: null, missingRuns: 2 },
+      reportedCost: { usd: null, coveredRuns: 0 },
+      estimatedCost: { usd: 0.02, coveredRuns: 2 },
+    });
+    const [sql, bindings] = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0];
+    expect(sql.indexOf('GROUP BY session_id')).toBeLessThan(sql.indexOf('LIMIT ? OFFSET ?'));
+    expect(sql).toContain('WHERE position <= 5');
+    expect(sql).toContain('t.id = s."defaultThreadId" AND t."sessionId" = s.id');
+    expect(sql).toContain('ORDER BY last_submitted_at DESC, session_id DESC LIMIT ? OFFSET ?');
+    expect(bindings).toEqual([range.fromUtc, range.toUtc, 'org/one', 'owner', 'openai', 'm', 1, 1]);
+  });
+
+  it('keeps session totals when a requested page is empty and validates direct pagination', async () => {
+    const { service } = serviceWithRows([[{ total: 1, sessions: [] }]]);
+    expect((await service.listSessions({}, 2)).pagination).toEqual({ page: 2, limit: 25, total: 1, hasMore: false });
+    await expect(service.listSessions({}, 0)).rejects.toThrow('Invalid session pagination.');
+    await expect(service.listSessions({}, 1, 101)).rejects.toThrow('Invalid session pagination.');
+  });
+
+  it('applies an exact session UUID in the run source before pagination and retains all other scopes', async () => {
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const { service, raw } = serviceWithRows([[{ total: 0, runs: [] }]]);
+    await service.listRuns({ sessionId, repository: 'org/one', runStatus: 'failed' }, 3, 2);
+    const [sql, bindings] = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0];
+    expect(sql).toContain('AND s.uuid = ?::uuid');
+    expect(sql.indexOf('AND s.uuid = ?::uuid')).toBeLessThan(sql.indexOf('LIMIT ? OFFSET ?'));
+    expect(bindings).toEqual([range.fromUtc, range.toUtc, sessionId, 'org/one', 'failed', 2, 4]);
+  });
+
   it('returns bounded independent options and truncation counts', async () => {
     const raw = jest.fn().mockResolvedValue({
       rows: [
@@ -355,5 +431,15 @@ describe('Agent analytics input boundaries', () => {
     expect(parseAgentAnalyticsPagination(new URLSearchParams())).toEqual({ page: 1, limit: 25 });
     expect(() => parseAgentAnalyticsRunsQuery(new URLSearchParams('runStatus=success'))).toThrow();
     expect(parseAgentAnalyticsRunsQuery(new URLSearchParams('runStatus=unknown')).runStatus).toBe('unknown');
+  });
+  it('validates the exact session UUID without changing other Agent scopes', () => {
+    const sessionId = 'AAAAAAAA-0000-4000-8000-000000000001';
+    expect(parseAgentAnalyticsRunsQuery(new URLSearchParams(`sessionId=${sessionId}&owner=owner`))).toMatchObject({
+      sessionId: sessionId.toLowerCase(),
+      owner: 'owner',
+    });
+    expect(() => parseAgentAnalyticsRunsQuery(new URLSearchParams('sessionId=bad'))).toThrow(
+      'sessionId must be a UUID.'
+    );
   });
 });

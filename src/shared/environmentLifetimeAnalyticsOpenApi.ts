@@ -35,14 +35,41 @@ const quality = { type: 'string', enum: ['recorded', 'estimated', 'record_age'] 
 const group = { type: 'string', enum: ['api', 'pr', 'other'] };
 const bin = {
   type: 'string',
-  enum: ['under_1h', '1_to_6h', '6_to_24h', '1_to_3d', '3_to_7d', '7_to_30d', '30d_plus', 'missing', 'invalid'],
+  enum: [
+    'under_1h',
+    '1_to_6h',
+    '6_to_24h',
+    '1_to_3d',
+    '3_to_7d',
+    '7_to_30d',
+    '30d_plus',
+    '30_to_90d',
+    '90_to_180d',
+    '180d_plus',
+    'missing',
+    'invalid',
+  ],
   nullable: true,
 };
 const unplaced = object({ missingEnd: integer, invalidEnd: integer });
 
 export const environmentLifetimeAnalyticsSchemas = {
   EnvironmentLifetimeDistribution: object({
-    id: { type: 'string', enum: ['under_1h', '1_to_6h', '6_to_24h', '1_to_3d', '3_to_7d', '7_to_30d', '30d_plus'] },
+    id: {
+      type: 'string',
+      enum: [
+        'under_1h',
+        '1_to_6h',
+        '6_to_24h',
+        '1_to_3d',
+        '3_to_7d',
+        '7_to_30d',
+        '30d_plus',
+        '30_to_90d',
+        '90_to_180d',
+        '180d_plus',
+      ],
+    },
     label: text,
     fromHours: { type: 'number', minimum: 0 },
     toHours: hours,

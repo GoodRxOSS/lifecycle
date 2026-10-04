@@ -464,7 +464,7 @@ function serviceInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environm
   const instances = knex.raw(`
     SELECT DISTINCT ON (a.id) a.*, d.status AS "deployStatus"
     FROM deploys d JOIN service_deployables a ON a.id = d."deployableId" AND a."environmentId" = d."buildId"
-    WHERE a.active = true AND d.active = true AND d."deletedAt" IS NULL
+    WHERE d.active = true AND d."deletedAt" IS NULL
     ORDER BY a.id, d.id DESC
   `);
   return knex
@@ -473,7 +473,6 @@ function serviceInstances(knex: Knex, scope: EnvironmentAnalyticsScope, environm
     .with('service_deployables', deployables)
     .with('service_instances', instances)
     .from('service_instances as s')
-    .where('s.active', true)
     .whereRaw('(s."deployStatus" IS NULL OR s."deployStatus" <> ?)', [DeployStatus.TORN_DOWN]);
 }
 

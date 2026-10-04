@@ -20,7 +20,9 @@ jest.mock('./query', () => ({
 import knexFactory from 'knex';
 import EnvironmentLifetimeAnalyticsService, {
   ENVIRONMENT_LIFETIME_BINS,
+  ENVIRONMENT_CURRENT_AGE_BINS,
   parseEnvironmentLifetimeRecordsQuery,
+  parseEnvironmentLifetimeScatterQuery,
   serializeEnvironmentLifetimeStats,
 } from './EnvironmentLifetimeAnalyticsService';
 import { parseEnvironmentAnalyticsQuery } from './EnvironmentAnalyticsService';
@@ -113,6 +115,43 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
       expect(bin.fromHours).toBe(ENVIRONMENT_LIFETIME_BINS[index].toHours);
     });
     expect(ENVIRONMENT_LIFETIME_BINS.at(-1)?.toHours).toBeNull();
+  });
+  it('splits only current age beyond thirty days while preserving completed bins', () => {
+    expect(ENVIRONMENT_LIFETIME_BINS.at(-1)?.id).toBe('30d_plus');
+    expect(ENVIRONMENT_CURRENT_AGE_BINS.slice(-3)).toEqual([
+      { id: '30_to_90d', label: '30–90 days', fromHours: 720, toHours: 2160 },
+      { id: '90_to_180d', label: '90–180 days', fromHours: 2160, toHours: 4320 },
+      { id: '180d_plus', label: '180 days or more', fromHours: 4320, toHours: null },
+    ]);
+    ENVIRONMENT_CURRENT_AGE_BINS.slice(1).forEach((bin, index) => {
+      expect(bin.fromHours).toBe(ENVIRONMENT_CURRENT_AGE_BINS[index].toHours);
+    });
+    const row = { samples: 6, eligible: 6, '30d_plus': 6, '30_to_90d': 1, '90_to_180d': 2, '180d_plus': 3 };
+    expect(
+      serializeEnvironmentLifetimeStats('all', 'current', row)
+        .distribution.slice(-3)
+        .map(({ count }) => count)
+    ).toEqual([1, 2, 3]);
+    expect(serializeEnvironmentLifetimeStats('api', 'completed', row).distribution.at(-1)).toMatchObject({
+      id: '30d_plus',
+      count: 6,
+    });
+  });
+  it.each([
+    ['30d_plus', 720, null],
+    ['30_to_90d', 720, 2160],
+    ['90_to_180d', 2160, 4320],
+    ['180d_plus', 4320, null],
+  ])('keeps current-age record filter %s consistent with half-open duration bounds', async (bin, lower, upper) => {
+    const { service, raw } = serviceWithRows([[{ total: 0, records: [] }]]);
+    await service.getRecords(parseEnvironmentLifetimeRecordsQuery(params(`cohort=current&bin=${bin}`)));
+    const call = raw.mock.calls.find(([sql]) => sql.includes('selected AS MATERIALIZED'))!;
+    expect(call[1]).toContain(lower);
+    if (upper !== null) expect(call[1]).toContain(upper);
+    expect(call[0].includes('duration_hours < ?')).toBe(upper !== null);
+  });
+  it.each(['30_to_90d', '90_to_180d', '180d_plus'])('rejects current-only age band %s for completed records', (bin) => {
+    expect(() => parseEnvironmentLifetimeRecordsQuery(params(`bin=${bin}`))).toThrow();
   });
   it('fills sparse dates, separates methods and preserves previous DST alignment', async () => {
     const { service, raw } = serviceWithRows([
@@ -281,5 +320,115 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
     'from=2025-01-01&to=2026-01-02',
   ])('rejects invalid inputs %s', (query) => {
     expect(() => parseEnvironmentLifetimeRecordsQuery(params(query))).toThrow();
+  });
+
+  it('scatter uses the selected retirement window, preserves scope and ignores previous comparison', async () => {
+    mockResolveRange.mockResolvedValue({ ...range, compare: false, previous: null });
+    const point = {
+      id: 1,
+      uuid: 'retired-api',
+      group: 'api',
+      sampleState: 'valid',
+      durationHours: 0,
+      startedAt: '2026-03-09T12:00:00Z',
+      measuredUntilAt: '2026-03-09T12:00:00Z',
+      repositoryId: 4,
+      githubInstallationId: 8,
+      resourceAvailable: false,
+    };
+    const { service, raw } = serviceWithRows([
+      [
+        {
+          total: '1',
+          points: [point],
+          coverage: [{ group_name: 'api', eligible: 3, samples: 1, missing: 1, invalid: 1 }],
+        },
+      ],
+    ]);
+    const result = await service.getScatter(
+      parseEnvironmentLifetimeScatterQuery(params('repositoryId=4&group=api&compare=true'))
+    );
+    expect(mockResolveRange.mock.calls[0][1]).toMatchObject({ compare: false, repositoryId: 4 });
+    expect(result).toMatchObject({
+      total: 1,
+      returned: 1,
+      pointLimit: 5000,
+      truncated: false,
+      state: 'ready',
+      nextAction: null,
+    });
+    expect(result.range.previous).toBeNull();
+    expect(result.coverage.api).toEqual({
+      method: 'created_to_deleted',
+      quality: 'recorded',
+      eligible: 3,
+      samples: 1,
+      missing: 1,
+      invalid: 1,
+    });
+    expect(result.points[0]).toMatchObject({ durationHours: 0, quality: 'recorded', resourceAvailable: false });
+    const call = raw.mock.calls.find(([sql]) => sql.includes('windowed AS MATERIALIZED'))!;
+    expect(call[0]).toContain("WHERE sample_state = 'valid'");
+    expect(call[0]).toContain('CASE WHEN total <= ? THEN');
+    expect(call[0]).toContain('ORDER BY end_at, id LIMIT ?');
+    expect(call[1]).toEqual(expect.arrayContaining([4, range.fromUtc, range.toUtc, 'api', 5000]));
+    expect(call[1]).not.toContain(range.previous!.fromUtc);
+  });
+  it.each([0, 5000, 5001])('scatter returns all or none at a total of %i, without a biased sample', async (total) => {
+    const points =
+      total <= 5000
+        ? Array.from({ length: total }, (_, index) => ({
+            id: index + 1,
+            group: 'pr',
+            sampleState: 'valid',
+            durationHours: 2,
+            startedAt: '2026-03-09T10:00:00Z',
+            measuredUntilAt: '2026-03-09T12:00:00Z',
+            repositoryId: null,
+            githubInstallationId: null,
+            resourceAvailable: false,
+          }))
+        : [];
+    const { service } = serviceWithRows([
+      [{ total, points, coverage: total ? [{ group_name: 'pr', eligible: total, samples: total }] : [] }],
+    ]);
+    const result = await service.getScatter(parseEnvironmentLifetimeScatterQuery(params()));
+    expect(result).toMatchObject({
+      total,
+      returned: total > 5000 ? 0 : total,
+      truncated: total > 5000,
+      state: total > 5000 ? 'over_limit' : total ? 'ready' : 'empty',
+    });
+    expect(result.nextAction).toBe(total > 5000 ? 'Select a shorter time window or more filters.' : null);
+    if (total === 5000)
+      expect(result.points[0]).toMatchObject({ method: 'created_to_last_update', quality: 'estimated' });
+  });
+  it('rejects an incomplete scatter result rather than silently presenting a partial cohort', async () => {
+    const { service } = serviceWithRows([[{ total: 1, points: [], coverage: [] }]]);
+    await expect(service.getScatter(parseEnvironmentLifetimeScatterQuery(params()))).rejects.toThrow(
+      'Incomplete lifetime scatter result.'
+    );
+  });
+  it.each(['group=other', 'group=unknown', 'from=2026-02-30&to=2026-03-02', 'repositoryId=1&unattributed=true'])(
+    'rejects invalid scatter query %s',
+    (query) => {
+      expect(() => parseEnvironmentLifetimeScatterQuery(params(query))).toThrow();
+    }
+  );
+  it('rejects nonfinite scatter durations instead of serializing an invented zero', async () => {
+    const { service } = serviceWithRows([
+      [
+        {
+          total: 1,
+          points: [
+            { id: 1, group: 'api', sampleState: 'valid', durationHours: 'Infinity', measuredUntilAt: range.asOf },
+          ],
+          coverage: [],
+        },
+      ],
+    ]);
+    await expect(service.getScatter(parseEnvironmentLifetimeScatterQuery(params()))).rejects.toThrow(
+      'Invalid lifetime scatter point.'
+    );
   });
 });

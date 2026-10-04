@@ -3,7 +3,8 @@ import { NextRequest } from 'next/server';
 const mockIdentity = jest.fn(),
   mockGetUser = jest.fn();
 const mockSummary = jest.fn(),
-  mockRecords = jest.fn();
+  mockRecords = jest.fn(),
+  mockScatter = jest.fn();
 jest.mock('server/lib/dependencies', () => ({ defaultDb: {} }));
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockIdentity(...args),
@@ -12,14 +13,18 @@ jest.mock('server/lib/get-user', () => ({
 jest.mock('server/services/analytics/EnvironmentLifetimeAnalyticsService', () => ({
   ...jest.requireActual('server/services/analytics/EnvironmentLifetimeAnalyticsService'),
   __esModule: true,
-  default: jest.fn().mockImplementation(() => ({ getSummary: mockSummary, getRecords: mockRecords })),
+  default: jest
+    .fn()
+    .mockImplementation(() => ({ getSummary: mockSummary, getRecords: mockRecords, getScatter: mockScatter })),
 }));
 
 import { GET as summary } from './route';
 import { GET as records } from './records/route';
+import { GET as scatter } from './scatter/route';
 const handlers = [
   ['lifetimes', summary],
   ['lifetime records', records],
+  ['lifetime scatter', scatter],
 ] as const;
 function request(query = ''): NextRequest {
   return {
@@ -30,6 +35,7 @@ function request(query = ''): NextRequest {
 function expectNoAccess() {
   expect(mockSummary).not.toHaveBeenCalled();
   expect(mockRecords).not.toHaveBeenCalled();
+  expect(mockScatter).not.toHaveBeenCalled();
 }
 
 describe('lifetime analytics administrator boundaries', () => {
@@ -41,6 +47,7 @@ describe('lifetime analytics administrator boundaries', () => {
     mockGetUser.mockReturnValue({ sub: 'admin', realm_access: { roles: ['admin'] } });
     mockSummary.mockResolvedValue({});
     mockRecords.mockResolvedValue({});
+    mockScatter.mockResolvedValue({});
   });
   afterEach(() => {
     if (originalAuth === undefined) delete process.env.ENABLE_AUTH;
@@ -102,6 +109,28 @@ describe('lifetime analytics administrator boundaries', () => {
     );
     expect(mockRecords.mock.calls[0][0].from).toBeUndefined();
   });
+  it('passes scatter scope and selected retirement window without previous-period points', async () => {
+    const response = await scatter(
+      request('?group=pr&from=2026-03-08&to=2026-03-10&compare=true&environmentType=ephemeral')
+    );
+    expect(response.status).toBe(200);
+    expect(mockScatter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        group: 'pr',
+        from: '2026-03-08',
+        to: '2026-03-10',
+        compare: false,
+        environmentType: 'ephemeral',
+      })
+    );
+  });
+  it.each(['?group=other', '?from=2026-02-30&to=2026-03-02', '?repositoryId=1&unattributed=true'])(
+    'rejects invalid scatter query %s before queries',
+    async (query) => {
+      expect((await scatter(request(query))).status).toBe(400);
+      expectNoAccess();
+    }
+  );
   it.each([
     '?group=other',
     '?bin=episode',

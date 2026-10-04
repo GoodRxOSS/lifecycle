@@ -49,6 +49,7 @@ export interface AgentAnalyticsQuery extends AnalyticsCalendarQuery {
 
 export interface AgentAnalyticsRunsQuery extends AgentAnalyticsQuery {
   runStatus?: AgentAnalyticsStatus;
+  sessionId?: string;
 }
 
 export interface AgentAnalyticsMetrics {
@@ -128,6 +129,27 @@ export interface AgentAnalyticsRuns {
   pagination: { page: number; limit: number; total: number; hasMore: boolean };
 }
 
+export interface AgentAnalyticsSession extends AgentAnalyticsMetrics {
+  sessionId: string;
+  title: string | null;
+  ownerId: string;
+  ownerGithubUsername: string | null;
+  sessionKind: string;
+  sessionStatus: string;
+  repositories: string[];
+  repositoryCount: number;
+  firstSubmittedAt: string;
+  lastSubmittedAt: string;
+}
+
+export interface AgentAnalyticsSessions {
+  range: ResolvedAnalyticsRange;
+  asOf: string;
+  caveats: string[];
+  sessions: AgentAnalyticsSession[];
+  pagination: { page: number; limit: number; total: number; hasMore: boolean };
+}
+
 export interface AgentAnalyticsOptions {
   asOf: string;
   repositoryScope: 'recorded_name';
@@ -191,7 +213,14 @@ export function parseAgentAnalyticsRunsQuery(params: URLSearchParams): AgentAnal
   const runStatus = filterValue(params, 'runStatus');
   if (runStatus && !AGENT_ANALYTICS_STATUSES.includes(runStatus as AgentAnalyticsStatus))
     throw new BadRequestError('runStatus must be a supported run outcome.');
-  return { ...query, ...(runStatus ? { runStatus: runStatus as AgentAnalyticsStatus } : {}) };
+  const sessionId = filterValue(params, 'sessionId');
+  if (sessionId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
+    throw new BadRequestError('sessionId must be a UUID.');
+  return {
+    ...query,
+    ...(runStatus ? { runStatus: runStatus as AgentAnalyticsStatus } : {}),
+    ...(sessionId ? { sessionId: sessionId.toLowerCase() } : {}),
+  };
 }
 
 export function parseAgentAnalyticsPagination(params: URLSearchParams): { page: number; limit: number } {
@@ -486,14 +515,22 @@ export default class AgentAnalyticsService {
       const scope = scopeSql(query);
       const statusCondition = query.runStatus ? `${scope.sql ? ' AND' : ' WHERE'} status = ?` : '';
       const statusBindings = query.runStatus ? [query.runStatus] : [];
+      const sessionCondition = query.sessionId ? ' AND s.uuid = ?::uuid' : '';
       const facts = `WITH facts AS MATERIALIZED (
         SELECT ${RUN_DIMENSIONS}, ${USAGE_COLUMNS}, s."userId" AS owner_id, s."ownerGithubUsername" AS owner_github_username,
           s."sessionKind" AS session_kind, s.uuid AS session_uuid, t.uuid AS thread_uuid,
           ${jsonString(`r.error->'code'`)} AS error_code
         FROM agent_runs r JOIN agent_sessions s ON s.id = r."sessionId" JOIN agent_threads t ON t.id = r."threadId"
         WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz
+        ${sessionCondition}
       ), scoped AS MATERIALIZED (SELECT * FROM facts ${scope.sql}${statusCondition})`;
-      const bindings = [range.fromUtc, range.toUtc, ...scope.bindings, ...statusBindings];
+      const bindings = [
+        range.fromUtc,
+        range.toUtc,
+        ...(query.sessionId ? [query.sessionId] : []),
+        ...scope.bindings,
+        ...statusBindings,
+      ];
       const result = await trx.raw(
         `${facts}
         SELECT (SELECT COUNT(*)::int FROM scoped) AS total, COALESCE((
@@ -531,6 +568,74 @@ export default class AgentAnalyticsService {
           reportedCostUsd: nullableNumber(run.reported_cost),
           estimatedCostUsd: nullableNumber(run.estimated_cost),
           errorCode: run.error_code == null ? null : String(run.error_code),
+        })),
+        pagination: { page, limit, total, hasMore: page * limit < total },
+      };
+    });
+  }
+
+  async listSessions(query: AgentAnalyticsQuery, page = 1, limit = 25): Promise<AgentAnalyticsSessions> {
+    if (!Number.isInteger(page) || page < 1 || page > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new BadRequestError('Invalid session pagination.');
+    return analyticsTransaction(this.db.knex, async (trx) => {
+      const range = await resolveAnalyticsRange(trx, query);
+      const scope = scopeSql(query);
+      const result = await trx.raw(
+        `WITH facts AS MATERIALIZED (
+          SELECT ${RUN_DIMENSIONS}, ${USAGE_COLUMNS}, s."userId" AS owner_id, s."sessionKind" AS session_kind
+          FROM agent_runs r JOIN agent_sessions s ON s.id = r."sessionId"
+          WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz
+        ), scoped AS MATERIALIZED (SELECT * FROM facts ${scope.sql}),
+        grouped AS MATERIALIZED (
+          SELECT session_id, MIN(submitted_at) AS first_submitted_at, MAX(submitted_at) AS last_submitted_at,
+            ${AGGREGATES}
+          FROM scoped GROUP BY session_id
+        ), page_rows AS MATERIALIZED (
+          SELECT * FROM grouped ORDER BY last_submitted_at DESC, session_id DESC LIMIT ? OFFSET ?
+        ), repository_names AS (
+          SELECT session_id, repository, row_number() OVER (PARTITION BY session_id ORDER BY repository) AS position
+          FROM (SELECT DISTINCT scoped.session_id, repository FROM scoped
+            JOIN page_rows ON page_rows.session_id = scoped.session_id WHERE repository IS NOT NULL) names
+        ), repositories AS (
+          SELECT session_id, COUNT(*)::int AS repository_count,
+            array_agg(repository ORDER BY repository) FILTER (WHERE position <= 5) AS repositories
+          FROM repository_names GROUP BY session_id
+        ) SELECT (SELECT COUNT(*)::int FROM grouped) AS total, COALESCE((
+          SELECT jsonb_agg(records ORDER BY last_submitted_at DESC, session_id DESC) FROM (
+            SELECT g.*, s.uuid AS session_uuid, NULLIF(BTRIM(t.title), '') AS title,
+              s."userId" AS owner_id, s."ownerGithubUsername" AS owner_github_username,
+              s."sessionKind" AS session_kind, s.status AS session_status,
+              COALESCE(repos.repository_count, 0) AS repository_count,
+              COALESCE(repos.repositories, ARRAY[]::text[]) AS repositories
+            FROM page_rows g JOIN agent_sessions s ON s.id = g.session_id
+            LEFT JOIN agent_threads t ON t.id = s."defaultThreadId" AND t."sessionId" = s.id
+            LEFT JOIN repositories repos ON repos.session_id = g.session_id
+          ) records
+        ), '[]'::jsonb) AS sessions`,
+        [range.fromUtc, range.toUtc, ...scope.bindings, limit, (page - 1) * limit]
+      );
+      const row = result.rows[0];
+      const total = number(row.total);
+      return {
+        range,
+        asOf: range.asOf,
+        caveats: [
+          ...CAVEATS,
+          'Session rows aggregate all matching runs before pagination; a session can appear in more than one repository, model, or date scope.',
+          'Session titles and status reflect the retained current session; titles use its default conversation and repositories show at most five recorded names.',
+        ],
+        sessions: (row.sessions as SqlRow[]).map((session) => ({
+          ...serializeAgentAnalyticsMetrics(session),
+          sessionId: String(session.session_uuid),
+          title: session.title == null ? null : String(session.title),
+          ownerId: String(session.owner_id),
+          ownerGithubUsername: session.owner_github_username == null ? null : String(session.owner_github_username),
+          sessionKind: String(session.session_kind),
+          sessionStatus: String(session.session_status),
+          repositories: session.repositories as string[],
+          repositoryCount: number(session.repository_count),
+          firstSubmittedAt: timestamp(session.first_submitted_at)!,
+          lastSubmittedAt: timestamp(session.last_submitted_at)!,
         })),
         pagination: { page, limit, total, hasMore: page * limit < total },
       };

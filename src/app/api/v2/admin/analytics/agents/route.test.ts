@@ -16,6 +16,7 @@ const mockGetUser = jest.fn();
 const mockIdentity = jest.fn();
 const mockSummary = jest.fn();
 const mockRuns = jest.fn();
+const mockSessions = jest.fn();
 const mockOptions = jest.fn();
 
 jest.mock('server/lib/dependencies', () => ({ defaultDb: {} }));
@@ -26,13 +27,17 @@ jest.mock('server/lib/get-user', () => ({
 jest.mock('server/services/analytics/AgentAnalyticsService', () => ({
   ...jest.requireActual('server/services/analytics/AgentAnalyticsService'),
   __esModule: true,
-  default: jest
-    .fn()
-    .mockImplementation(() => ({ getSummary: mockSummary, listRuns: mockRuns, getOptions: mockOptions })),
+  default: jest.fn().mockImplementation(() => ({
+    getSummary: mockSummary,
+    listRuns: mockRuns,
+    listSessions: mockSessions,
+    getOptions: mockOptions,
+  })),
 }));
 
 import { GET as summary } from './route';
 import { GET as runs } from './runs/route';
+import { GET as sessions } from './sessions/route';
 import { GET as options } from './options/route';
 
 function request(query = ''): NextRequest {
@@ -51,6 +56,7 @@ describe('Agent analytics admin API boundaries', () => {
     mockIdentity.mockReturnValue({ userId: 'admin', roles: ['admin'] });
     mockSummary.mockResolvedValue({ totals: { runs: 2 } });
     mockRuns.mockResolvedValue({ runs: [], pagination: { page: 1, limit: 25, total: 0, hasMore: false } });
+    mockSessions.mockResolvedValue({ sessions: [], pagination: { page: 1, limit: 25, total: 0, hasMore: false } });
     mockOptions.mockResolvedValue({ repositories: [], owners: [], models: [] });
   });
   afterEach(() => {
@@ -61,6 +67,7 @@ describe('Agent analytics admin API boundaries', () => {
   it.each([
     ['summary', summary],
     ['runs', runs],
+    ['sessions', sessions],
     ['options', options],
   ] as const)('prevents caching successful admin %s responses', async (_name, handler) => {
     const response = await handler(request());
@@ -72,18 +79,21 @@ describe('Agent analytics admin API boundaries', () => {
   it.each([
     ['summary', summary],
     ['runs', runs],
+    ['sessions', sessions],
     ['options', options],
   ] as const)('rejects unauthenticated %s requests before data access', async (_name, handler) => {
     mockIdentity.mockReturnValue(null);
     expect((await handler(request())).status).toBe(401);
     expect(mockSummary).not.toHaveBeenCalled();
     expect(mockRuns).not.toHaveBeenCalled();
+    expect(mockSessions).not.toHaveBeenCalled();
     expect(mockOptions).not.toHaveBeenCalled();
   });
 
   it.each([
     ['summary', summary],
     ['runs', runs],
+    ['sessions', sessions],
     ['options', options],
   ] as const)('rejects non-admin %s requests before data access', async (_name, handler) => {
     mockGetUser.mockReturnValue({ sub: 'user', realm_access: { roles: ['user'] } });
@@ -91,12 +101,14 @@ describe('Agent analytics admin API boundaries', () => {
     expect((await handler(request())).status).toBe(403);
     expect(mockSummary).not.toHaveBeenCalled();
     expect(mockRuns).not.toHaveBeenCalled();
+    expect(mockSessions).not.toHaveBeenCalled();
     expect(mockOptions).not.toHaveBeenCalled();
   });
 
   it.each([
     ['summary', summary],
     ['runs', runs],
+    ['sessions', sessions],
     ['options', options],
   ] as const)('rejects API-key bearer credentials for %s', async (_name, handler) => {
     const req = request();
@@ -104,6 +116,7 @@ describe('Agent analytics admin API boundaries', () => {
     expect((await handler(req)).status).toBe(403);
     expect(mockSummary).not.toHaveBeenCalled();
     expect(mockRuns).not.toHaveBeenCalled();
+    expect(mockSessions).not.toHaveBeenCalled();
     expect(mockOptions).not.toHaveBeenCalled();
   });
 
@@ -141,6 +154,7 @@ describe('Agent analytics admin API boundaries', () => {
     mockRuns.mockClear();
     expect((await runs(request('?limit=101'))).status).toBe(400);
     expect(mockRuns).not.toHaveBeenCalled();
+    expect(mockSessions).not.toHaveBeenCalled();
   });
 
   it('returns filter options independently and propagates its own failure', async () => {
@@ -149,5 +163,25 @@ describe('Agent analytics admin API boundaries', () => {
     mockOptions.mockRejectedValueOnce(new Error('Options unavailable'));
     expect((await options(request())).status).toBe(500);
     expect((await summary(request())).status).toBe(200);
+  });
+  it('paginates sessions using the Agent source scopes independently of a secondary run outcome', async () => {
+    expect(
+      (await sessions(request('?repository=org%2Frepo&owner=owner&page=2&limit=25&runStatus=failed'))).status
+    ).toBe(200);
+    expect(mockSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: 'org/repo', owner: 'owner' }),
+      2,
+      25
+    );
+    expect(mockSessions.mock.calls[0][0]).not.toHaveProperty('runStatus');
+  });
+
+  it('rejects invalid session IDs and forwards valid run drawer scope', async () => {
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    expect((await runs(request(`?sessionId=${sessionId}&page=2`))).status).toBe(200);
+    expect(mockRuns).toHaveBeenCalledWith(expect.objectContaining({ sessionId }), 2, 25);
+    mockRuns.mockClear();
+    expect((await runs(request('?sessionId=invalid'))).status).toBe(400);
+    expect(mockRuns).not.toHaveBeenCalled();
   });
 });

@@ -40,7 +40,7 @@ export const runtime = 'nodejs';
  *       - { in: query, name: interval, schema: { type: string, enum: [day, week], default: day } }
  *       - { in: query, name: cohort, schema: { type: string, enum: [completed, current], default: completed }, description: Current age ignores all calendar controls and returns range null. }
  *       - { in: query, name: group, schema: { type: string, enum: [all, api, pr, other], default: all }, description: Other is current age only. Completed all combines records without combining summary statistics. }
- *       - { in: query, name: bin, schema: { type: string, enum: [under_1h, 1_to_6h, 6_to_24h, 1_to_3d, 3_to_7d, 7_to_30d, 30d_plus, missing, invalid] }, description: Half-open duration hours or sample coverage bucket. Unplaced end dates are excluded from completed window records. }
+ *       - { in: query, name: bin, schema: { type: string, enum: [under_1h, 1_to_6h, 6_to_24h, 1_to_3d, 3_to_7d, 7_to_30d, 30d_plus, 30_to_90d, 90_to_180d, 180d_plus, missing, invalid] }, description: Half-open duration hours or coverage bucket. The 30–90 day and older bands apply to current age only. The 30d_plus filter still selects all records aged at least 30 days. Unplaced end dates are excluded from completed window records. }
  *       - { in: query, name: page, schema: { type: integer, minimum: 1, maximum: 10000, default: 1 } }
  *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
  *     responses:

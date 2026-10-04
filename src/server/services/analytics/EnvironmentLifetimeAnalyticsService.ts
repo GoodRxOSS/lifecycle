@@ -37,11 +37,24 @@ export const ENVIRONMENT_LIFETIME_BINS = [
   { id: '30d_plus', label: '30 days or more', fromHours: 720, toHours: null },
 ] as const;
 
+export const ENVIRONMENT_CURRENT_AGE_BINS = [
+  ...ENVIRONMENT_LIFETIME_BINS.slice(0, -1),
+  { id: '30_to_90d', label: '30–90 days', fromHours: 720, toHours: 2160 },
+  { id: '90_to_180d', label: '90–180 days', fromHours: 2160, toHours: 4320 },
+  { id: '180d_plus', label: '180 days or more', fromHours: 4320, toHours: null },
+] as const;
+
+export const ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT = 5000;
+
 export type EnvironmentLifetimeGroup = 'api' | 'pr' | 'other';
 export type EnvironmentLifetimeMethod = 'created_to_deleted' | 'created_to_last_update' | 'first_record_age';
 export type EnvironmentLifetimeQuality = 'recorded' | 'estimated' | 'record_age';
 export type EnvironmentLifetimeSampleState = 'valid' | 'missing' | 'invalid';
-export type EnvironmentLifetimeBin = (typeof ENVIRONMENT_LIFETIME_BINS)[number]['id'] | 'missing' | 'invalid';
+export type EnvironmentLifetimeBin =
+  | (typeof ENVIRONMENT_LIFETIME_BINS)[number]['id']
+  | (typeof ENVIRONMENT_CURRENT_AGE_BINS)[number]['id']
+  | 'missing'
+  | 'invalid';
 export type EnvironmentLifetimeStats = {
   method: EnvironmentLifetimeMethod;
   quality: EnvironmentLifetimeQuality;
@@ -116,6 +129,32 @@ export type EnvironmentLifetimeRecords = {
   pagination: { page: number; limit: number; total: number; hasMore: boolean; maxPage: number; truncated: boolean };
   caveats: string[];
 };
+export type EnvironmentLifetimeScatterQuery = EnvironmentAnalyticsQuery & { group: 'all' | 'api' | 'pr' };
+export type EnvironmentLifetimeScatterPoint = EnvironmentLifetimeRecord & {
+  group: 'api' | 'pr';
+  sampleState: 'valid';
+  durationHours: number;
+  measuredUntilAt: string;
+};
+export type EnvironmentLifetimeScatterCoverage = Pick<
+  EnvironmentLifetimeStats,
+  'method' | 'quality' | 'eligible' | 'samples' | 'missing' | 'invalid'
+>;
+export type EnvironmentLifetimeScatter = {
+  asOf: string;
+  scope: EnvironmentAnalyticsScope;
+  range: ResolvedAnalyticsRange;
+  group: 'all' | 'api' | 'pr';
+  total: number;
+  returned: number;
+  pointLimit: typeof ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT;
+  truncated: boolean;
+  state: 'ready' | 'empty' | 'over_limit';
+  nextAction: string | null;
+  coverage: { api: EnvironmentLifetimeScatterCoverage; pr: EnvironmentLifetimeScatterCoverage };
+  points: EnvironmentLifetimeScatterPoint[];
+  caveats: string[];
+};
 
 const MAX_PAGE = 10_000;
 const CAVEATS = [
@@ -173,7 +212,10 @@ export function serializeEnvironmentLifetimeStats(
     meanHours: samples ? nullableNumber(row?.mean_hours) : null,
     medianHours: samples ? nullableNumber(row?.median_hours) : null,
     p90Hours: samples ? nullableNumber(row?.p90_hours) : null,
-    distribution: ENVIRONMENT_LIFETIME_BINS.map((bin) => ({ ...bin, count: count(row?.[bin.id]) })),
+    distribution: (cohort === 'current' ? ENVIRONMENT_CURRENT_AGE_BINS : ENVIRONMENT_LIFETIME_BINS).map((bin) => ({
+      ...bin,
+      count: count(row?.[bin.id]),
+    })),
   };
 }
 
@@ -188,7 +230,9 @@ export function parseEnvironmentLifetimeRecordsQuery(params: URLSearchParams): E
       'invalid_query'
     );
   const bin = params.get('bin');
-  if (bin !== null && !['missing', 'invalid', ...ENVIRONMENT_LIFETIME_BINS.map(({ id }) => id)].includes(bin))
+  const bins =
+    cohort === 'current' ? [...ENVIRONMENT_LIFETIME_BINS, ...ENVIRONMENT_CURRENT_AGE_BINS] : ENVIRONMENT_LIFETIME_BINS;
+  if (bin !== null && !['missing', 'invalid', ...bins.map(({ id }) => id)].includes(bin))
     throw new BadRequestError('bin must be a lifetime histogram or coverage bucket.', 'invalid_query');
   const pageText = params.get('page') ?? '1',
     limitText = params.get('limit') ?? '25';
@@ -215,6 +259,13 @@ export function parseEnvironmentLifetimeRecordsQuery(params: URLSearchParams): E
     page,
     limit,
   };
+}
+
+export function parseEnvironmentLifetimeScatterQuery(params: URLSearchParams): EnvironmentLifetimeScatterQuery {
+  const group = params.get('group') ?? 'all';
+  if (group !== 'all' && group !== 'api' && group !== 'pr')
+    throw new BadRequestError('group must be all, api or pr.', 'invalid_query');
+  return { ...parseEnvironmentAnalyticsQuery(params), compare: false, group };
 }
 
 function factsSql(
@@ -261,19 +312,52 @@ function factsSql(
   };
 }
 
-const AGGREGATES = `COUNT(*) AS eligible,
+function aggregateSql(cohort: 'completed' | 'current'): string {
+  const bins = cohort === 'current' ? ENVIRONMENT_CURRENT_AGE_BINS : ENVIRONMENT_LIFETIME_BINS;
+  return `COUNT(*) AS eligible,
   COUNT(*) FILTER (WHERE sample_state = 'valid') AS samples,
   COUNT(*) FILTER (WHERE sample_state = 'missing') AS missing,
   COUNT(*) FILTER (WHERE sample_state = 'invalid') AS invalid,
   AVG(duration_hours) AS mean_hours,
   percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_hours) AS median_hours,
   percentile_cont(0.9) WITHIN GROUP (ORDER BY duration_hours) AS p90_hours,
-  ${ENVIRONMENT_LIFETIME_BINS.map(
-    (bin) =>
-      `COUNT(*) FILTER (WHERE duration_hours >= ${bin.fromHours}${
-        bin.toHours === null ? '' : ` AND duration_hours < ${bin.toHours}`
-      }) AS "${bin.id}"`
-  ).join(',\n  ')}`;
+  ${bins
+    .map(
+      (bin) =>
+        `COUNT(*) FILTER (WHERE duration_hours >= ${bin.fromHours}${
+          bin.toHours === null ? '' : ` AND duration_hours < ${bin.toHours}`
+        }) AS "${bin.id}"`
+    )
+    .join(',\n  ')}`;
+}
+
+const RECORD_JSON_SQL = `jsonb_build_object(
+  'id', id, 'uuid', uuid, 'status', status, 'isStatic', COALESCE("isStatic", false),
+  'author', author, 'repositoryId', "repositoryId", 'fullName', "fullName",
+  'githubInstallationId', "githubInstallationId", 'repositoryAmbiguous', "repositoryAmbiguous",
+  'resourceAvailable', ("deletedAt" IS NULL AND (status IS NULL OR status <> ?) AND NULLIF(uuid, '') IS NOT NULL),
+  'pullRequest', CASE WHEN group_name = 'pr' THEN jsonb_build_object(
+    'number', "pullRequestNumber", 'title', "prTitle", 'author', "prAuthor") END,
+  'group', group_name, 'sampleState', sample_state,
+  'startedAt', CASE WHEN isfinite(start_at) THEN start_at END,
+  'measuredUntilAt', CASE WHEN isfinite(end_at) THEN end_at END, 'durationHours', duration_hours
+)`;
+
+function serializeRecord(
+  record: EnvironmentLifetimeRecord,
+  cohort: 'completed' | 'current'
+): EnvironmentLifetimeRecord {
+  return {
+    ...record,
+    ...method(record.group, cohort),
+    id: count(record.id),
+    repositoryId: record.repositoryId == null ? null : count(record.repositoryId),
+    githubInstallationId: record.githubInstallationId == null ? null : count(record.githubInstallationId),
+    durationHours: nullableNumber(record.durationHours),
+    startedAt: timestamp(record.startedAt),
+    measuredUntilAt: timestamp(record.measuredUntilAt),
+  };
+}
 
 function scopeOf(query: EnvironmentAnalyticsScope): EnvironmentAnalyticsScope {
   return {
@@ -300,7 +384,7 @@ export default class EnvironmentLifetimeAnalyticsService {
               (CASE WHEN end_at < ?::timestamptz THEN ?::int ELSE 0 END * interval '1 day')), 'YYYY-MM-DD') AS bucket
           FROM facts WHERE group_name IN ('api','pr') AND isfinite(end_at)
             AND end_at >= ?::timestamptz AND end_at < ?::timestamptz
-        ) SELECT period, group_name, bucket, ${AGGREGATES}
+        ) SELECT period, group_name, bucket, ${aggregateSql('completed')}
           FROM period_facts GROUP BY GROUPING SETS ((period,group_name), (period,group_name,bucket))`,
         [
           ...completed.bindings,
@@ -315,7 +399,7 @@ export default class EnvironmentLifetimeAnalyticsService {
       );
       const current = factsSql(trx, scope, 'current');
       const currentResult = await trx.raw(
-        `WITH ${current.sql} SELECT COALESCE(group_name, 'all') AS group_name, ${AGGREGATES}
+        `WITH ${current.sql} SELECT COALESCE(group_name, 'all') AS group_name, ${aggregateSql('current')}
           FROM facts GROUP BY GROUPING SETS ((group_name), ())`,
         current.bindings
       );
@@ -373,6 +457,92 @@ export default class EnvironmentLifetimeAnalyticsService {
     });
   }
 
+  async getScatter(query: EnvironmentLifetimeScatterQuery): Promise<EnvironmentLifetimeScatter> {
+    return analyticsTransaction(this.db.knex, async (trx) => {
+      const range = await resolveAnalyticsRange(trx, { ...query, compare: false });
+      const scope = scopeOf(query);
+      const facts = factsSql(trx, scope, 'completed');
+      const groupPredicate = query.group === 'all' ? '' : 'AND group_name = ?';
+      const result = await trx.raw(
+        `WITH ${facts.sql}, windowed AS MATERIALIZED (
+          SELECT id, uuid, status, "isStatic", author, "repositoryId", "fullName", "githubInstallationId",
+            "repositoryAmbiguous", "deletedAt", "pullRequestNumber", "prTitle", "prAuthor",
+            group_name, start_at, end_at, sample_state, duration_hours
+          FROM facts WHERE group_name IN ('api','pr') AND isfinite(end_at)
+            AND end_at >= ?::timestamptz AND end_at < ?::timestamptz ${groupPredicate}
+        ), coverage AS (
+          SELECT group_name, COUNT(*) AS eligible,
+            COUNT(*) FILTER (WHERE sample_state = 'valid') AS samples,
+            COUNT(*) FILTER (WHERE sample_state = 'missing') AS missing,
+            COUNT(*) FILTER (WHERE sample_state = 'invalid') AS invalid
+          FROM windowed GROUP BY group_name
+        ), limits AS (
+          SELECT COALESCE(SUM(samples), 0) AS total FROM coverage
+        ) SELECT total, COALESCE((SELECT jsonb_agg(to_jsonb(coverage)) FROM coverage), '[]'::jsonb) AS coverage,
+          CASE WHEN total <= ? THEN (
+            SELECT COALESCE(jsonb_agg(${RECORD_JSON_SQL} ORDER BY end_at, id), '[]'::jsonb)
+            FROM (SELECT * FROM windowed WHERE sample_state = 'valid' ORDER BY end_at, id LIMIT ?) points
+          ) ELSE '[]'::jsonb END AS points
+          FROM limits`,
+        [
+          ...facts.bindings,
+          range.fromUtc,
+          range.toUtc,
+          ...(query.group === 'all' ? [] : [query.group]),
+          ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT,
+          BuildStatus.TORN_DOWN,
+          ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT,
+        ]
+      );
+      const row = result.rows[0];
+      const total = count(row.total);
+      const truncated = total > ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT;
+      const points: EnvironmentLifetimeScatterPoint[] = row.points.map((raw) => {
+        const point = serializeRecord(raw, 'completed');
+        if (
+          (point.group !== 'api' && point.group !== 'pr') ||
+          point.sampleState !== 'valid' ||
+          point.durationHours === null ||
+          point.measuredUntilAt === null
+        )
+          throw new Error('Invalid lifetime scatter point.');
+        return {
+          ...point,
+          group: point.group,
+          sampleState: 'valid',
+          durationHours: point.durationHours,
+          measuredUntilAt: point.measuredUntilAt,
+        };
+      });
+      if (points.length !== (truncated ? 0 : total)) throw new Error('Incomplete lifetime scatter result.');
+      const coverage = (group: 'api' | 'pr'): EnvironmentLifetimeScatterCoverage => {
+        const values = row.coverage.find((entry) => entry.group_name === group);
+        return {
+          ...method(group, 'completed'),
+          eligible: count(values?.eligible),
+          samples: count(values?.samples),
+          missing: count(values?.missing),
+          invalid: count(values?.invalid),
+        };
+      };
+      return {
+        asOf: range.asOf,
+        scope,
+        range,
+        group: query.group,
+        total,
+        returned: points.length,
+        pointLimit: ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT,
+        truncated,
+        state: truncated ? 'over_limit' : total ? 'ready' : 'empty',
+        nextAction: truncated ? 'Select a shorter time window or more filters.' : null,
+        coverage: { api: coverage('api'), pr: coverage('pr') },
+        points,
+        caveats: CAVEATS,
+      };
+    });
+  }
+
   async getRecords(query: EnvironmentLifetimeRecordsQuery): Promise<EnvironmentLifetimeRecords> {
     return analyticsTransaction(this.db.knex, async (trx) => {
       const range = query.cohort === 'completed' ? await resolveAnalyticsRange(trx, query) : null;
@@ -395,7 +565,7 @@ export default class EnvironmentLifetimeAnalyticsService {
         predicates.push('sample_state = ?');
         bindings.push(query.bin);
       } else if (query.bin) {
-        const bin = ENVIRONMENT_LIFETIME_BINS.find(({ id }) => id === query.bin)!;
+        const bin = [...ENVIRONMENT_LIFETIME_BINS, ...ENVIRONMENT_CURRENT_AGE_BINS].find(({ id }) => id === query.bin)!;
         predicates.push('duration_hours >= ?');
         bindings.push(bin.fromHours);
         if (bin.toHours !== null) {
@@ -409,17 +579,8 @@ export default class EnvironmentLifetimeAnalyticsService {
         ), page AS (
           SELECT * FROM selected ORDER BY duration_hours DESC NULLS LAST, end_at DESC NULLS LAST, id DESC LIMIT ? OFFSET ?
         ) SELECT (SELECT COUNT(*) FROM selected) AS total,
-          COALESCE((SELECT jsonb_agg(jsonb_build_object(
-            'id', id, 'uuid', uuid, 'status', status, 'isStatic', COALESCE("isStatic", false),
-            'author', author, 'repositoryId', "repositoryId", 'fullName', "fullName",
-            'githubInstallationId', "githubInstallationId", 'repositoryAmbiguous', "repositoryAmbiguous",
-            'resourceAvailable', ("deletedAt" IS NULL AND (status IS NULL OR status <> ?) AND NULLIF(uuid, '') IS NOT NULL),
-            'pullRequest', CASE WHEN group_name = 'pr' THEN jsonb_build_object(
-              'number', "pullRequestNumber", 'title', "prTitle", 'author', "prAuthor") END,
-            'group', group_name, 'sampleState', sample_state,
-            'startedAt', CASE WHEN isfinite(start_at) THEN start_at END,
-            'measuredUntilAt', CASE WHEN isfinite(end_at) THEN end_at END, 'durationHours', duration_hours
-          ) ORDER BY duration_hours DESC NULLS LAST, end_at DESC NULLS LAST, id DESC) FROM page), '[]'::jsonb) AS records`,
+          COALESCE((SELECT jsonb_agg(${RECORD_JSON_SQL}
+            ORDER BY duration_hours DESC NULLS LAST, end_at DESC NULLS LAST, id DESC) FROM page), '[]'::jsonb) AS records`,
         [...bindings, query.limit, (query.page - 1) * query.limit, BuildStatus.TORN_DOWN]
       );
       const row = result.rows[0];
@@ -431,16 +592,7 @@ export default class EnvironmentLifetimeAnalyticsService {
         cohort: query.cohort,
         group: query.group,
         bin: query.bin,
-        records: row.records.map((record) => ({
-          ...record,
-          ...method(record.group, query.cohort),
-          id: count(record.id),
-          repositoryId: record.repositoryId == null ? null : count(record.repositoryId),
-          githubInstallationId: record.githubInstallationId == null ? null : count(record.githubInstallationId),
-          durationHours: nullableNumber(record.durationHours),
-          startedAt: timestamp(record.startedAt),
-          measuredUntilAt: timestamp(record.measuredUntilAt),
-        })),
+        records: row.records.map((record) => serializeRecord(record, query.cohort)),
         pagination: {
           page: query.page,
           limit: query.limit,

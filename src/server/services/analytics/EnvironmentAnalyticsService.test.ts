@@ -418,13 +418,48 @@ describe('EnvironmentAnalyticsService contracts', () => {
     for (const { sql } of selectedQueries) {
       expect(sql.match(/JOIN service_deployables a/g)).toHaveLength(1);
       expect(sql).toContain('SELECT DISTINCT ON (a.id) a.*, d.status AS "deployStatus"');
-      expect(sql).toContain('WHERE a.active = true AND d.active = true AND d."deletedAt" IS NULL');
+      expect(sql).toContain('WHERE d.active = true AND d."deletedAt" IS NULL');
+      expect(sql).not.toContain('a.active = true');
+      expect(sql).not.toContain('"s"."active"');
       expect(sql).toContain('ORDER BY a.id, d.id DESC');
       expect(sql).toContain('from "service_instances" as "s"');
       expect(sql).not.toContain('d.status <>');
       expect(sql).not.toContain('join "service_deploys"');
       expect(sql.indexOf('s."deployStatus" IS NULL')).toBeGreaterThan(sql.indexOf('ORDER BY a.id, d.id DESC'));
     }
+  });
+
+  it('counts an enabled optional component using deployment state rather than its deployable default', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.method === 'first') return { total: '1' };
+      return [
+        {
+          key: 'optional-redis',
+          name: 'redis',
+          type: 'helm',
+          repositoryId: 4,
+          fullName: 'org/repo',
+          githubInstallationId: 8,
+          serviceId: null,
+          sourceGithubRepositoryId: null,
+          identityResolved: true,
+          instances: '1',
+          readyInstances: '1',
+          environments: '1',
+        },
+      ];
+    });
+    const result = await service.getServices(parseManagedServiceRecordsQuery(new URLSearchParams('type=helm')));
+    expect(result.records[0]).toMatchObject({ name: 'redis', instances: 1, readyInstances: 1, environments: 1 });
+    const selected = queries.find((query) => query.sql.includes('service_instances'))!;
+    expect(selected.sql).not.toContain('a.active = true');
+    expect(selected.sql).not.toContain('"s"."active"');
+    expect(selected.sql).toContain('a."buildUUID" = e.uuid');
+    expect(selected.sql).toContain('SELECT max(a.id)');
+    expect(selected.sql).toContain('d.active = true');
+    expect(selected.bindings).toContain('torn_down');
   });
 
   it.each([

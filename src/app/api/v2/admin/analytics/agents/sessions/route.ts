@@ -14,16 +14,16 @@ import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, withNoStore } from 'server/lib/response';
 import AgentAnalyticsService, {
-  parseAgentAnalyticsRunsQuery,
+  parseAgentAnalyticsQuery,
   parseAgentAnalyticsPagination,
 } from 'server/services/analytics/AgentAnalyticsService';
 
 /**
  * @openapi
- * /api/v2/admin/analytics/agents/runs:
+ * /api/v2/admin/analytics/agents/sessions:
  *   get:
- *     summary: Drill into retained submitted Agent runs without conversation content
- *     operationId: getAgentAnalyticsRuns
+ *     summary: List sessions with matching retained Agent runs
+ *     operationId: getAgentAnalyticsSessions
  *     tags: [Admin Analytics]
  *     parameters:
  *       - {in: query, name: from, schema: {type: string, format: date}}
@@ -38,17 +38,15 @@ import AgentAnalyticsService, {
  *       - {in: query, name: agentId, schema: {type: string}}
  *       - {in: query, name: provider, schema: {type: string}}
  *       - {in: query, name: model, schema: {type: string}}
- *       - {in: query, name: sessionId, schema: {type: string, format: uuid}, description: Exact retained session UUID.}
- *       - {in: query, name: runStatus, schema: {type: string, enum: [queued, starting, running, waiting_for_approval, waiting_for_input, transitioned, completed, failed, cancelled, unknown]}}
  *       - {in: query, name: page, schema: {type: integer, minimum: 1, maximum: 10000, default: 1}}
  *       - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
  *     responses:
  *       '503': { description: 'Analytics request did not complete before the time limit. Error code: analytics_timeout.', content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  *       '200':
- *         description: SQL-paginated run metadata and recorded usage.
+ *         description: Session aggregates across all matching runs, grouped before pagination.
  *         content:
  *           application/json:
- *             schema: {$ref: '#/components/schemas/GetAgentAnalyticsRunsSuccessResponse'}
+ *             schema: {$ref: '#/components/schemas/GetAgentAnalyticsSessionsSuccessResponse'}
  *       '400':
  *         description: Invalid range, scope, or pagination.
  *         content:
@@ -68,8 +66,8 @@ import AgentAnalyticsService, {
 export const GET = createApiHandler(
   async (req: NextRequest) => {
     const { page, limit } = parseAgentAnalyticsPagination(req.nextUrl.searchParams);
-    const result = await new AgentAnalyticsService().listRuns(
-      parseAgentAnalyticsRunsQuery(req.nextUrl.searchParams),
+    const result = await new AgentAnalyticsService().listSessions(
+      parseAgentAnalyticsQuery(req.nextUrl.searchParams),
       page,
       limit
     );

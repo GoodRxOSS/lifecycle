@@ -11,6 +11,7 @@ describe('Admin environment analytics OpenAPI contract', () => {
     ['options', 'getAnalyticsOptions', 'GetAnalyticsOptionsSuccessResponse'],
     ['environments/records', 'getEnvironmentAnalyticsRecords', 'GetEnvironmentAnalyticsRecordsSuccessResponse'],
     ['services', 'getManagedServiceRecords', 'GetManagedServiceRecordsSuccessResponse'],
+    ['lifetimes/scatter', 'getEnvironmentLifetimeScatter', 'GetEnvironmentLifetimeScatterSuccessResponse'],
   ])('documents %s with a concrete generated response and session authentication', (path, operationId, response) => {
     const operation = spec.paths[`/api/v2/admin/analytics/${path}`].get;
     expect(operation.operationId).toBe(operationId);
@@ -41,6 +42,51 @@ describe('Admin environment analytics OpenAPI contract', () => {
     expect(schemas.EnvironmentAnalyticsRecord.properties.pullRequest.nullable).toBe(true);
     expect(schemas.EnvironmentAnalyticsRecords.properties.range.nullable).toBe(true);
     expect(schemas.EnvironmentAnalyticsPagination.properties.limit.maximum).toBe(100);
+  });
+
+  it('documents complete bounded lifetime points and preserves distinct current-age bands', () => {
+    expect(schemas.EnvironmentLifetimeScatter.properties.pointLimit.enum).toEqual([5000]);
+    expect(schemas.EnvironmentLifetimeScatter.properties.state.enum).toEqual(['ready', 'empty', 'over_limit']);
+    expect(schemas.EnvironmentLifetimeScatterPoint.required).toEqual(
+      expect.arrayContaining([
+        'resourceAvailable',
+        'method',
+        'quality',
+        'sampleState',
+        'durationHours',
+        'measuredUntilAt',
+      ])
+    );
+    const operation = spec.paths['/api/v2/admin/analytics/lifetimes/records'].get;
+    expect(operation.parameters.find((param: any) => param.name === 'bin').schema.enum).toEqual(
+      expect.arrayContaining(['30d_plus', '30_to_90d', '90_to_180d', '180d_plus'])
+    );
+  });
+
+  it('documents exact session drilldown and session totals before bounded paging', () => {
+    const sessions = spec.paths['/api/v2/admin/analytics/agents/sessions'].get;
+    expect(sessions.operationId).toBe('getAgentAnalyticsSessions');
+    expect(sessions.responses['200'].content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/GetAgentAnalyticsSessionsSuccessResponse',
+    });
+    expect(sessions.security ?? spec.security).toEqual([{ BearerAuth: [] }]);
+    expect(sessions.responses['403'].description).toBe('Admin permission required.');
+    expect(sessions.parameters.find((param: any) => param.name === 'limit').schema.maximum).toBe(100);
+    expect(sessions.parameters.find((param: any) => param.name === 'page').schema.maximum).toBe(10000);
+    expect(schemas.AgentAnalyticsSession.required).toEqual(
+      expect.arrayContaining([
+        'sessionId',
+        'runs',
+        'repositories',
+        'repositoryCount',
+        'tokens',
+        'reportedCost',
+        'estimatedCost',
+      ])
+    );
+    expect(schemas.AgentAnalyticsSession.properties.repositories.maxItems).toBe(5);
+    const runs = spec.paths['/api/v2/admin/analytics/agents/runs'].get;
+    expect(runs.parameters.find((param: any) => param.name === 'sessionId').schema.format).toBe('uuid');
   });
 
   it('models calendar bounds, optional comparison and inapplicable PR values honestly', () => {
