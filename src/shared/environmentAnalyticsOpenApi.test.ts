@@ -122,6 +122,25 @@ describe('Admin environment analytics OpenAPI contract', () => {
     expect(runs.parameters.find((param: any) => param.name === 'sessionId').schema.format).toBe('uuid');
   });
 
+  it('permits missing queue dates while keeping submission dates required and nonnullable', () => {
+    expect(schemas.AgentAnalyticsRun.properties.queuedAt).toMatchObject({
+      type: 'string',
+      format: 'date-time',
+      nullable: true,
+    });
+    expect(schemas.AgentAnalyticsRun.required).toEqual(expect.arrayContaining(['submittedAt', 'queuedAt']));
+    expect(schemas.AgentAnalyticsSummary.properties.earliestRunAt.nullable).toBe(true);
+    for (const [schema, field] of [
+      ['AgentAnalyticsRun', 'submittedAt'],
+      ['AgentAnalyticsSession', 'firstSubmittedAt'],
+      ['AgentAnalyticsSession', 'lastSubmittedAt'],
+      ['AgentAnalyticsOptions', 'asOf'],
+    ]) {
+      expect(schemas[schema].required).toContain(field);
+      expect(schemas[schema].properties[field].nullable).not.toBe(true);
+    }
+  });
+
   it('models calendar bounds, optional comparison and inapplicable PR values honestly', () => {
     const operation = spec.paths['/api/v2/admin/analytics/environments'].get;
     expect(operation.parameters.find((param: any) => param.name === 'compare').schema.default).toBe(true);

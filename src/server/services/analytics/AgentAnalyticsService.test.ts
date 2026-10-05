@@ -223,6 +223,55 @@ describe('AgentAnalyticsService', () => {
     expect(bindings).toEqual([range.fromUtc, range.toUtc, 'failed', 25, 25]);
   });
 
+  it('keeps usage totals when the earliest retained run has a nonfinite date', async () => {
+    const { service } = serviceWithRows([
+      [{ period: 'current', group_type: 'total', runs: 1, sessions: 1, total_tokens: 300, total_reported_runs: 1 }],
+      [{ period: 'current', count: 1 }],
+      [{ earliest: Number.NEGATIVE_INFINITY }],
+    ]);
+    const result = await service.getSummary({});
+    expect(result.earliestRunAt).toBeNull();
+    expect(result.asOf).toBe(range.asOf);
+    expect(result.totals).toMatchObject({ runs: 1, sessions: 1, tokens: { total: 300, reportedRuns: 1 } });
+    expect(result.sessionsCreated.current).toBe(1);
+  });
+
+  it('returns missing queue dates while preserving valid dates and run totals', async () => {
+    const validString = '2026-03-08T08:00:00+00:00';
+    const queueDates = [
+      'infinity',
+      Number.NEGATIVE_INFINITY,
+      new Date(NaN),
+      'not-a-date',
+      validString,
+      new Date(range.fromUtc),
+    ];
+    const { service } = serviceWithRows([
+      [
+        {
+          total: queueDates.length,
+          runs: queueDates.map((queued_at, index) => ({
+            run_uuid: `run-${index}`,
+            session_uuid: 'session',
+            thread_uuid: 'thread',
+            submitted_at: range.fromUtc,
+            queued_at,
+            status: 'completed',
+            provider: 'provider',
+            model: 'model',
+            owner_id: 'owner',
+            total_tokens: 100,
+          })),
+        },
+      ],
+    ]);
+    const result = await service.listRuns({});
+    expect(result.runs.map((run) => run.queuedAt)).toEqual([null, null, null, null, validString, range.fromUtc]);
+    expect(result.runs.every((run) => run.submittedAt === range.fromUtc && run.tokens.total === 100)).toBe(true);
+    expect(result.pagination).toEqual({ page: 1, limit: 25, total: queueDates.length, hasMore: false });
+    expect(result.asOf).toBe(range.asOf);
+  });
+
   it('returns only run metadata while preserving unavailable usage and cost', async () => {
     const { service } = serviceWithRows([
       [

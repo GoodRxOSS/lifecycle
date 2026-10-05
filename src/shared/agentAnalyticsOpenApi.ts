@@ -114,6 +114,7 @@ export const agentAnalyticsSchemas = {
     queuedAt: {
       type: 'string',
       format: 'date-time',
+      nullable: true,
       description: 'Latest queue time; can change when an approval resumes the run.',
     },
     status: { type: 'string', enum: statuses },

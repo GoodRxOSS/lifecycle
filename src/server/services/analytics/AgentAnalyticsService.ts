@@ -106,7 +106,7 @@ export interface AgentAnalyticsRun {
   sessionId: string;
   threadId: string;
   submittedAt: string;
-  queuedAt: string;
+  queuedAt: string | null;
   status: AgentAnalyticsStatus;
   repository: string | null;
   provider: string;
@@ -248,7 +248,8 @@ function nullableNumber(value: unknown): number | null {
 
 function timestamp(value: unknown): string | null {
   if (value == null) return null;
-  return value instanceof Date ? value.toISOString() : String(value);
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null;
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
 export function serializeAgentAnalyticsMetrics(row?: SqlRow): AgentAnalyticsMetrics {
@@ -551,7 +552,7 @@ export default class AgentAnalyticsService {
           sessionId: String(run.session_uuid),
           threadId: String(run.thread_uuid),
           submittedAt: timestamp(run.submitted_at)!,
-          queuedAt: timestamp(run.queued_at)!,
+          queuedAt: timestamp(run.queued_at),
           status: run.status as AgentAnalyticsStatus,
           repository: run.repository == null ? null : String(run.repository),
           provider: String(run.provider),
