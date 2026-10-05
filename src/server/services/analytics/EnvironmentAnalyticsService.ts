@@ -277,7 +277,11 @@ const CAVEATS = [
   'Historical counts cover retained first-seen records, not deployment attempts. Collection and retention start are unknown.',
   'API-created environments have no installation binding; duplicate active repository matches are unattributed and counted as ambiguous.',
 ];
-const timestamp = (value: Date | string | null) => (value == null ? null : new Date(value).toISOString());
+const timestamp = (value: Date | string | null) => {
+  if (value == null) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+};
 const count = (value: unknown) => Number(value) || 0;
 const identityKey = (value: number | null) => (value == null ? 'unattributed' : String(value));
 const identity = (row: AnalyticsRepositoryIdentity): AnalyticsRepositoryIdentity => ({

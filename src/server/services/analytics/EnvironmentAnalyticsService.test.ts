@@ -213,6 +213,28 @@ describe('EnvironmentAnalyticsService contracts', () => {
     expect(analyticsEnvironmentRecord(row(10, { uuid: null }) as any).resourceAvailable).toBe(false);
   });
 
+  it('keeps inventory usable when a retained record has a nonfinite timestamp', async () => {
+    const { service } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.sql.includes('CURRENT_TIMESTAMP')) return [{ asOf: range.asOf }];
+      if (query.sql.includes(' AS deploys'))
+        return [
+          row(1),
+          row(2, {
+            status: 'error',
+            createdAt: Number.POSITIVE_INFINITY,
+            updatedAt: Number.NEGATIVE_INFINITY,
+            expiresAt: 'not-a-date',
+          }),
+        ];
+      return [];
+    });
+    const result = await service.getInventory(scope);
+    expect(result.totals).toMatchObject({ current: 2, ready: 1, failed: 1 });
+    expect(result.exceptions[0]).toMatchObject({ id: 2, createdAt: null, updatedAt: null, expiresAt: null });
+    expect(analyticsEnvironmentRecord(row(1) as any).createdAt).toBe('2026-09-30T10:00:00.000Z');
+  });
+
   it('processes all inventory batches while bounding exception output', async () => {
     const rows = Array.from({ length: 1005 }, (_, index) =>
       row(index + 1, {
