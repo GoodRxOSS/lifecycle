@@ -21,7 +21,8 @@ jest.mock('server/services/sites', () => {
 
 import SitesService, { SitesServiceError, type SiteResponse } from 'server/services/sites';
 import { McpExecutionError } from '../../../errors';
-import { mapSiteServiceError, resolveSiteToolDependencies, siteSummary } from '../shared';
+import { AppError } from 'server/lib/appError';
+import { mapSiteServiceError, resolveSiteToolDependencies, singleFileUpload, siteSummary } from '../shared';
 
 const MockSitesService = SitesService as unknown as jest.Mock;
 
@@ -86,6 +87,24 @@ describe('mapSiteServiceError', () => {
     });
   });
 
+  it.each([
+    ['site_changed', 409, 'site_changed'],
+    ['site_access_denied', 403, 'forbidden_role'],
+    ['insufficient_scope', 403, 'forbidden_role'],
+    ['private_sites_unavailable', 503, 'toolset_disabled'],
+  ] as const)('maps the %s policy error to %s', (code, httpStatus, expectedCode) => {
+    expect(mapSiteServiceError(new AppError({ httpStatus, code, message: 'policy' }))).toMatchObject({
+      code: expectedCode,
+    });
+  });
+
+  it('maps an upload rejection to invalid_body at the given input path', () => {
+    expect(mapSiteServiceError(new SitesServiceError('Upload file is empty.', 400), '/content')).toMatchObject({
+      code: 'invalid_body',
+      details: { issues: [{ path: '/content', message: 'Upload file is empty.' }] },
+    });
+  });
+
   it('sanitizes an unknown dependency failure', () => {
     expect(mapSiteServiceError(new Error('storage credentials leaked here'))).toMatchObject({
       code: 'internal_error',
@@ -102,6 +121,20 @@ describe('siteSummary', () => {
   it('rejects an invalid required timestamp from the service boundary', () => {
     expect(() => siteSummary(site({ updatedAt: 'not-a-date' }))).toThrow(
       'Lifecycle returned incomplete hosted-site data.'
+    );
+  });
+});
+
+describe('singleFileUpload', () => {
+  it('encodes text content as UTF-8 under the given file name', () => {
+    const upload = singleFileUpload('<p>héllo</p>', 'Page.HTML');
+    expect(upload.fileName).toBe('Page.HTML');
+    expect(upload.content.toString('utf8')).toBe('<p>héllo</p>');
+  });
+
+  it.each(['site.zip', 'image.png', 'doc.pdf', 'font.woff2', 'noextension'])('rejects %s', (filename) => {
+    expect(() => singleFileUpload('x', filename)).toThrow(
+      expect.objectContaining({ code: 'invalid_body' }) as unknown as Error
     );
   });
 });

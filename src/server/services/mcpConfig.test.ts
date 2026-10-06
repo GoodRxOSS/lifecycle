@@ -135,7 +135,7 @@ it('returns the small local settings view without attempting enablement', async 
       issue: null,
     })
   );
-  expect(settings.capabilities).toHaveLength(4);
+  expect(settings.capabilities).toHaveLength(5);
   expect(settings.capabilities.flatMap(({ tools }) => tools)).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ name: 'get_environment', access: 'read' }),
@@ -157,7 +157,9 @@ it('keeps the catalog stable across enabled and allowChanges state', async () =>
 
 it('omits the entire Sites capability when Sites is unavailable', async () => {
   const settings = await setup(undefined, { sitesAvailable: false }).service.getSettings();
-  expect(settings.capabilities.map(({ id }) => id)).not.toContain('view-hosted-sites');
+  const ids = settings.capabilities.map(({ id }) => id);
+  expect(ids).not.toContain('view-hosted-sites');
+  expect(ids).not.toContain('manage-hosted-sites');
 });
 
 it('does not persist a failed off-to-on transition', async () => {

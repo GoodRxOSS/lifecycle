@@ -15,13 +15,26 @@
  */
 
 import type { McpToolDefinition } from '../../contracts';
+import { createCreateSiteToolDefinition } from './createSite';
+import { createDeleteSiteToolDefinition } from './deleteSite';
+import { createExtendSiteToolDefinition } from './extendSite';
 import { createGetSiteToolDefinition } from './getSite';
 import { createListSitesToolDefinition } from './listSites';
+import { createSetSiteVisibilityToolDefinition } from './setSiteVisibility';
+import { createUpdateSiteContentToolDefinition } from './updateSiteContent';
 import { resolveSiteToolDependencies, type SiteToolDependencies } from './shared';
 
 export type { SiteToolService } from './shared';
 
 export function createSiteToolDefinitions(dependencies: SiteToolDependencies = {}): McpToolDefinition[] {
   const resolved = resolveSiteToolDependencies(dependencies);
-  return [createListSitesToolDefinition(resolved), createGetSiteToolDefinition(resolved)];
+  return [
+    createListSitesToolDefinition(resolved),
+    createGetSiteToolDefinition(resolved),
+    createCreateSiteToolDefinition(resolved),
+    createUpdateSiteContentToolDefinition(resolved),
+    createSetSiteVisibilityToolDefinition(resolved),
+    createExtendSiteToolDefinition(resolved),
+    createDeleteSiteToolDefinition(resolved),
+  ];
 }

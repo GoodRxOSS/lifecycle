@@ -26,6 +26,7 @@ export const MCP_EXECUTION_ERROR_CODES = [
   'env_not_found',
   'repo_not_onboarded',
   'site_not_found',
+  'site_changed',
   'logs_not_found',
   'service_not_found',
   'job_not_found',
@@ -85,6 +86,7 @@ const MCP_ERROR_METADATA: Record<McpExecutionErrorCode, ErrorMetadata> = {
   },
   repo_not_onboarded: { retryable: false, nextAction: 'fix_input', retryAfter: 'forbidden' },
   site_not_found: { retryable: false, nextAction: 'fix_input', retryAfter: 'forbidden' },
+  site_changed: { retryable: false, nextAction: 'fix_input', retryAfter: 'forbidden' },
   logs_not_found: { retryable: false, nextAction: 'fix_input', retryAfter: 'forbidden' },
   service_not_found: {
     retryable: false,

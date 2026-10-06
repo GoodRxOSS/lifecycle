@@ -145,6 +145,7 @@ it('uses the registered definitions as the admin capability catalog', () => {
       id: 'view-hosted-sites',
       tools: [expect.objectContaining({ name: 'get_site', access: 'read' })],
     }),
+    expect.objectContaining({ id: 'manage-hosted-sites', tools: [] }),
   ]);
 });
 
