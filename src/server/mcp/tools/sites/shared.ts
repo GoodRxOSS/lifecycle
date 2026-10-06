@@ -86,15 +86,8 @@ export function singleFileUpload(content: string, filename: string): { fileName:
   return { fileName: filename, content: Buffer.from(content, 'utf8') };
 }
 
-function statusOf(error: unknown): number | undefined {
-  if (error instanceof SitesServiceError) return Number(error.statusCode);
-  if (isAppError(error)) return error.httpStatus;
-  return undefined;
-}
-
 export function mapSiteServiceError(error: unknown, invalidInputPath = '/'): McpExecutionError {
   if (error instanceof McpExecutionError) return error;
-  const statusCode = statusOf(error);
   const code = isAppError(error) ? error.code : undefined;
   if (code === 'site_changed') {
     return new McpExecutionError(
@@ -111,11 +104,12 @@ export function mapSiteServiceError(error: unknown, invalidInputPath = '/'): Mcp
       'Private sites are not available on this installation. Ask an administrator, or publish with visibility public.'
     );
   }
-  if (code === 'insufficient_scope' || statusCode === 401) {
-    return new McpExecutionError('forbidden_role', 'This credential cannot change hosted sites.');
+  if (code === 'insufficient_scope') {
+    return new McpExecutionError('forbidden_role', 'This credential is not allowed to perform this site action.');
   }
-  if (statusCode === 400 && error instanceof SitesServiceError) {
-    const message = error.message.slice(0, 500) || 'The request is invalid.';
+  const statusCode = error instanceof SitesServiceError ? Number(error.statusCode) : undefined;
+  if (statusCode === 400) {
+    const message = (error as SitesServiceError).message.slice(0, 500) || 'The request is invalid.';
     return new McpExecutionError('invalid_body', message, {
       details: { issues: [{ path: invalidInputPath, message }] },
     });

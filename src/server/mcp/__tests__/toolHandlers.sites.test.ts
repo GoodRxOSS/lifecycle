@@ -195,6 +195,15 @@ describe('get_site', () => {
     expect(error).toMatchObject({ code: 'site_not_found' });
   });
 
+  it('does not describe an expired session as a site-change problem', async () => {
+    const { call } = harness({
+      getSite: () =>
+        Promise.reject(new AppError({ httpStatus: 401, code: 'authentication_required', message: 'expired' })),
+    });
+    const { error } = await call('get_site', { siteId: 'site_abc123' });
+    expect(error).toMatchObject({ code: 'internal_error' });
+  });
+
   it('rejects a malformed site id at the schema layer', async () => {
     const getSite = jest.fn();
     const { call } = harness({ getSite });

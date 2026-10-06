@@ -98,6 +98,16 @@ describe('mapSiteServiceError', () => {
     });
   });
 
+  it.each([
+    [401, 'authentication_required'],
+    [403, 'principal_unavailable'],
+    [503, 'oauth_session_unavailable'],
+  ] as const)('keeps other %s policy errors (%s) opaque', (httpStatus, code) => {
+    expect(mapSiteServiceError(new AppError({ httpStatus, code, message: 'policy' }))).toMatchObject({
+      code: 'internal_error',
+    });
+  });
+
   it('maps an upload rejection to invalid_body at the given input path', () => {
     expect(mapSiteServiceError(new SitesServiceError('Upload file is empty.', 400), '/content')).toMatchObject({
       code: 'invalid_body',
@@ -132,9 +142,12 @@ describe('singleFileUpload', () => {
     expect(upload.content.toString('utf8')).toBe('<p>héllo</p>');
   });
 
-  it.each(['site.zip', 'image.png', 'doc.pdf', 'font.woff2', 'noextension'])('rejects %s', (filename) => {
-    expect(() => singleFileUpload('x', filename)).toThrow(
-      expect.objectContaining({ code: 'invalid_body' }) as unknown as Error
-    );
-  });
+  it.each(['site.zip', 'page.html.zip', 'image.png', 'doc.pdf', 'font.woff2', 'noextension'])(
+    'rejects %s',
+    (filename) => {
+      expect(() => singleFileUpload('x', filename)).toThrow(
+        expect.objectContaining({ code: 'invalid_body' }) as unknown as Error
+      );
+    }
+  );
 });
