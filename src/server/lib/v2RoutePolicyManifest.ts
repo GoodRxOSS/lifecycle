@@ -33,6 +33,18 @@ export type V2RoutePolicyEntry =
     };
 
 export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
+  { method: 'GET', route: '/api/v2/admin/analytics/agents', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/agents/options', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/agents/runs', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/agents/sessions', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/environments', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/environments/records', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/inventory', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/lifetimes', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/lifetimes/records', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/lifetimes/scatter', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/options', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/services', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/ai/admin/agent/capabilities', policy: 'session', roles: ['admin'] },
   { method: 'PUT', route: '/api/v2/ai/admin/agent/capabilities', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/ai/admin/agent/creation-policy', policy: 'session', roles: ['admin'] },
