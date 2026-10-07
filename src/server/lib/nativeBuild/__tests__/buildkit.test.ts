@@ -1160,8 +1160,14 @@ describe('generateSecretArgsScript', () => {
   it('generates shell script for single secret key', () => {
     const result = generateSecretArgsScript(['AWS_SECRET']);
     expect(result).toBe(
-      '[ -n "$AWS_SECRET" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:AWS_SECRET=$AWS_SECRET"'
+      '[ -n "$AWS_SECRET" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:AWS_SECRET=$AWS_SECRET --secret id=AWS_SECRET,env=AWS_SECRET"'
     );
+  });
+
+  it('passes each secret as a BuildKit secret, so RUN --mount=type=secret can read it', () => {
+    const result = generateSecretArgsScript(['NPM_TOKEN']);
+    expect(result).toContain('--secret id=NPM_TOKEN,env=NPM_TOKEN');
+    expect(result).not.toContain('--secret id=NPM_TOKEN,env=$NPM_TOKEN');
   });
 
   it('generates shell script for multiple secret keys', () => {

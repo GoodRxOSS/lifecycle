@@ -93,13 +93,17 @@ interface BuildArgOptions {
   secretEnvKeys?: string[];
 }
 
+// Each secret goes to buildctl twice: as a build arg, for Dockerfiles that read it with ARG, and as a
+// BuildKit secret, for Dockerfiles that read it with `RUN --mount=type=secret,id=<KEY>`. The secret
+// form never reaches the image history; a build arg only does if the Dockerfile declares its ARG.
 export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
   if (!secretEnvKeys || secretEnvKeys.length === 0) {
     return '# No secret env keys';
   }
 
   const lines = secretEnvKeys.map(
-    (key) => `[ -n "$${key}" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:${key}=$${key}"`
+    (key) =>
+      `[ -n "$${key}" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:${key}=$${key} --secret id=${key},env=${key}"`
   );
 
   return lines.join('\n');
