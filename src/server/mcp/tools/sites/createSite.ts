@@ -19,7 +19,7 @@ import { createSiteInputSchema, createSiteOutputSchema } from './schemas';
 import { mapSiteServiceError, singleFileUpload, siteChangeSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Publishes one text file as a new hosted site and returns its URL. Send a complete self-contained HTML document (inline CSS and scripts), or a .md, .txt, .json, .csv, .xml, or .svg file named by `filename`. ZIP archives, multiple files, and binary files are not supported. Sites are private unless `visibility` is public. To revise a site you published, use update_site_content so the URL stays the same. Report the url and expiresAt.';
+  'Publishes one text file as a new hosted site and returns its URL. For anything people will read, send a complete self-contained HTML document (inline CSS and scripts); other types (.md, .txt, .json, .csv, .xml, .svg via `filename`) are served as-is, not rendered. ZIP archives, multiple files, and binary files are not supported. Sites are private unless `visibility` is public. To revise a site, use update_site_content so the URL stays the same. Report the url.';
 
 export function createCreateSiteToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {
