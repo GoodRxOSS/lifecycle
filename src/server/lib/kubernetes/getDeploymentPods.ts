@@ -17,7 +17,7 @@
 import * as k8s from '@kubernetes/client-node';
 
 import { getLogger } from 'server/lib/logger';
-import Build from 'server/models/Build';
+import { Build } from 'server/models';
 
 type ContainerState = 'Running' | 'Waiting' | 'Terminated' | 'Unknown';
 
@@ -33,6 +33,7 @@ export interface ContainerInfo {
 
 export interface PodInfo {
   podName: string;
+  podUid: string;
   status: string;
   restarts: number;
   ageSeconds: number;
@@ -184,6 +185,7 @@ function toPodInfo(pod: k8s.V1Pod): PodInfo {
 
   return {
     podName: pod.metadata?.name ?? '',
+    podUid: pod.metadata?.uid ?? '',
     status: podStatus(pod),
     restarts: podRestarts(pod),
     ageSeconds,

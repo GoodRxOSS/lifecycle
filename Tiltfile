@@ -423,6 +423,11 @@ for r in lifecycle_deployment:
         if len(containers) > 0:
             container = containers[0]
             # With ngrok, APP_HOST must be the ngrok origin so agents can reach Lifecycle MCP under the same OAuth resource identifier.
+            if container.get("name") == "web":
+                container["env"] = (container.get("env") or []) + [
+                    {"name": "POD_EXEC_ENABLED", "value": os.getenv("POD_EXEC_ENABLED", "false")},
+                    {"name": "POD_EXEC_ALLOWED_ORIGINS", "value": "{}://{}".format(ui_scheme, ui_host)},
+                ]
             for env_var in (container.get("env") or []):
                 if env_var.get("name") == "APP_HOST":
                     env_var["value"] = app_origin
