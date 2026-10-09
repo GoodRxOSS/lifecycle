@@ -209,7 +209,11 @@ jest.mock('server/lib/fastly', () =>
   }))
 );
 
-import BuildService, { computeIdempotencyRequestDigest, assertIdempotentReplayAllowed } from '../build';
+import BuildService, {
+  computeIdempotencyRequestDigest,
+  assertIdempotentReplayAllowed,
+  assertEnvironmentDestroyAllowed,
+} from '../build';
 import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
 import * as github from 'server/lib/github';
 import { ingressBannerSnippet } from 'server/lib/helm/utils';
@@ -5310,7 +5314,13 @@ describe('BuildService uncovered public behavior', () => {
     };
     const service = serviceWith({ models: { Build: BuildModel } });
 
-    await expect(service.requestApiEnvironmentDeletion('disabled-api-env', 7)).resolves.toBe(current);
+    await expect(
+      service.requestApiEnvironmentDeletion('disabled-api-env', 7, {
+        kind: 'user',
+        userId: 'admin-1',
+        roles: ['admin'],
+      } as any)
+    ).resolves.toBe(current);
 
     expect(patch).toHaveBeenCalledWith({
       status: BuildStatus.TEARING_DOWN,
@@ -6734,5 +6744,34 @@ describe('BuildService uncovered public behavior', () => {
 
     expect(mockAcceptDeploymentIntent).not.toHaveBeenCalled();
     expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertEnvironmentDestroyAllowed', () => {
+  const principal = (overrides: Record<string, unknown>) =>
+    ({ kind: 'user', userId: 'creator-1', roles: ['user'], ...overrides } as any);
+
+  it.each([
+    ['its creator', { createdByUserId: 'creator-1' }, {}],
+    ['an admin', { createdByUserId: 'creator-1' }, { userId: 'admin-1', roles: ['admin'] }],
+    ['an admin when no creator was recorded', { createdByUserId: null }, { userId: 'admin-1', roles: ['admin'] }],
+    ['a personal key owned by the creator', { createdByUserId: 'creator-1' }, { kind: 'personal_key', roles: [] }],
+    ['a service key', { createdByUserId: 'creator-1' }, { kind: 'service_key', userId: null, roles: [] }],
+  ])('allows %s', (_case, build, overrides) => {
+    expect(() => assertEnvironmentDestroyAllowed(build as any, principal(overrides))).not.toThrow();
+  });
+
+  it.each([
+    ['another user', { createdByUserId: 'creator-1' }, { userId: 'someone-else' }],
+    ['a non-admin when no creator was recorded', { createdByUserId: null }, {}],
+    ['a personal key owned by someone else', { createdByUserId: 'creator-1' }, { kind: 'personal_key', userId: 'x' }],
+  ])('refuses %s', (_case, build, overrides) => {
+    expect(() => assertEnvironmentDestroyAllowed(build as any, principal(overrides))).toThrow(
+      expect.objectContaining({
+        httpStatus: 403,
+        code: 'forbidden_role',
+        message: 'Only the creator of this environment or an admin can destroy it.',
+      })
+    );
   });
 });

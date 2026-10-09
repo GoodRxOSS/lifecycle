@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { assertEnvironmentDestroyAllowed } from 'server/services/build';
 import type { McpJsonObject, McpToolDefinition } from '../../contracts';
 import {
   confirmationStateMatches,
@@ -41,7 +42,7 @@ import {
 } from './shared';
 
 const DESCRIPTION =
-  'Destroys an API-created environment in two steps. First call with confirmation phase preview, review the returned summary, and get explicit approval if you are acting for someone. Then call with phase execute and the returned confirmation token. Execute returns a receipt while teardown continues in the background; report the receipt and use get_environment later when the user asks for current state. Destruction cannot be undone. Static and pull-request environments cannot be destroyed with this tool.';
+  'Destroys an API-created environment in two steps. First call with confirmation phase preview, review the returned summary, and get explicit approval if you are acting for someone. Then call with phase execute and the returned confirmation token. Execute returns a receipt while teardown continues in the background; report the receipt and use get_environment later when the user asks for current state. Destruction cannot be undone. Only its creator or an admin can destroy it; static and pull-request environments cannot be destroyed with this tool.';
 
 type DestroyConfirmation = { phase: 'preview' } | { phase: 'execute'; confirmToken: string };
 
@@ -95,6 +96,7 @@ export function createDestroyEnvironmentToolDefinition(
         if (confirmation.phase === 'preview') {
           const snapshot = await dependencies.lockDestroyPreview(uuid, environmentId);
           assertEnvironmentDestroyable(snapshot.build);
+          assertEnvironmentDestroyAllowed(snapshot.build, context.principal);
           const nowSeconds = dependencies.nowSeconds();
           const confirmToken = createDestroyConfirmation(
             {
@@ -146,21 +148,23 @@ export function createDestroyEnvironmentToolDefinition(
         });
 
         let validatedForClaim = false;
-        const destroyed = await dependencies.service().requestApiEnvironmentDeletion(uuid, environmentId, {
-          rejectPullRequest: true,
-          validateLockedState: async (locked, trx) => {
-            const snapshot = await dependencies.snapshotLockedDestroyState(locked, trx);
-            if (
-              !confirmationStateMatches(
-                payload.stateHash,
-                confirmationStateHash(environmentDestroyConfirmationState(snapshot))
-              )
-            ) {
-              throw invalidEnvironmentConfirmation();
-            }
-            validatedForClaim = true;
-          },
-        });
+        const destroyed = await dependencies
+          .service()
+          .requestApiEnvironmentDeletion(uuid, environmentId, context.principal, {
+            rejectPullRequest: true,
+            validateLockedState: async (locked, trx) => {
+              const snapshot = await dependencies.snapshotLockedDestroyState(locked, trx);
+              if (
+                !confirmationStateMatches(
+                  payload.stateHash,
+                  confirmationStateHash(environmentDestroyConfirmationState(snapshot))
+                )
+              ) {
+                throw invalidEnvironmentConfirmation();
+              }
+              validatedForClaim = true;
+            },
+          });
         const alreadyDestroying = !validatedForClaim;
         annotateEnvironment(context, destroyed, {
           operation: 'execute',

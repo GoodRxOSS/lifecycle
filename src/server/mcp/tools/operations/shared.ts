@@ -265,6 +265,7 @@ const DETAIL_FREE_OPERATION_CODES = new Set<McpExecutionErrorCode>([
   'auto_track_pinned_source',
   'invalid_field_for_trigger',
   'override_not_allowed',
+  'forbidden_role',
 ]);
 
 function operationMessage(error: unknown): string {

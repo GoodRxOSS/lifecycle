@@ -212,6 +212,8 @@ const validInput = {
   branch: 'main',
 };
 
+const DESTROY_ADMIN = { kind: 'user', userId: 'admin-1', roles: ['admin'] } as any;
+
 describe('createApiEnvironment', () => {
   it('refuses when the api_environments flag is off', async () => {
     mockGetApiEnvironmentsConfig.mockResolvedValue({ ...API_CONFIG.api_environments, enabled: false });
@@ -1304,7 +1306,7 @@ describe('requestApiEnvironmentDeletion', () => {
     };
     const { service, queueAdd, claimPatch, lockedQuery, findOne } = makeDeletionRequestService(current);
 
-    const result = await service.requestApiEnvironmentDeletion('api-env-123456', 7);
+    const result = await service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN);
 
     expect(findOne).toHaveBeenCalledWith({ id: 7, uuid: 'api-env-123456' });
     expect(lockedQuery.where).toHaveBeenCalledWith('kind', 'environment');
@@ -1337,7 +1339,7 @@ describe('requestApiEnvironmentDeletion', () => {
     const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
     const validateLockedState = jest.fn().mockResolvedValue(undefined);
 
-    await service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+    await service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN, {
       validateLockedState,
       rejectPullRequest: true,
     });
@@ -1350,7 +1352,7 @@ describe('requestApiEnvironmentDeletion', () => {
   it('404s when the exact id and uuid no longer resolve an environment row', async () => {
     const { service, queueAdd, claimPatch } = makeDeletionRequestService(undefined);
 
-    await expect(service.requestApiEnvironmentDeletion('api-env-123456', 7)).rejects.toMatchObject({
+    await expect(service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN)).rejects.toMatchObject({
       code: 'env_not_found',
     });
     expect(claimPatch).not.toHaveBeenCalled();
@@ -1375,7 +1377,7 @@ describe('requestApiEnvironmentDeletion', () => {
     const validateLockedState = jest.fn().mockRejectedValue(previewChanged);
 
     await expect(
-      service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+      service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN, {
         validateLockedState,
       })
     ).rejects.toMatchObject({ code: 'confirmation_state_changed' });
@@ -1405,7 +1407,7 @@ describe('requestApiEnvironmentDeletion', () => {
     ]) {
       const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
       await expect(
-        service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+        service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN, {
           rejectPullRequest: true,
         })
       ).rejects.toMatchObject({
@@ -1428,7 +1430,7 @@ describe('requestApiEnvironmentDeletion', () => {
     const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
 
     await service.enqueueBuildDeletion({ ...current }, 'lease_expired');
-    await service.requestApiEnvironmentDeletion('api-env-123456', 7);
+    await service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN);
 
     expect(claimPatch).toHaveBeenCalledWith(
       expect.objectContaining({ status: BuildStatus.TEARING_DOWN, runUUID: 'build-teardown-7' })
@@ -1454,7 +1456,7 @@ describe('requestApiEnvironmentDeletion', () => {
       const { service, queueAdd, claimPatch } = makeDeletionRequestService(current);
       const validateLockedState = jest.fn();
 
-      await service.requestApiEnvironmentDeletion('api-env-123456', 7, {
+      await service.requestApiEnvironmentDeletion('api-env-123456', 7, DESTROY_ADMIN, {
         validateLockedState,
       });
 
@@ -1520,7 +1522,7 @@ describe('requestApiEnvironmentDeletion', () => {
     };
     const enqueueResolve = jest.spyOn(service as any, 'enqueueResolveAndDeployBuild').mockResolvedValue(undefined);
 
-    const deletion = service.requestApiEnvironmentDeletion(current.uuid, current.id);
+    const deletion = service.requestApiEnvironmentDeletion(current.uuid, current.id, DESTROY_ADMIN);
     await claimDidStart;
     const redeploy = service.redeployBuild(current.uuid, current.id);
 
