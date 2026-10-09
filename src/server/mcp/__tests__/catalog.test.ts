@@ -37,6 +37,11 @@ const ALL_TOOLS = [
   'get_kubernetes_state',
   'list_sites',
   'get_site',
+  'create_site',
+  'update_site_content',
+  'set_site_visibility',
+  'extend_site',
+  'delete_site',
 ];
 
 const CHANGE_TOOLS = [
@@ -45,9 +50,22 @@ const CHANGE_TOOLS = [
   'deploy_environment',
   'extend_environment',
   'destroy_environment',
+  'create_site',
+  'update_site_content',
+  'set_site_visibility',
+  'extend_site',
+  'delete_site',
 ];
 
-const SITE_TOOLS = ['list_sites', 'get_site'];
+const SITE_TOOLS = [
+  'list_sites',
+  'get_site',
+  'create_site',
+  'update_site_content',
+  'set_site_visibility',
+  'extend_site',
+  'delete_site',
+];
 
 it('compiles the production catalog exactly as ws-server boots it', () => {
   expect(() => createLifecycleMcpRegistry()).not.toThrow();

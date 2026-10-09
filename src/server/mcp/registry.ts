@@ -29,6 +29,7 @@ import { recordAuthAuditEvent } from 'server/services/authAudit';
 import type {
   McpJsonObject,
   McpAdminCapability,
+  McpCapabilityId,
   McpRuntimePolicy,
   McpToolAuditContext,
   McpToolAuditFields,
@@ -66,7 +67,14 @@ const CAPABILITIES: ReadonlyArray<Pick<McpAdminCapability, 'id' | 'label' | 'des
     label: 'View Hosted Sites',
     description: 'List and inspect hosted sites visible to the signed-in Lifecycle user.',
   },
+  {
+    id: 'manage-hosted-sites',
+    label: 'Manage Hosted Sites',
+    description: 'Publish, update, extend, change visibility of, and delete hosted sites owned by the signed-in user.',
+  },
 ];
+
+const SITE_CAPABILITIES: ReadonlySet<McpCapabilityId> = new Set(['view-hosted-sites', 'manage-hosted-sites']);
 
 export interface McpMetricSink {
   increment(metric: string, tags?: Record<string, string>): unknown;
@@ -187,7 +195,7 @@ function normalizeAuditFields(fields: Partial<McpToolAuditFields>): Partial<McpT
 function toolAvailable(definition: McpToolDefinition, policy: McpRuntimePolicy): boolean {
   if (!policy.enabled) return false;
   if (definition.access === 'change' && !policy.allowChanges) return false;
-  if (definition.capabilityId === 'view-hosted-sites' && !policy.sitesAvailable) return false;
+  if (SITE_CAPABILITIES.has(definition.capabilityId) && !policy.sitesAvailable) return false;
   return true;
 }
 
@@ -195,7 +203,7 @@ export function buildMcpAdminCatalog(
   definitions: readonly McpToolDefinition[],
   options: { sitesAvailable: boolean }
 ): McpAdminCapability[] {
-  return CAPABILITIES.filter((capability) => capability.id !== 'view-hosted-sites' || options.sitesAvailable).map(
+  return CAPABILITIES.filter((capability) => !SITE_CAPABILITIES.has(capability.id) || options.sitesAvailable).map(
     (capability) => ({
       ...capability,
       tools: definitions

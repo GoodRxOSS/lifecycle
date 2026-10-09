@@ -259,6 +259,7 @@ describe('OpenAPI Lifecycle MCP admin contract', () => {
       'diagnose-environments',
       'manage-environments',
       'view-hosted-sites',
+      'manage-hosted-sites',
     ]);
   });
 

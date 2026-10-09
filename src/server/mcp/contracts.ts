@@ -34,7 +34,8 @@ export type McpCapabilityId =
   | 'understand-environments'
   | 'diagnose-environments'
   | 'manage-environments'
-  | 'view-hosted-sites';
+  | 'view-hosted-sites'
+  | 'manage-hosted-sites';
 
 export type McpToolAccess = 'read' | 'change';
 

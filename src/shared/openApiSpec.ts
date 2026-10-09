@@ -566,7 +566,13 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             id: {
               type: 'string',
-              enum: ['understand-environments', 'diagnose-environments', 'manage-environments', 'view-hosted-sites'],
+              enum: [
+                'understand-environments',
+                'diagnose-environments',
+                'manage-environments',
+                'view-hosted-sites',
+                'manage-hosted-sites',
+              ],
             },
             label: { type: 'string' },
             description: { type: 'string' },

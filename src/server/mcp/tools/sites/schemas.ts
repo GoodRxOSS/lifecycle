@@ -92,3 +92,92 @@ export const listSitesOutputSchema = successObjectSchema(
 export const getSiteInputSchema = closedObjectSchema({ siteId: siteIdSchema }, ['siteId']);
 
 export const getSiteOutputSchema = successObjectSchema({ site: siteSummarySchema }, ['site']);
+
+const visibilitySchema = { type: 'string', enum: ['private', 'public'] } as const;
+const revisionSchema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } as const;
+
+const contentSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 3_000_000,
+} as const;
+
+const filenameSchema = {
+  type: 'string',
+  minLength: 1,
+  maxLength: 200,
+  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$',
+  default: 'index.html',
+  description:
+    'File name whose extension sets the content type: .html, .md, .markdown, .txt, .json, .csv, .xml, or .svg.',
+} as const;
+
+const siteChangeSchema = closedObjectSchema(
+  {
+    siteId: { type: 'string', minLength: 1, maxLength: 100 },
+    url: { type: 'string', format: 'uri', maxLength: 2048 },
+    status: { type: 'string', maxLength: 50 },
+    visibility: visibilitySchema,
+    accessRevision: revisionSchema,
+    contentRevision: revisionSchema,
+    expiresAt: { type: 'string', format: 'date-time' },
+  },
+  ['siteId', 'url', 'status', 'visibility', 'accessRevision', 'contentRevision']
+);
+
+const siteResultSchema = successObjectSchema({ site: siteChangeSchema }, ['site']);
+
+export const createSiteInputSchema = closedObjectSchema(
+  {
+    content: contentSchema,
+    filename: filenameSchema,
+    name: { type: 'string', minLength: 1, maxLength: 200 },
+    visibility: visibilitySchema,
+  },
+  ['content']
+);
+
+export const createSiteOutputSchema = siteResultSchema;
+
+export const updateSiteContentInputSchema = closedObjectSchema(
+  {
+    siteId: siteIdSchema,
+    content: contentSchema,
+    filename: filenameSchema,
+    expectedContentRevision: revisionSchema,
+  },
+  ['siteId', 'content']
+);
+
+export const updateSiteContentOutputSchema = siteResultSchema;
+
+export const setSiteVisibilityInputSchema = closedObjectSchema(
+  {
+    siteId: siteIdSchema,
+    visibility: visibilitySchema,
+    expectedAccessRevision: revisionSchema,
+  },
+  ['siteId', 'visibility', 'expectedAccessRevision']
+);
+
+export const setSiteVisibilityOutputSchema = siteResultSchema;
+
+export const extendSiteInputSchema = closedObjectSchema(
+  {
+    siteId: siteIdSchema,
+    expectedAccessRevision: revisionSchema,
+  },
+  ['siteId']
+);
+
+export const extendSiteOutputSchema = siteResultSchema;
+
+export const deleteSiteInputSchema = closedObjectSchema(
+  {
+    siteId: siteIdSchema,
+    expectedAccessRevision: revisionSchema,
+  },
+  ['siteId', 'expectedAccessRevision']
+);
+
+export const deleteSiteOutputSchema = siteResultSchema;

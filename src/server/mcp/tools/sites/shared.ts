@@ -19,16 +19,28 @@ import { normalizeMcpDateTime } from '../../dateTime';
 import { McpExecutionError } from '../../errors';
 import SitesService, {
   SitesServiceError,
+  type CreateOrReplaceSiteInput,
   type ListSitesFilters,
   type ListSitesResult,
   type SiteResponse,
 } from 'server/services/sites';
+import { isAppError } from 'server/lib/appError';
 import type { Principal } from 'server/lib/principal';
 import { safeCoreText } from '../core/listRepositories';
 
 export interface SiteToolService {
   listSites(filters: ListSitesFilters, principal: Principal): Promise<ListSitesResult>;
   getSite(siteId: string, principal: Principal): Promise<SiteResponse>;
+  createSite(input: CreateOrReplaceSiteInput): Promise<SiteResponse>;
+  replaceSiteContent(siteId: string, input: CreateOrReplaceSiteInput): Promise<SiteResponse>;
+  extendSite(siteId: string, principal: Principal, expectedAccessRevision?: number): Promise<SiteResponse>;
+  setVisibility(
+    siteId: string,
+    visibility: 'private' | 'public',
+    principal: Principal,
+    expectedAccessRevision: number
+  ): Promise<SiteResponse>;
+  deleteSite(siteId: string, principal: Principal, expectedAccessRevision?: number): Promise<SiteResponse>;
 }
 
 export interface SiteToolDependencies {
@@ -49,16 +61,64 @@ export function resolveSiteToolDependencies(dependencies: SiteToolDependencies =
   };
 }
 
-export function mapSiteServiceError(error: unknown): McpExecutionError {
+export const SINGLE_FILE_EXTENSIONS = ['html', 'md', 'markdown', 'txt', 'json', 'csv', 'xml', 'svg'] as const;
+
+export function unsupportedSiteFile(): McpExecutionError {
+  return new McpExecutionError(
+    'invalid_body',
+    `Only a single text file is supported (${SINGLE_FILE_EXTENSIONS.map((ext) => `.${ext}`).join(
+      ', '
+    )}). ZIP archives and binary files are not supported.`,
+    {
+      details: {
+        issues: [{ path: '/filename', message: 'ZIP archives and binary files are not supported.' }],
+      },
+    }
+  );
+}
+
+/** Text-only on purpose: tool arguments are JSON strings, so binary bytes and archives cannot round-trip. */
+export function singleFileUpload(content: string, filename: string): { fileName: string; content: Buffer } {
+  const extension = filename.includes('.') ? filename.slice(filename.lastIndexOf('.') + 1).toLowerCase() : '';
+  if (!(SINGLE_FILE_EXTENSIONS as readonly string[]).includes(extension)) {
+    throw unsupportedSiteFile();
+  }
+  return { fileName: filename, content: Buffer.from(content, 'utf8') };
+}
+
+export function mapSiteServiceError(error: unknown, invalidInputPath = '/'): McpExecutionError {
   if (error instanceof McpExecutionError) return error;
-  if (error instanceof SitesServiceError) {
-    const statusCode = Number(error.statusCode);
-    if (statusCode === 404 || statusCode === 403) {
-      return new McpExecutionError('site_not_found', 'That hosted site was not found.');
-    }
-    if (statusCode === 502 || statusCode === 503) {
-      return new McpExecutionError('upstream_unavailable', 'Site storage is temporarily unavailable.');
-    }
+  const code = isAppError(error) ? error.code : undefined;
+  if (code === 'site_changed') {
+    return new McpExecutionError(
+      'site_changed',
+      'The site changed since you last read it. Call get_site for the current revisions, then retry.'
+    );
+  }
+  if (code === 'site_access_denied') {
+    return new McpExecutionError('forbidden_role', 'Only the owner of this site can change it.');
+  }
+  if (code === 'private_sites_unavailable') {
+    return new McpExecutionError(
+      'toolset_disabled',
+      'Private sites are not available on this installation. Ask an administrator, or publish with visibility public.'
+    );
+  }
+  if (code === 'insufficient_scope') {
+    return new McpExecutionError('forbidden_role', 'This credential is not allowed to perform this site action.');
+  }
+  const statusCode = error instanceof SitesServiceError ? Number(error.statusCode) : undefined;
+  if (statusCode === 400) {
+    const message = (error as SitesServiceError).message.slice(0, 500) || 'The request is invalid.';
+    return new McpExecutionError('invalid_body', message, {
+      details: { issues: [{ path: invalidInputPath, message }] },
+    });
+  }
+  if (statusCode === 404 || statusCode === 403) {
+    return new McpExecutionError('site_not_found', 'That hosted site was not found.');
+  }
+  if (statusCode === 502 || statusCode === 503) {
+    return new McpExecutionError('upstream_unavailable', 'Site storage is temporarily unavailable.');
   }
   return new McpExecutionError(
     'internal_error',
@@ -110,5 +170,18 @@ export function siteSummary(site: SiteResponse): McpJsonObject {
     sizeBytes: site.sizeBytes,
     ...(createdBy ? { createdBy } : {}),
     ...(updatedBy ? { updatedBy } : {}),
+  };
+}
+
+export function siteChangeSummary(site: SiteResponse): McpJsonObject {
+  const { siteId, url, status, visibility, accessRevision, contentRevision, expiresAt } = siteSummary(site);
+  return {
+    siteId,
+    url,
+    status,
+    visibility,
+    accessRevision,
+    contentRevision,
+    ...(expiresAt ? { expiresAt } : {}),
   };
 }
