@@ -1104,8 +1104,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
               required: ['maxUploadBytes', 'maxExtractedBytes', 'maxFiles', 'allowedExtensions'],
             },
+            deletedRetentionDays: {
+              type: 'integer',
+              minimum: 0,
+              description: 'Days a deleted site stays restorable before its content is purged.',
+            },
           },
-          required: ['enabled', 'canCreate', 'defaultVisibility', 'allowedVisibilities', 'upload'],
+          required: [
+            'enabled',
+            'canCreate',
+            'defaultVisibility',
+            'allowedVisibilities',
+            'upload',
+            'deletedRetentionDays',
+          ],
         },
         SitesCapabilitiesSuccessResponse: {
           allOf: [

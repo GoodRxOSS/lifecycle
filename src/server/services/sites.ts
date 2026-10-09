@@ -279,6 +279,7 @@ export default class SitesService extends Service {
     return {
       enabled: config.enabled,
       upload: config.upload,
+      deletedRetentionDays: config.cleanup.deletedRetentionDays,
       defaultVisibility: machine ? ('public' as const) : ('private' as const),
       allowedVisibilities:
         !config.enabled || !hasSitesScope(principal, 'write')

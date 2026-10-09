@@ -1360,6 +1360,10 @@ describe('SitesService behavior', () => {
         })
       );
     });
+    it('advertises how long deleted sites stay restorable', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 14 } });
+      await expect(service.getCapabilities(principal)).resolves.toMatchObject({ deletedRetentionDays: 14 });
+    });
     it('advertises no uploads while the existing Sites setting is disabled', async () => {
       mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
       await expect(service.getCapabilities(principal)).resolves.toMatchObject({
