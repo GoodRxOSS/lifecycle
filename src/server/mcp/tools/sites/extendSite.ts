@@ -19,7 +19,7 @@ import { extendSiteInputSchema, extendSiteOutputSchema } from './schemas';
 import { mapSiteServiceError, siteChangeSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  "Pushes out a hosted site's expiry by the configured extension period. Each call extends again; pass expectedAccessRevision from get_site to make a retry safe. Report the new expiresAt.";
+  "Pushes out a site's expiry by the configured period. Each call extends again; pass expectedAccessRevision from get_site to make retries safe.";
 
 export function createExtendSiteToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {

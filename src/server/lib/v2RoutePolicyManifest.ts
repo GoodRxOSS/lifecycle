@@ -277,6 +277,7 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'DELETE', route: '/api/v2/sites/{siteId}', policy: 'principal', scope: 'sites:write' },
   { method: 'GET', route: '/api/v2/sites/{siteId}', policy: 'principal', scope: 'sites:read' },
   { method: 'PUT', route: '/api/v2/sites/{siteId}/content', policy: 'principal', scope: 'sites:write' },
+  { method: 'POST', route: '/api/v2/sites/{siteId}/restore', policy: 'principal', scope: 'sites:write' },
   { method: 'POST', route: '/api/v2/sites/{siteId}/extend', policy: 'principal', scope: 'sites:write' },
   { method: 'POST', route: '/api/v2/telemetry/events', policy: 'session' },
   { method: 'GET', route: '/api/v2/telemetry/stats', policy: 'session' },

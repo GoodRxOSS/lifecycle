@@ -19,7 +19,7 @@ import { setSiteVisibilityInputSchema, setSiteVisibilityOutputSchema } from './s
 import { mapSiteServiceError, siteChangeSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Makes a hosted site you own private (only you can open it) or public (anyone with the link). Pass accessRevision from get_site as expectedAccessRevision. If acting for someone, get approval before making a site public.';
+  'Makes a site you own private (only you can open it) or public (anyone with the link). Pass accessRevision from get_site as expectedAccessRevision. If acting for someone, get approval before making it public.';
 
 export function createSetSiteVisibilityToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {

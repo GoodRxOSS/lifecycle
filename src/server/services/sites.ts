@@ -75,7 +75,7 @@ export type CreateOrReplaceSiteInput = {
 
 export type ListSitesFilters = {
   user?: string;
-  view?: 'mine' | 'public' | 'all';
+  view?: 'mine' | 'public' | 'all' | 'deleted';
   q?: string;
   page?: number;
   limit?: number;
@@ -97,10 +97,18 @@ export type SiteResponse = {
   accessRevision: number;
   contentRevision: number;
   currentRole: 'owner' | null;
-  permissions: { canView: boolean; canEdit: boolean; canDelete: boolean; canChangeVisibility: boolean };
+  permissions: {
+    canView: boolean;
+    canEdit: boolean;
+    canDelete: boolean;
+    canChangeVisibility: boolean;
+    canRestore: boolean;
+  };
   createdAt: string | null;
   updatedAt: string | null;
   expiresAt: string | null;
+  deletedAt: string | null;
+  restorableUntil: string | null;
   fileCount: number;
   sizeBytes: number;
   createdBy: string | null;
@@ -145,6 +153,8 @@ export default class SitesService extends Service {
       site.status === 'active' && expiresAt !== null && Number.isFinite(expiresAt) && expiresAt <= Date.now()
         ? 'expired'
         : site.status;
+    const restorableUntil =
+      site.status === 'deleted' && site.deletedAt ? this.restoreDeadline(site.deletedAt, config) : null;
     return {
       id: site.siteId,
       name: site.name,
@@ -160,16 +170,23 @@ export default class SitesService extends Service {
         canEdit: writable && status === 'active',
         canDelete: writable && !site.deletedAt && status !== 'deleted',
         canChangeVisibility: writable && status === 'active' && site.ownerKind === 'user',
+        canRestore: writable && restorableUntil !== null && new Date(restorableUntil).getTime() > Date.now(),
       },
       status,
       createdAt: site.createdAt || null,
       updatedAt: site.updatedAt || null,
       expiresAt: site.expiresAt || null,
+      deletedAt: site.deletedAt || null,
+      restorableUntil,
       fileCount: Number(site.fileCount || 0),
       sizeBytes: Number(site.sizeBytes || 0),
       createdBy: owner || site.visibility === 'public' ? site.createdBy || null : null,
       updatedBy: owner ? site.updatedBy || null : null,
     };
+  }
+
+  private restoreDeadline(deletedAt: string | Date, config: ResolvedSitesConfig): string {
+    return new Date(new Date(deletedAt).getTime() + config.cleanup.deletedRetentionDays * DAY_MS).toISOString();
   }
 
   private defaultSiteName(siteId: string, config: ResolvedSitesConfig): string {
@@ -400,17 +417,31 @@ export default class SitesService extends Service {
     this.assertEnabled(config);
     const { page, limit } = this.normalizePagination(filters);
     const view = filters.view ?? 'all';
-    if (!['all', 'mine', 'public'].includes(view) || filters.user) {
-      throw new SitesServiceError('Use view=mine, public, or all; email filters are not supported.', 400);
+    if (!['all', 'mine', 'public', 'deleted'].includes(view) || filters.user) {
+      throw new SitesServiceError('Use view=mine, public, all, or deleted; email filters are not supported.', 400);
     }
     const owner =
       principal.kind === 'service_key'
         ? { ownerKind: 'service_key', creatorTokenId: principal.tokenId }
         : { ownerKind: 'user', ownerIssuer: principal.issuer, ownerSubject: principal.userId };
-    const query = this.db.models.Site.query().whereNull('deletedAt');
-    if (view === 'mine') query.where(owner);
-    else if (view === 'public') query.where('visibility', 'public');
-    else query.where((q) => q.where('visibility', 'public').orWhere(owner));
+    const query = this.db.models.Site.query();
+    if (view === 'deleted') {
+      // A purged active version leaves nothing to restore.
+      query
+        .where(owner)
+        .where('status', 'deleted')
+        .where('deletedAt', '>', new Date(Date.now() - config.cleanup.deletedRetentionDays * DAY_MS).toISOString())
+        .whereExists(
+          this.db.models.SiteVersion.query()
+            .whereColumn('site_versions.versionId', 'sites.activeVersionId')
+            .whereNull('site_versions.deletedAt')
+        );
+    } else {
+      query.whereNull('deletedAt');
+      if (view === 'mine') query.where(owner);
+      else if (view === 'public') query.where('visibility', 'public');
+      else query.where((q) => q.where('visibility', 'public').orWhere(owner));
+    }
     const search = filters.q?.trim();
     if (search) {
       if (search.length > 200) throw new SitesServiceError('Search is too long.', 400);
@@ -421,7 +452,7 @@ export default class SitesService extends Service {
       ]);
     }
     const result = await query
-      .orderBy('createdAt', 'desc')
+      .orderBy(view === 'deleted' ? 'deletedAt' : 'createdAt', 'desc')
       .orderBy('siteId', 'asc')
       .page(page - 1, limit);
     return {
@@ -573,12 +604,36 @@ export default class SitesService extends Service {
         accessRevision: site.accessRevision + 1,
       }) as unknown as Promise<Site>;
     });
-    // Authorization is removed before storage. Failed cleanup is retried by the job.
-    const versions = (await this.db.models.SiteVersion.query()
-      .where({ siteId })
-      .whereNull('deletedAt')) as SiteVersion[];
-    await this.cleanupSupersededVersions(config, siteId, versions);
     return this.serialize(deleted, config, principal);
+  }
+
+  async restoreSite(siteId: string, principal: Principal, expectedAccessRevision?: number): Promise<SiteResponse> {
+    await assertSitesPrincipal(principal, 'write');
+    const config = await this.getConfig();
+    this.assertEnabled(config);
+    const notRestorable = () => new SitesServiceError('Site not found or no longer restorable.', 404);
+    return this.db.models.Site.transact(async (trx) => {
+      // Locks against the cleanup job, whose purge only claims rows still in status deleted.
+      const site = (await this.db.models.Site.query(trx).findOne({ siteId }).forUpdate()) as Site | undefined;
+      if (!site || site.status !== 'deleted' || !site.deletedAt || !site.activeVersionId) throw notRestorable();
+      await assertSitesPrincipal(principal, 'write', trx);
+      assertSiteOwner(site, principal);
+      this.checkRevision(site, expectedAccessRevision);
+      if (new Date(this.restoreDeadline(site.deletedAt, config)).getTime() <= Date.now()) throw notRestorable();
+      const activeVersion = (await this.db.models.SiteVersion.query(trx)
+        .findOne({ siteId, versionId: site.activeVersionId })
+        .whereNull('deletedAt')) as SiteVersion | undefined;
+      if (!activeVersion) throw notRestorable();
+      const expired = site.expiresAt && new Date(site.expiresAt).getTime() <= Date.now();
+      await this.audit(trx, 'restored', siteId, principal, { accessRevision: site.accessRevision + 1 });
+      const restored = await site.$query(trx).patchAndFetch({
+        status: 'active',
+        deletedAt: null,
+        accessRevision: site.accessRevision + 1,
+        ...(expired && config.ttl.enabled ? { expiresAt: this.expirationForNewSite(config) } : {}),
+      } as unknown as Partial<Site>);
+      return this.serialize(restored as Site, config, principal);
+    });
   }
 
   /** Anonymous stable-link resolver exposes only a currently public content URL. */
@@ -674,9 +729,9 @@ export default class SitesService extends Service {
     return Boolean(host && host.endsWith(`.${config.domain.toLowerCase()}`));
   }
 
-  async cleanupExpiredSites(): Promise<{ expired: number; cleaned: number; errors: number }> {
+  async cleanupExpiredSites(): Promise<{ expired: number; purged: number; cleaned: number; errors: number }> {
     const config = await this.getConfig();
-    if (!config.enabled || !config.cleanup.enabled) return { expired: 0, cleaned: 0, errors: 0 };
+    if (!config.enabled || !config.cleanup.enabled) return { expired: 0, purged: 0, cleaned: 0, errors: 0 };
     const now = new Date().toISOString();
     // Atomic predicate cannot expire an extension that won the row lock first.
     const expired = await this.db.models.Site.query()
@@ -685,11 +740,17 @@ export default class SitesService extends Service {
       .whereNotNull('expiresAt')
       .where('expiresAt', '<=', now)
       .patch({ status: 'expired', deletedAt: now });
+    const purgeBefore = new Date(Date.now() - config.cleanup.deletedRetentionDays * DAY_MS).toISOString();
+    // Conditional on status, so a site a concurrent restore just reactivated is never purged.
+    const purged = await this.db.models.Site.query()
+      .where('status', 'deleted')
+      .where('deletedAt', '<=', purgeBefore)
+      .patch({ status: 'purged' });
     const pending = (await this.db.models.SiteVersion.query()
       .whereNull('site_versions.deletedAt')
       .join('sites', 'sites.siteId', 'site_versions.siteId')
       .whereRaw('(sites.status IN (?, ?) OR sites."activeVersionId" IS DISTINCT FROM site_versions."versionId")', [
-        'deleted',
+        'purged',
         'expired',
       ])
       .select('site_versions.*')
@@ -706,13 +767,13 @@ export default class SitesService extends Service {
         getLogger().warn({ error, siteId: version.siteId }, 'Sites: terminal storage cleanup deferred');
       }
     }
-    return { expired, cleaned, errors };
+    return { expired, purged, cleaned, errors };
   }
 
   processSitesCleanupQueue = async (_job: Job) => {
     const result = await this.cleanupExpiredSites();
     getLogger().info(
-      `Sites: cleanup complete expired=${result.expired} cleaned=${result.cleaned} errors=${result.errors}`
+      `Sites: cleanup complete expired=${result.expired} purged=${result.purged} cleaned=${result.cleaned} errors=${result.errors}`
     );
     return result;
   };

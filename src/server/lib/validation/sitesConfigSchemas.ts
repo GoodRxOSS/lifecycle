@@ -73,6 +73,7 @@ export const sitesConfigSchema = {
       properties: {
         enabled: { type: 'boolean' },
         intervalMinutes: { type: 'integer', minimum: 1 },
+        deletedRetentionDays: { type: 'integer', minimum: 0, maximum: 3650 },
       },
     },
   },

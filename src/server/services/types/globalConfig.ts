@@ -229,6 +229,7 @@ export type SitesConfig = {
   cleanup?: {
     enabled?: boolean;
     intervalMinutes?: number;
+    deletedRetentionDays?: number;
   };
 };
 

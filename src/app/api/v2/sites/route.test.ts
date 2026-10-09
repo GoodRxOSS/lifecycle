@@ -11,6 +11,7 @@ const mockGetSite = jest.fn();
 const mockDeleteSite = jest.fn();
 const mockReplaceSiteContent = jest.fn();
 const mockExtendSite = jest.fn();
+const mockRestoreSite = jest.fn();
 const mockGetCapabilities = jest.fn();
 const mockSetVisibility = jest.fn();
 const mockLogger = { error: jest.fn(), info: jest.fn() };
@@ -53,6 +54,7 @@ jest.mock('server/services/sites', () => {
       deleteSite: (...args: unknown[]) => mockDeleteSite(...args),
       replaceSiteContent: (...args: unknown[]) => mockReplaceSiteContent(...args),
       extendSite: (...args: unknown[]) => mockExtendSite(...args),
+      restoreSite: (...args: unknown[]) => mockRestoreSite(...args),
     })),
   };
 });
@@ -62,6 +64,7 @@ import { GET as listSites, POST as createSite } from './route';
 import { DELETE as deleteSite, GET as getSite } from './[siteId]/route';
 import { PUT as replaceContent } from './[siteId]/content/route';
 import { POST as extendSite } from './[siteId]/extend/route';
+import { POST as restoreSite } from './[siteId]/restore/route';
 import { GET as capabilities } from './capabilities/route';
 import { PATCH as visibility } from './[siteId]/access/route';
 
@@ -181,6 +184,7 @@ describe('hosted sites API routes', () => {
     ['delete', deleteSite, 'sites:write', context()],
     ['replace content', replaceContent, 'sites:write', context()],
     ['extend', extendSite, 'sites:write', context()],
+    ['restore', restoreSite, 'sites:write', context()],
   ])('denies insufficient scope before the %s operation reaches the service', async (_label, handler, scope, ctx) => {
     mockResolvePrincipal.mockResolvedValue(serviceKeyPrincipal);
 
@@ -200,6 +204,7 @@ describe('hosted sites API routes', () => {
     expect(mockDeleteSite).not.toHaveBeenCalled();
     expect(mockReplaceSiteContent).not.toHaveBeenCalled();
     expect(mockExtendSite).not.toHaveBeenCalled();
+    expect(mockRestoreSite).not.toHaveBeenCalled();
   });
 
   it('lists filtered sites with pagination metadata', async () => {
@@ -212,6 +217,13 @@ describe('hosted sites API routes', () => {
     expect(mockListSites).toHaveBeenCalledWith({ view: 'mine', page: 2, limit: 10 }, sessionPrincipal);
     expect(body.data).toEqual({ sites: [site] });
     expect(body.metadata).toEqual({ pagination: { page: 2, limit: 10, total: 21, totalPages: 3 } });
+  });
+
+  it('forwards the deleted view', async () => {
+    const response = await listSites(request('http://localhost/api/v2/sites?view=deleted'));
+
+    expect(response.status).toBe(200);
+    expect(mockListSites).toHaveBeenCalledWith({ view: 'deleted' }, sessionPrincipal);
   });
 
   it('omits blank and invalid list filters instead of forwarding sentinel values', async () => {
@@ -351,6 +363,31 @@ describe('hosted sites API routes', () => {
       expect.objectContaining({ id: site.id, expiresAt: expect.any(String) })
     );
     expect(mockExtendSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal, undefined);
+  });
+
+  it('restores a deleted site with the access revision from the query string', async () => {
+    mockRestoreSite.mockResolvedValue({ ...site, status: 'active', accessRevision: 3 });
+
+    const response = await restoreSite(
+      request('http://localhost/api/v2/sites/docs-abc123/restore?expectedAccessRevision=2', { method: 'POST' }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).data.site).toEqual(expect.objectContaining({ id: site.id, status: 'active' }));
+    expect(mockRestoreSite).toHaveBeenCalledWith('docs-abc123', sessionPrincipal, 2);
+  });
+
+  it('maps a restore of a site past its retention window to not found', async () => {
+    mockRestoreSite.mockRejectedValue(new SitesServiceError('Site not found or no longer restorable.', 404));
+
+    const response = await restoreSite(
+      request('http://localhost/api/v2/sites/docs-abc123/restore', { method: 'POST' }),
+      context()
+    );
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.message).toBe('Site not found or no longer restorable.');
   });
 
   it('maps an extension failure when TTL is disabled', async () => {

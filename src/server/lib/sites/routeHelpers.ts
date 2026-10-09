@@ -105,14 +105,15 @@ export async function readUploadFile(
 
 export function readSitesListFilters(searchParams: URLSearchParams): ListSitesFilters {
   const view = searchParams.get('view') || (searchParams.get('user')?.trim() ? 'mine' : undefined);
-  if (view && !['mine', 'public', 'all'].includes(view)) throw new SitesServiceError('Invalid Sites view.', 400);
+  if (view && !['mine', 'public', 'all', 'deleted'].includes(view))
+    throw new SitesServiceError('Invalid Sites view.', 400);
   const q = searchParams.get('q')?.trim();
   if (q && q.length > 200) throw new SitesServiceError('Search is too long.', 400);
   const page = readSiteRevision(searchParams.get('page'));
   const limit = readSiteRevision(searchParams.get('limit'));
   if (limit && limit > 100) throw new SitesServiceError('limit must be at most 100.', 400);
   return {
-    ...(view ? { view: view as 'mine' | 'public' | 'all' } : {}),
+    ...(view ? { view: view as 'mine' | 'public' | 'all' | 'deleted' } : {}),
     ...(q ? { q } : {}),
     ...(page === undefined ? {} : { page }),
     ...(limit === undefined ? {} : { limit }),

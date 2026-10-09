@@ -33,10 +33,12 @@ const SITE: SiteResponse = {
   accessRevision: 1,
   contentRevision: 1,
   currentRole: 'owner',
-  permissions: { canView: true, canEdit: true, canDelete: true, canChangeVisibility: true },
+  permissions: { canView: true, canEdit: true, canDelete: true, canChangeVisibility: true, canRestore: false },
   createdAt: '2026-07-01T00:00:00.000Z',
   updatedAt: '2026-07-02T00:00:00.000Z',
   expiresAt: '2026-08-01T00:00:00.000Z',
+  deletedAt: null,
+  restorableUntil: null,
   fileCount: 4,
   sizeBytes: 2048,
   createdBy: 'user@example.com',
@@ -78,6 +80,7 @@ function harness(service: Partial<SiteToolService>, policyOverrides: Partial<Mcp
         extendSite: () => Promise.reject(new Error('extendSite not stubbed')),
         setVisibility: () => Promise.reject(new Error('setVisibility not stubbed')),
         deleteSite: () => Promise.reject(new Error('deleteSite not stubbed')),
+        restoreSite: () => Promise.reject(new Error('restoreSite not stubbed')),
         ...service,
       },
       nowSeconds: () => 1_000,
@@ -379,5 +382,60 @@ describe('delete_site', () => {
     const { error } = await call('delete_site', { siteId: 'site_abc123' });
     expect(error).toMatchObject({ code: 'invalid_body' });
     expect(deleteSite).not.toHaveBeenCalled();
+  });
+});
+
+describe('soft delete and restore', () => {
+  const DELETED: SiteResponse = {
+    ...SITE,
+    status: 'deleted',
+    accessRevision: 2,
+    deletedAt: '2026-07-10T00:00:00.000Z',
+    restorableUntil: '2026-08-09T00:00:00.000Z',
+    permissions: { ...SITE.permissions, canEdit: false, canRestore: true },
+  };
+
+  it('reports when a deleted site stops being restorable', async () => {
+    const { call } = harness({ deleteSite: jest.fn().mockResolvedValue(DELETED) });
+    const { output } = await call('delete_site', { siteId: 'site_abc123', expectedAccessRevision: 1 });
+    expect(output!.site).toMatchObject({ status: 'deleted', restorableUntil: '2026-08-09T00:00:00.000Z' });
+  });
+
+  it('lists deleted sites with their restore deadline and permission', async () => {
+    const listSites = jest
+      .fn()
+      .mockResolvedValue({ sites: [DELETED], pagination: { current: 1, total: 1, items: 1, limit: 25 } });
+    const { call } = harness({ listSites });
+    const { output } = await call('list_sites', { deleted: true });
+    expect(listSites.mock.calls[0][0]).toMatchObject({ view: 'deleted' });
+    expect((output!.sites as McpJsonObject[])[0]).toMatchObject({
+      siteId: 'site_abc123',
+      restorableUntil: '2026-08-09T00:00:00.000Z',
+      permissions: expect.objectContaining({ canRestore: true }),
+    });
+  });
+
+  it('restores with the required access revision', async () => {
+    const restoreSite = jest.fn().mockResolvedValue({ ...SITE, accessRevision: 3 });
+    const { call } = harness({ restoreSite });
+    const { output } = await call('restore_site', { siteId: 'site_abc123', expectedAccessRevision: 2 });
+    expect(output!.site).toMatchObject({ siteId: 'site_abc123', status: 'active', accessRevision: 3 });
+    expect(restoreSite).toHaveBeenCalledWith('site_abc123', PRINCIPAL, 2);
+  });
+
+  it('requires expectedAccessRevision to restore', async () => {
+    const restoreSite = jest.fn();
+    const { call } = harness({ restoreSite });
+    const { error } = await call('restore_site', { siteId: 'site_abc123' });
+    expect(error).toMatchObject({ code: 'invalid_body' });
+    expect(restoreSite).not.toHaveBeenCalled();
+  });
+
+  it('reports a site past its restore window as not found', async () => {
+    const { call } = harness({
+      restoreSite: () => Promise.reject(new SitesServiceError('Site not found or no longer restorable.', 404)),
+    });
+    const { error } = await call('restore_site', { siteId: 'site_abc123', expectedAccessRevision: 2 });
+    expect(error).toMatchObject({ code: 'site_not_found' });
   });
 });

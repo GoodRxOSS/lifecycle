@@ -41,13 +41,15 @@ const siteSummarySchema = closedObjectSchema(
         canEdit: { type: 'boolean' },
         canDelete: { type: 'boolean' },
         canChangeVisibility: { type: 'boolean' },
+        canRestore: { type: 'boolean' },
       },
-      ['canView', 'canEdit', 'canDelete', 'canChangeVisibility']
+      ['canView', 'canEdit', 'canDelete', 'canChangeVisibility', 'canRestore']
     ),
     status: { type: 'string', minLength: 1, maxLength: 50 },
     createdAt: { type: 'string', format: 'date-time' },
     updatedAt: { type: 'string', format: 'date-time' },
     expiresAt: { type: 'string', format: 'date-time' },
+    restorableUntil: { type: 'string', format: 'date-time' },
     fileCount: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
     sizeBytes: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
     createdBy: { type: 'string', minLength: 1, maxLength: 512 },
@@ -73,10 +75,8 @@ const siteSummarySchema = closedObjectSchema(
 );
 
 export const listSitesInputSchema = closedObjectSchema({
-  mineOnly: {
-    type: 'boolean',
-    description: 'Return only sites owned by the authenticated Lifecycle principal.',
-  },
+  mineOnly: { type: 'boolean' },
+  deleted: { type: 'boolean' },
   cursor: { type: 'string', maxLength: 500 },
   limit: { type: 'integer', minimum: 1, maximum: 100, default: 25 },
 });
@@ -94,7 +94,7 @@ export const getSiteInputSchema = closedObjectSchema({ siteId: siteIdSchema }, [
 export const getSiteOutputSchema = successObjectSchema({ site: siteSummarySchema }, ['site']);
 
 const visibilitySchema = { type: 'string', enum: ['private', 'public'] } as const;
-const revisionSchema = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } as const;
+const revisionSchema = { type: 'integer', minimum: 1 } as const;
 
 const contentSchema = {
   type: 'string',
@@ -114,13 +114,14 @@ const filenameSchema = {
 
 const siteChangeSchema = closedObjectSchema(
   {
-    siteId: { type: 'string', minLength: 1, maxLength: 100 },
-    url: { type: 'string', format: 'uri', maxLength: 2048 },
-    status: { type: 'string', maxLength: 50 },
-    visibility: visibilitySchema,
-    accessRevision: revisionSchema,
-    contentRevision: revisionSchema,
-    expiresAt: { type: 'string', format: 'date-time' },
+    siteId: { type: 'string' },
+    url: { type: 'string' },
+    status: { type: 'string' },
+    visibility: { type: 'string' },
+    accessRevision: { type: 'integer' },
+    contentRevision: { type: 'integer' },
+    expiresAt: { type: 'string' },
+    restorableUntil: { type: 'string' },
   },
   ['siteId', 'url', 'status', 'visibility', 'accessRevision', 'contentRevision']
 );
@@ -181,3 +182,7 @@ export const deleteSiteInputSchema = closedObjectSchema(
 );
 
 export const deleteSiteOutputSchema = siteResultSchema;
+
+export const restoreSiteInputSchema = deleteSiteInputSchema;
+
+export const restoreSiteOutputSchema = siteResultSchema;

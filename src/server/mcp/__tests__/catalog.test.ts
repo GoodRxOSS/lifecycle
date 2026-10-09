@@ -42,6 +42,7 @@ const ALL_TOOLS = [
   'set_site_visibility',
   'extend_site',
   'delete_site',
+  'restore_site',
 ];
 
 const CHANGE_TOOLS = [
@@ -55,6 +56,7 @@ const CHANGE_TOOLS = [
   'set_site_visibility',
   'extend_site',
   'delete_site',
+  'restore_site',
 ];
 
 const SITE_TOOLS = [
@@ -65,6 +67,7 @@ const SITE_TOOLS = [
   'set_site_visibility',
   'extend_site',
   'delete_site',
+  'restore_site',
 ];
 
 it('compiles the production catalog exactly as ws-server boots it', () => {

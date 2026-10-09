@@ -86,6 +86,7 @@ export type ResolvedSitesConfig = {
   cleanup: {
     enabled: boolean;
     intervalMinutes: number;
+    deletedRetentionDays: number;
   };
 };
 
@@ -176,6 +177,7 @@ export function resolveSitesConfig(config?: SitesConfig | null): ResolvedSitesCo
     cleanup: {
       enabled: config?.cleanup?.enabled ?? true,
       intervalMinutes: config?.cleanup?.intervalMinutes ?? 15,
+      deletedRetentionDays: config?.cleanup?.deletedRetentionDays ?? 30,
     },
   };
 }
