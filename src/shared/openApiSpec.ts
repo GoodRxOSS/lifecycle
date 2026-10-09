@@ -279,13 +279,21 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 canEdit: { type: 'boolean' },
                 canDelete: { type: 'boolean' },
                 canChangeVisibility: { type: 'boolean' },
+                canRestore: { type: 'boolean' },
               },
-              required: ['canView', 'canEdit', 'canDelete', 'canChangeVisibility'],
+              required: ['canView', 'canEdit', 'canDelete', 'canChangeVisibility', 'canRestore'],
             },
-            status: { type: 'string', enum: ['active', 'deleted', 'expired'] },
+            status: { type: 'string', enum: ['active', 'deleted', 'expired', 'purged'] },
             createdAt: { type: 'string', format: 'date-time', nullable: true },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
             expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            deletedAt: { type: 'string', format: 'date-time', nullable: true },
+            restorableUntil: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: 'Last moment a deleted site can be restored; null unless the site is deleted.',
+            },
             fileCount: { type: 'integer', minimum: 0 },
             sizeBytes: { type: 'integer', format: 'int64', minimum: 0 },
             createdBy: {
@@ -314,6 +322,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'createdAt',
             'updatedAt',
             'expiresAt',
+            'deletedAt',
+            'restorableUntil',
             'fileCount',
             'sizeBytes',
             'createdBy',
@@ -403,6 +413,13 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           properties: {
             enabled: { type: 'boolean' },
             intervalMinutes: { type: 'integer', minimum: 1 },
+            deletedRetentionDays: {
+              type: 'integer',
+              minimum: 0,
+              maximum: 3650,
+              description:
+                'Days a deleted site stays restorable before its content is purged. 0 purges on the next cleanup run.',
+            },
           },
           required: ['enabled', 'intervalMinutes'],
           additionalProperties: false,
@@ -1087,8 +1104,20 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               },
               required: ['maxUploadBytes', 'maxExtractedBytes', 'maxFiles', 'allowedExtensions'],
             },
+            deletedRetentionDays: {
+              type: 'integer',
+              minimum: 0,
+              description: 'Days a deleted site stays restorable before its content is purged.',
+            },
           },
-          required: ['enabled', 'canCreate', 'defaultVisibility', 'allowedVisibilities', 'upload'],
+          required: [
+            'enabled',
+            'canCreate',
+            'defaultVisibility',
+            'allowedVisibilities',
+            'upload',
+            'deletedRetentionDays',
+          ],
         },
         SitesCapabilitiesSuccessResponse: {
           allOf: [

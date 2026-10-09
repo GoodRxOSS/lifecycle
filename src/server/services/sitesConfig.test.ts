@@ -68,7 +68,7 @@ describe('SitesConfigService normalization', () => {
         endpoint: ' https://objects.example.test ',
         forcePathStyle: false,
       },
-      cleanup: { enabled: false, intervalMinutes: 60 },
+      cleanup: { enabled: false, intervalMinutes: 60, deletedRetentionDays: 0 },
     });
 
     expect(result).toEqual({
@@ -91,7 +91,7 @@ describe('SitesConfigService normalization', () => {
         endpoint: 'https://objects.example.test',
         forcePathStyle: false,
       },
-      cleanup: { enabled: false, intervalMinutes: 60 },
+      cleanup: { enabled: false, intervalMinutes: 60, deletedRetentionDays: 0 },
     });
     expect(mockGetConfig).toHaveBeenCalledWith('sites');
   });
@@ -176,7 +176,7 @@ describe('SitesConfigService normalization', () => {
         maxExtractedBytes: 40,
         maxFiles: 2,
       });
-      expect(result.cleanup).toEqual({ enabled: true, intervalMinutes: 60 });
+      expect(result.cleanup).toEqual({ enabled: true, intervalMinutes: 60, deletedRetentionDays: 30 });
     });
 
     it('falls back to defaults for non-positive / non-integer values', async () => {
@@ -191,7 +191,7 @@ describe('SitesConfigService normalization', () => {
       const result = await normalizeViaGetConfig({
         ttl: { defaultDays: 1.5, extensionDays: 0 },
         upload: { ...DEFAULT_SITES_CONFIG.upload!, maxExtractedBytes: Number.NaN },
-        cleanup: { intervalMinutes: -1 },
+        cleanup: { intervalMinutes: -1, deletedRetentionDays: 4000 },
       });
 
       expect(result.ttl).toEqual(DEFAULT_SITES_CONFIG.ttl);

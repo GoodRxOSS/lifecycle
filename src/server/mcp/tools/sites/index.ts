@@ -20,6 +20,7 @@ import { createDeleteSiteToolDefinition } from './deleteSite';
 import { createExtendSiteToolDefinition } from './extendSite';
 import { createGetSiteToolDefinition } from './getSite';
 import { createListSitesToolDefinition } from './listSites';
+import { createRestoreSiteToolDefinition } from './restoreSite';
 import { createSetSiteVisibilityToolDefinition } from './setSiteVisibility';
 import { createUpdateSiteContentToolDefinition } from './updateSiteContent';
 import { resolveSiteToolDependencies, type SiteToolDependencies } from './shared';
@@ -36,5 +37,6 @@ export function createSiteToolDefinitions(dependencies: SiteToolDependencies = {
     createSetSiteVisibilityToolDefinition(resolved),
     createExtendSiteToolDefinition(resolved),
     createDeleteSiteToolDefinition(resolved),
+    createRestoreSiteToolDefinition(resolved),
   ];
 }

@@ -74,6 +74,7 @@ export const DEFAULT_SITES_CONFIG: SitesConfig = {
   cleanup: {
     enabled: true,
     intervalMinutes: 15,
+    deletedRetentionDays: 30,
   },
 };
 
@@ -85,6 +86,11 @@ function normalizeOptionalString(value: string | null | undefined): string | nul
 function normalizePositiveInteger(value: number | string | undefined, fallback: number): number {
   const parsed = typeof value === 'string' ? Number(value) : value;
   return Number.isInteger(parsed) && Number(parsed) > 0 ? Number(parsed) : fallback;
+}
+
+function normalizeRetentionDays(value: number | string | undefined, fallback: number): number {
+  const parsed = typeof value === 'string' ? Number(value) : value;
+  return Number.isInteger(parsed) && Number(parsed) >= 0 && Number(parsed) <= 3650 ? Number(parsed) : fallback;
 }
 
 function normalizePort(value: number | string | null | undefined): number | null {
@@ -178,6 +184,10 @@ function normalizeSitesConfig(config: SitesConfig | undefined): SitesConfig {
       intervalMinutes: normalizePositiveInteger(
         merged.cleanup?.intervalMinutes,
         DEFAULT_SITES_CONFIG.cleanup?.intervalMinutes || 15
+      ),
+      deletedRetentionDays: normalizeRetentionDays(
+        merged.cleanup?.deletedRetentionDays,
+        DEFAULT_SITES_CONFIG.cleanup?.deletedRetentionDays ?? 30
       ),
     },
   };

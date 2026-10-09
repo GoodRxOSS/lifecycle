@@ -51,7 +51,7 @@ function config(overrides: Partial<ResolvedSitesConfig['storage']> = {}): Resolv
     hostPrefix: 'site',
     ttl: { enabled: true, defaultDays: 7, extensionDays: 7 },
     upload: { maxUploadBytes: 1024, maxExtractedBytes: 2048, maxFiles: 10, allowedExtensions: ['html'] },
-    cleanup: { enabled: true, intervalMinutes: 15 },
+    cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 30 },
     storage: {
       backend: 'minio',
       bucket: 'sites-bucket',

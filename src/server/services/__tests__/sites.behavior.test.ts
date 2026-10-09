@@ -328,10 +328,26 @@ class SiteQuery {
     }
 
     if (expectedValue !== undefined) {
-      this.filters.push((row) => operationOrValue === '<=' && String(row[scopeOrField]) <= String(expectedValue));
+      this.filters.push((row) => {
+        const value = row[scopeOrField];
+        if (value == null) return false;
+        if (operationOrValue === '<=') return String(value) <= String(expectedValue);
+        if (operationOrValue === '>') return String(value) > String(expectedValue);
+        return false;
+      });
     } else {
       this.filters.push((row) => row[scopeOrField] === operationOrValue);
     }
+    return this;
+  }
+
+  whereExists(versions: VersionQuery) {
+    this.filters.push((row) =>
+      this.state.versions.some(
+        (version) =>
+          version.siteId === row.siteId && version.versionId === row.activeVersionId && versions.matches(version)
+      )
+    );
     return this;
   }
 
@@ -407,13 +423,19 @@ class VersionQuery {
     this.filters.push((version) => {
       const site = this.state.sites.find((site) => site.siteId === version.siteId);
       return Boolean(
-        site && (['deleted', 'expired'].includes(site.status) || site.activeVersionId !== version.versionId)
+        site && (['purged', 'expired'].includes(site.status) || site.activeVersionId !== version.versionId)
       );
     });
     return this;
   }
   join() {
     return this;
+  }
+  whereColumn() {
+    return this;
+  }
+  matches(row: VersionRow) {
+    return this.filters.every((filter) => filter(row));
   }
   select() {
     return this;
@@ -915,18 +937,47 @@ describe('SitesService behavior', () => {
   });
 
   describe('deleteSite', () => {
-    it('tombstones the site before cleaning remaining versions', async () => {
+    it('tombstones the site and keeps its content restorable', async () => {
       addSite(state);
       addVersion(state, { versionId: 'version-1', storagePrefix: 'prefix/version-1' });
-      addVersion(state, { versionId: 'version-2', storagePrefix: 'prefix/version-2', deletedAt: CREATED_AT });
 
       const result = await service.deleteSite('site-1', principal);
 
-      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/version-1']]);
-      expect(result).toMatchObject({ id: 'site-1', status: 'deleted' });
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        id: 'site-1',
+        status: 'deleted',
+        deletedAt: expect.any(String),
+        restorableUntil: expect.any(String),
+        permissions: expect.objectContaining({ canRestore: true }),
+      });
       expect(state.sites[0]).toMatchObject({ status: 'deleted', deletedAt: expect.any(String) });
+      expect(state.versions[0].deletedAt).toBeNull();
+    });
+
+    it('purges at once when the cleanup job is disabled, since nothing would purge it later', async () => {
+      enabledConfig({ cleanup: { enabled: false, intervalMinutes: 15 } });
+      addSite(state);
+      addVersion(state, { storagePrefix: 'prefix/version-1' });
+
+      const result = await service.deleteSite('site-1', principal);
+
+      expect(result).toMatchObject({ status: 'purged', restorableUntil: null });
+      expect(result.permissions.canRestore).toBe(false);
+      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/version-1']]);
       expect(state.versions[0].deletedAt).not.toBeNull();
-      expect(state.versions[1].deletedAt).toBe(CREATED_AT);
+    });
+
+    it('reports no restore window when retention is zero', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 0 } });
+      addSite(state);
+      addVersion(state);
+
+      const result = await service.deleteSite('site-1', principal);
+
+      expect(result).toMatchObject({ status: 'deleted', restorableUntil: null });
+      expect(result.permissions.canRestore).toBe(false);
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
     });
 
     it('returns not found without touching storage for an unknown site', async () => {
@@ -936,17 +987,176 @@ describe('SitesService behavior', () => {
       });
       expect(mockDeletePrefix).not.toHaveBeenCalled();
     });
+  });
 
-    it('keeps access tombstoned and leaves storage for retry when cleanup fails', async () => {
-      const site = addSite(state);
-      const version = addVersion(state, { storagePrefix: 'prefix/version-1' });
-      const deleteError = new Error('delete failed');
-      mockDeletePrefix.mockRejectedValueOnce(deleteError);
+  describe('restoreSite', () => {
+    const deletedAt = (daysAgo: number) => new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
 
-      await expect(service.deleteSite('site-1', principal)).resolves.toMatchObject({ status: 'deleted' });
-      expect(site.status).toBe('deleted');
-      expect(site.deletedAt).not.toBeNull();
-      expect(version.deletedAt).toBeNull();
+    it('restores a deleted site at the same id with a new access revision', async () => {
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1), accessRevision: 2 });
+      addVersion(state);
+
+      const result = await service.restoreSite('site-1', principal, 2);
+
+      expect(result).toMatchObject({ id: 'site-1', status: 'active', deletedAt: null, accessRevision: 3 });
+      expect(state.sites[0]).toMatchObject({ status: 'active', deletedAt: null, accessRevision: 3 });
+      expect(mockAudit).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ event: 'sites.restored', meta: expect.objectContaining({ siteId: 'site-1' }) })
+      );
+    });
+
+    it('gives a restored site whose expiry passed a fresh TTL', async () => {
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1), expiresAt: '2026-01-01T00:00:00.000Z' });
+      addVersion(state);
+
+      const result = await service.restoreSite('site-1', principal);
+
+      expect(new Date(result.expiresAt!).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('clears a past expiry on restore when TTL is off, so cleanup cannot purge the restored site', async () => {
+      enabledConfig({ ttl: { enabled: false } });
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1), expiresAt: '2026-01-01T00:00:00.000Z' });
+      addVersion(state);
+
+      const result = await service.restoreSite('site-1', principal);
+
+      expect(result.expiresAt).toBeNull();
+      await service.cleanupExpiredSites();
+      expect(state.sites[0].status).toBe('active');
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an active site', { status: 'active', deletedAt: null }],
+      ['a purged site', { status: 'purged', deletedAt: deletedAt(40) }],
+      ['a site past the retention window', { status: 'deleted', deletedAt: deletedAt(31) }],
+    ] as const)('refuses %s', async (_case, overrides) => {
+      addSite(state, overrides);
+      addVersion(state);
+
+      await expect(service.restoreSite('site-1', principal)).rejects.toMatchObject({
+        message: 'Site not found or no longer restorable.',
+        statusCode: 404,
+      });
+    });
+
+    it('refuses a site whose content was purged before soft delete existed', async () => {
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1) });
+      addVersion(state, { deletedAt: deletedAt(1) });
+
+      await expect(service.restoreSite('site-1', principal)).rejects.toMatchObject({ statusCode: 404 });
+      expect(state.sites[0].status).toBe('deleted');
+    });
+
+    it('refuses a non-owner and a stale revision', async () => {
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1), ownerSubject: 'someone-else' });
+      addVersion(state);
+      await expect(service.restoreSite('site-1', principal)).rejects.toMatchObject({ code: 'site_access_denied' });
+
+      state.sites[0].ownerSubject = principal.userId;
+      await expect(service.restoreSite('site-1', principal, 99)).rejects.toMatchObject({ code: 'site_changed' });
+      expect(state.sites[0].status).toBe('deleted');
+    });
+
+    it('hides deleted public and private sites from everyone except their owner', async () => {
+      const other = { ...principal, userId: 'someone-else', actor: 'someone-else' } as Principal;
+      addSite(state, {
+        siteId: 'pub',
+        activeVersionId: 'v-pub',
+        visibility: 'public',
+        status: 'deleted',
+        deletedAt: deletedAt(1),
+      });
+      addVersion(state, { siteId: 'pub', versionId: 'v-pub' });
+      addSite(state, {
+        siteId: 'priv',
+        activeVersionId: 'v-priv',
+        visibility: 'private',
+        status: 'deleted',
+        deletedAt: deletedAt(1),
+      });
+      addVersion(state, { siteId: 'priv', versionId: 'v-priv' });
+
+      for (const view of ['deleted', 'all', 'public', 'mine'] as const) {
+        const result = await service.listSites({ view }, other);
+        expect(result.sites.map((site) => site.id)).toEqual([]);
+      }
+      for (const view of ['all', 'public', 'mine'] as const) {
+        const result = await service.listSites({ view }, principal);
+        expect(result.sites.map((site) => site.id)).toEqual([]);
+      }
+      await expect(service.getSite('pub', other)).rejects.toMatchObject({ statusCode: 404 });
+      await expect(service.getGatewaySite('site-pub.sites.example.com')).rejects.toMatchObject({ statusCode: 404 });
+      await expect(service.restoreSite('pub', other)).rejects.toMatchObject({ code: 'site_access_denied' });
+      expect(state.sites.find((site) => site.siteId === 'pub')?.status).toBe('deleted');
+
+      const own = await service.listSites({ view: 'deleted' }, principal);
+      expect(own.sites.map((site) => [site.id, site.visibility]).sort()).toEqual([
+        ['priv', 'private'],
+        ['pub', 'public'],
+      ]);
+    });
+
+    it('lists only restorable deleted sites owned by the caller', async () => {
+      addSite(state, { siteId: 'restorable', activeVersionId: 'v-r', status: 'deleted', deletedAt: deletedAt(2) });
+      addVersion(state, { siteId: 'restorable', versionId: 'v-r' });
+      addSite(state, { siteId: 'too-old', activeVersionId: 'v-o', status: 'deleted', deletedAt: deletedAt(45) });
+      addVersion(state, { siteId: 'too-old', versionId: 'v-o' });
+      addSite(state, { siteId: 'legacy', activeVersionId: 'v-l', status: 'deleted', deletedAt: deletedAt(2) });
+      addVersion(state, { siteId: 'legacy', versionId: 'v-l', deletedAt: deletedAt(2) });
+      addSite(state, {
+        siteId: 'others',
+        activeVersionId: 'v-x',
+        status: 'deleted',
+        deletedAt: deletedAt(2),
+        ownerSubject: 'someone-else',
+      });
+      addVersion(state, { siteId: 'others', versionId: 'v-x' });
+      addSite(state, { siteId: 'live' });
+
+      const result = await service.listSites({ view: 'deleted' }, principal);
+
+      expect(result.sites.map((site) => site.id)).toEqual(['restorable']);
+      expect(result.sites[0].permissions.canRestore).toBe(true);
+    });
+  });
+
+  describe('deleted site purge', () => {
+    it('purges deleted sites once the retention window passes and keeps newer ones restorable', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 30 } });
+      const old = addSite(state, {
+        siteId: 'old',
+        activeVersionId: 'old-v',
+        status: 'deleted',
+        deletedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      const oldVersion = addVersion(state, { siteId: 'old', versionId: 'old-v', storagePrefix: 'prefix/old' });
+      const recent = addSite(state, {
+        siteId: 'recent',
+        activeVersionId: 'recent-v',
+        status: 'deleted',
+        deletedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      });
+      const recentVersion = addVersion(state, { siteId: 'recent', versionId: 'recent-v' });
+
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, purged: 1, cleaned: 1, errors: 0 });
+
+      expect(old.status).toBe('purged');
+      expect(oldVersion.deletedAt).not.toBeNull();
+      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/old']]);
+      expect(recent.status).toBe('deleted');
+      expect(recentVersion.deletedAt).toBeNull();
+    });
+
+    it('purges on the next run when retention is zero', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 0 } });
+      addSite(state, { status: 'deleted', deletedAt: new Date(Date.now() - 1000).toISOString() });
+      addVersion(state);
+
+      await expect(service.cleanupExpiredSites()).resolves.toMatchObject({ purged: 1, cleaned: 1 });
+      expect(state.sites[0].status).toBe('purged');
     });
   });
 
@@ -1077,7 +1287,7 @@ describe('SitesService behavior', () => {
     ])('does no work when %s', async (_case, sites) => {
       mockGetAllConfigs.mockResolvedValue({ sites });
 
-      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, cleaned: 0, errors: 0 });
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, purged: 0, cleaned: 0, errors: 0 });
       expect(database.models.Site.query).not.toHaveBeenCalled();
       expect(mockDeletePrefix).not.toHaveBeenCalled();
     });
@@ -1113,7 +1323,7 @@ describe('SitesService behavior', () => {
         if (prefix === 'prefix/failed') throw cleanupError;
       });
 
-      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 2, cleaned: 1, errors: 1 });
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 2, purged: 0, cleaned: 1, errors: 1 });
       expect(cleanedSite).toMatchObject({ status: 'expired', deletedAt: '2026-06-10T00:00:00.000Z' });
       expect(cleanedVersion.deletedAt).toBe('2026-06-10T00:00:00.000Z');
       expect(failedSite).toMatchObject({ status: 'expired', deletedAt: '2026-06-10T00:00:00.000Z' });
@@ -1132,7 +1342,7 @@ describe('SitesService behavior', () => {
       mockDeletePrefix.mockRejectedValueOnce(new Error('storage unavailable'));
       await service.replaceSiteContent('site-1', { principal, fileName: 'index.html', content: Buffer.from('new') });
       expect(state.versions[0].deletedAt).toBeNull();
-      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, cleaned: 1, errors: 0 });
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, purged: 0, cleaned: 1, errors: 0 });
       expect(state.versions[0].deletedAt).not.toBeNull();
       expect(state.versions[1].deletedAt).toBeNull();
     });
@@ -1140,7 +1350,7 @@ describe('SitesService behavior', () => {
     it('returns zero counts when no active site has elapsed', async () => {
       addSite(state, { expiresAt: '2099-01-01T00:00:00.000Z' });
 
-      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, cleaned: 0, errors: 0 });
+      await expect(service.cleanupExpiredSites()).resolves.toEqual({ expired: 0, purged: 0, cleaned: 0, errors: 0 });
       expect(mockDeletePrefix).not.toHaveBeenCalled();
     });
   });
@@ -1226,6 +1436,10 @@ describe('SitesService behavior', () => {
           meta: expect.objectContaining({ siteId: 'site-1', from: 'public', to: 'private' }),
         })
       );
+    });
+    it('advertises how long deleted sites stay restorable', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 14 } });
+      await expect(service.getCapabilities(principal)).resolves.toMatchObject({ deletedRetentionDays: 14 });
     });
     it('advertises no uploads while the existing Sites setting is disabled', async () => {
       mockGetAllConfigs.mockResolvedValue({ sites: { enabled: false } });
@@ -1426,11 +1640,11 @@ describe('SitesService behavior', () => {
 
   describe('cleanup queue wiring', () => {
     it('processes cleanup jobs and logs the result', async () => {
-      const result = { expired: 3, cleaned: 2, errors: 1 };
+      const result = { expired: 3, purged: 4, cleaned: 2, errors: 1 };
       jest.spyOn(service, 'cleanupExpiredSites').mockResolvedValue(result);
 
       await expect(service.processSitesCleanupQueue({} as any)).resolves.toEqual(result);
-      expect(mockInfo).toHaveBeenCalledWith('Sites: cleanup complete expired=3 cleaned=2 errors=1');
+      expect(mockInfo).toHaveBeenCalledWith('Sites: cleanup complete expired=3 purged=4 cleaned=2 errors=1');
     });
 
     it.each([

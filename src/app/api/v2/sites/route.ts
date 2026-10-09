@@ -39,7 +39,8 @@ export const runtime = 'nodejs';
  *     parameters:
  *       - name: view
  *         in: query
- *         schema: { type: string, enum: [mine, public, all] }
+ *         description: deleted lists the caller's deleted sites that can still be restored.
+ *         schema: { type: string, enum: [mine, public, all, deleted] }
  *       - name: q
  *         in: query
  *         schema: { type: string, maxLength: 200 }

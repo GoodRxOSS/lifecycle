@@ -15,22 +15,22 @@
  */
 
 import type { McpJsonObject, McpToolDefinition } from '../../contracts';
-import { deleteSiteInputSchema, deleteSiteOutputSchema } from './schemas';
+import { restoreSiteInputSchema, restoreSiteOutputSchema } from './schemas';
 import { mapSiteServiceError, siteChangeSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Deletes a site you own; its link stops working at once. restore_site can bring it back until restorableUntil, then its content is purged. Read it with get_site first, confirm with the user if acting for someone, and pass its accessRevision as expectedAccessRevision.';
+  'Restores a site you deleted, at the same id and URL, until its restorableUntil. Find it with list_sites deleted and pass its accessRevision as expectedAccessRevision.';
 
-export function createDeleteSiteToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
+export function createRestoreSiteToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {
-    name: 'delete_site',
-    title: 'Delete site',
+    name: 'restore_site',
+    title: 'Restore site',
     description: DESCRIPTION,
-    inputSchema: deleteSiteInputSchema,
-    outputSchema: deleteSiteOutputSchema,
+    inputSchema: restoreSiteInputSchema,
+    outputSchema: restoreSiteOutputSchema,
     annotations: {
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       idempotentHint: false,
       openWorldHint: false,
     },
@@ -40,7 +40,11 @@ export function createDeleteSiteToolDefinition(dependencies: ResolvedSiteToolDep
       try {
         const site = await dependencies
           .service()
-          .deleteSite(input.siteId as string, context.principal, input.expectedAccessRevision as number);
+          .restoreSite(
+            input.siteId as string,
+            context.principal,
+            typeof input.expectedAccessRevision === 'number' ? input.expectedAccessRevision : undefined
+          );
         return { site: siteChangeSummary(site) };
       } catch (error) {
         throw mapSiteServiceError(error);

@@ -20,7 +20,7 @@ import { listSitesInputSchema, listSitesOutputSchema } from './schemas';
 import { mapSiteServiceError, siteSummary, type ResolvedSiteToolDependencies } from './shared';
 
 const DESCRIPTION =
-  'Lists hosted sites in Lifecycle. Use `mineOnly` to return only sites owned by the authenticated principal.';
+  'Lists hosted sites. `mineOnly`: only yours. `deleted`: your deleted sites that restore_site can still bring back.';
 
 export function createListSitesToolDefinition(dependencies: ResolvedSiteToolDependencies): McpToolDefinition {
   return {
@@ -40,15 +40,16 @@ export function createListSitesToolDefinition(dependencies: ResolvedSiteToolDepe
     async handler(input, context): Promise<McpJsonObject> {
       try {
         const mineOnly = input.mineOnly === true;
+        const deleted = input.deleted === true;
         const limit = typeof input.limit === 'number' ? input.limit : 25;
-        const cursorFilters: McpJsonObject = { mineOnly };
+        const cursorFilters: McpJsonObject = { mineOnly, deleted };
         const cursor =
           typeof input.cursor === 'string'
             ? decodeListCursor(input.cursor, cursorFilters, limit, dependencies.nowSeconds())
             : null;
         const result = await dependencies.service().listSites(
           {
-            view: mineOnly ? 'mine' : 'all',
+            view: deleted ? 'deleted' : mineOnly ? 'mine' : 'all',
             page: cursor ? cursor.position + 1 : 1,
             limit,
           },

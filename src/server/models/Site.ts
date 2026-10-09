@@ -19,7 +19,7 @@ import Model from './_Model';
 export type SiteVisibility = 'private' | 'public';
 export type SiteOwnerKind = 'user' | 'service_key' | 'unresolved';
 
-export type SiteStatus = 'active' | 'deleted' | 'expired';
+export type SiteStatus = 'active' | 'deleted' | 'expired' | 'purged';
 
 export default class Site extends Model {
   siteId!: string;

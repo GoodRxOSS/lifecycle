@@ -41,6 +41,7 @@ export interface SiteToolService {
     expectedAccessRevision: number
   ): Promise<SiteResponse>;
   deleteSite(siteId: string, principal: Principal, expectedAccessRevision?: number): Promise<SiteResponse>;
+  restoreSite(siteId: string, principal: Principal, expectedAccessRevision?: number): Promise<SiteResponse>;
 }
 
 export interface SiteToolDependencies {
@@ -151,6 +152,7 @@ export function siteSummary(site: SiteResponse): McpJsonObject {
   const createdBy = optionalString(site.createdBy, 512);
   const updatedBy = optionalString(site.updatedBy, 512);
   const expiresAt = normalizeMcpDateTime(site.expiresAt);
+  const restorableUntil = normalizeMcpDateTime(site.restorableUntil);
   return {
     siteId: requiredString(site.id, 100),
     name: requiredString(site.name, 200),
@@ -162,10 +164,17 @@ export function siteSummary(site: SiteResponse): McpJsonObject {
     accessRevision: site.accessRevision,
     contentRevision: site.contentRevision,
     currentRole: site.currentRole,
-    permissions: { ...site.permissions },
+    permissions: {
+      canView: site.permissions.canView,
+      canEdit: site.permissions.canEdit,
+      canDelete: site.permissions.canDelete,
+      canChangeVisibility: site.permissions.canChangeVisibility,
+      canRestore: site.permissions.canRestore,
+    },
     createdAt: requiredDateTime(site.createdAt),
     updatedAt: requiredDateTime(site.updatedAt),
     ...(expiresAt ? { expiresAt } : {}),
+    ...(restorableUntil ? { restorableUntil } : {}),
     fileCount: site.fileCount,
     sizeBytes: site.sizeBytes,
     ...(createdBy ? { createdBy } : {}),
@@ -174,7 +183,8 @@ export function siteSummary(site: SiteResponse): McpJsonObject {
 }
 
 export function siteChangeSummary(site: SiteResponse): McpJsonObject {
-  const { siteId, url, status, visibility, accessRevision, contentRevision, expiresAt } = siteSummary(site);
+  const { siteId, url, status, visibility, accessRevision, contentRevision, expiresAt, restorableUntil } =
+    siteSummary(site);
   return {
     siteId,
     url,
@@ -183,5 +193,6 @@ export function siteChangeSummary(site: SiteResponse): McpJsonObject {
     accessRevision,
     contentRevision,
     ...(expiresAt ? { expiresAt } : {}),
+    ...(restorableUntil ? { restorableUntil } : {}),
   };
 }

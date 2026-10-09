@@ -194,7 +194,12 @@ describe('OpenAPI v2 environment contract', () => {
 describe('OpenAPI v2 sites contract', () => {
   it('documents sites list filters and pagination', () => {
     expect(getOperation('/api/v2/sites', 'get')?.parameters).toEqual([
-      { name: 'view', in: 'query', schema: { type: 'string', enum: ['mine', 'public', 'all'] } },
+      {
+        name: 'view',
+        in: 'query',
+        description: "deleted lists the caller's deleted sites that can still be restored.",
+        schema: { type: 'string', enum: ['mine', 'public', 'all', 'deleted'] },
+      },
       { name: 'q', in: 'query', schema: { type: 'string', maxLength: 200 } },
       {
         name: 'page',
