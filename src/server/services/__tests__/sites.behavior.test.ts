@@ -1022,6 +1022,45 @@ describe('SitesService behavior', () => {
       expect(state.sites[0].status).toBe('deleted');
     });
 
+    it('hides deleted public and private sites from everyone except their owner', async () => {
+      const other = { ...principal, userId: 'someone-else', actor: 'someone-else' } as Principal;
+      addSite(state, {
+        siteId: 'pub',
+        activeVersionId: 'v-pub',
+        visibility: 'public',
+        status: 'deleted',
+        deletedAt: deletedAt(1),
+      });
+      addVersion(state, { siteId: 'pub', versionId: 'v-pub' });
+      addSite(state, {
+        siteId: 'priv',
+        activeVersionId: 'v-priv',
+        visibility: 'private',
+        status: 'deleted',
+        deletedAt: deletedAt(1),
+      });
+      addVersion(state, { siteId: 'priv', versionId: 'v-priv' });
+
+      for (const view of ['deleted', 'all', 'public', 'mine'] as const) {
+        const result = await service.listSites({ view }, other);
+        expect(result.sites.map((site) => site.id)).toEqual([]);
+      }
+      for (const view of ['all', 'public', 'mine'] as const) {
+        const result = await service.listSites({ view }, principal);
+        expect(result.sites.map((site) => site.id)).toEqual([]);
+      }
+      await expect(service.getSite('pub', other)).rejects.toMatchObject({ statusCode: 404 });
+      await expect(service.getGatewaySite('site-pub.sites.example.com')).rejects.toMatchObject({ statusCode: 404 });
+      await expect(service.restoreSite('pub', other)).rejects.toMatchObject({ code: 'site_access_denied' });
+      expect(state.sites.find((site) => site.siteId === 'pub')?.status).toBe('deleted');
+
+      const own = await service.listSites({ view: 'deleted' }, principal);
+      expect(own.sites.map((site) => [site.id, site.visibility]).sort()).toEqual([
+        ['priv', 'private'],
+        ['pub', 'public'],
+      ]);
+    });
+
     it('lists only restorable deleted sites owned by the caller', async () => {
       addSite(state, { siteId: 'restorable', activeVersionId: 'v-r', status: 'deleted', deletedAt: deletedAt(2) });
       addVersion(state, { siteId: 'restorable', versionId: 'v-r' });
