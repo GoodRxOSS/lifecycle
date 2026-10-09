@@ -955,6 +955,31 @@ describe('SitesService behavior', () => {
       expect(state.versions[0].deletedAt).toBeNull();
     });
 
+    it('purges at once when the cleanup job is disabled, since nothing would purge it later', async () => {
+      enabledConfig({ cleanup: { enabled: false, intervalMinutes: 15 } });
+      addSite(state);
+      addVersion(state, { storagePrefix: 'prefix/version-1' });
+
+      const result = await service.deleteSite('site-1', principal);
+
+      expect(result).toMatchObject({ status: 'purged', restorableUntil: null });
+      expect(result.permissions.canRestore).toBe(false);
+      expect(mockDeletePrefix.mock.calls).toEqual([['prefix/version-1']]);
+      expect(state.versions[0].deletedAt).not.toBeNull();
+    });
+
+    it('reports no restore window when retention is zero', async () => {
+      enabledConfig({ cleanup: { enabled: true, intervalMinutes: 15, deletedRetentionDays: 0 } });
+      addSite(state);
+      addVersion(state);
+
+      const result = await service.deleteSite('site-1', principal);
+
+      expect(result).toMatchObject({ status: 'deleted', restorableUntil: null });
+      expect(result.permissions.canRestore).toBe(false);
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
+    });
+
     it('returns not found without touching storage for an unknown site', async () => {
       await expect(service.deleteSite('missing', principal)).rejects.toMatchObject({
         message: 'Site not found.',
@@ -988,6 +1013,19 @@ describe('SitesService behavior', () => {
       const result = await service.restoreSite('site-1', principal);
 
       expect(new Date(result.expiresAt!).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('clears a past expiry on restore when TTL is off, so cleanup cannot purge the restored site', async () => {
+      enabledConfig({ ttl: { enabled: false } });
+      addSite(state, { status: 'deleted', deletedAt: deletedAt(1), expiresAt: '2026-01-01T00:00:00.000Z' });
+      addVersion(state);
+
+      const result = await service.restoreSite('site-1', principal);
+
+      expect(result.expiresAt).toBeNull();
+      await service.cleanupExpiredSites();
+      expect(state.sites[0].status).toBe('active');
+      expect(mockDeletePrefix).not.toHaveBeenCalled();
     });
 
     it.each([

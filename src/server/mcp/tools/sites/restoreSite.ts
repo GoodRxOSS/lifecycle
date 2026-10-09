@@ -31,7 +31,7 @@ export function createRestoreSiteToolDefinition(dependencies: ResolvedSiteToolDe
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: false,
     },
     capabilityId: 'manage-hosted-sites',

@@ -154,7 +154,9 @@ export default class SitesService extends Service {
         ? 'expired'
         : site.status;
     const restorableUntil =
-      site.status === 'deleted' && site.deletedAt ? this.restoreDeadline(site.deletedAt, config) : null;
+      site.status === 'deleted' && site.deletedAt && config.cleanup.deletedRetentionDays > 0
+        ? this.restoreDeadline(site.deletedAt, config)
+        : null;
     return {
       id: site.siteId,
       name: site.name,
@@ -600,11 +602,18 @@ export default class SitesService extends Service {
       this.checkRevision(site, expectedAccessRevision);
       await this.audit(trx, 'deleted', siteId, principal, { accessRevision: site.accessRevision + 1 });
       return site.$query(trx).patchAndFetch({
-        status: 'deleted',
+        // Retention relies on the cleanup job; without it nothing would ever purge the content.
+        status: config.cleanup.enabled ? 'deleted' : 'purged',
         deletedAt: new Date().toISOString(),
         accessRevision: site.accessRevision + 1,
       }) as unknown as Promise<Site>;
     });
+    if (!config.cleanup.enabled) {
+      const versions = (await this.db.models.SiteVersion.query()
+        .where({ siteId })
+        .whereNull('deletedAt')) as SiteVersion[];
+      await this.cleanupSupersededVersions(config, siteId, versions);
+    }
     return this.serialize(deleted, config, principal);
   }
 
@@ -631,7 +640,8 @@ export default class SitesService extends Service {
         status: 'active',
         deletedAt: null,
         accessRevision: site.accessRevision + 1,
-        ...(expired && config.ttl.enabled ? { expiresAt: this.expirationForNewSite(config) } : {}),
+        // Keeping a past expiry would let the next cleanup run expire and purge the restored site.
+        ...(expired ? { expiresAt: config.ttl.enabled ? this.expirationForNewSite(config) : null } : {}),
       } as unknown as Partial<Site>);
       return this.serialize(restored as Site, config, principal);
     });
