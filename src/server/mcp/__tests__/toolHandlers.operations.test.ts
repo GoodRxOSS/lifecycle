@@ -57,6 +57,7 @@ function environmentBuild(overrides: Record<string, unknown> = {}): Build {
     status: BuildStatus.DEPLOYED,
     branchName: 'main',
     triggerType: 'api',
+    createdByUserId: 'user-1',
     isStatic: false,
     deployEnabled: true,
     autoTrack: false,
@@ -539,6 +540,27 @@ describe('destroy_environment', () => {
     return result.confirmToken as string;
   }
 
+  it('refuses a preview for an environment someone else created, before issuing a token', async () => {
+    const { call } = harness({
+      service: operationService({}),
+      loadNamedEnvironment: async () => loadedEnvironment(environmentBuild({ createdByUserId: 'someone-else' })),
+      lockDestroyPreview: async () => ({
+        build: environmentBuild({ createdByUserId: 'someone-else', expiresAt: new Date(EXPIRES_AT) }),
+        activeServiceNames: ['api'],
+      }),
+      nowSeconds: () => 1_000,
+    });
+    const { error } = await call('destroy_environment', {
+      uuid: UUID,
+      environmentId: ENVIRONMENT_ID,
+      confirmation: { phase: 'preview' },
+    });
+    expect(error).toMatchObject({
+      code: 'forbidden_role',
+      message: 'Only the creator of this environment or an admin can destroy it.',
+    });
+  });
+
   it('previews with a confirmation token sealed to the environment and user', async () => {
     const { call, registry } = harness({
       service: operationService({}),
@@ -585,7 +607,7 @@ describe('destroy_environment', () => {
     const destroyed = environmentBuild();
     let validated = false;
     const service = operationService({
-      requestApiEnvironmentDeletion: jest.fn(async (_uuid, _environmentId, options) => {
+      requestApiEnvironmentDeletion: jest.fn(async (_uuid, _environmentId, _principal, options) => {
         await options.validateLockedState(destroyed, {} as Transaction);
         validated = true;
         return destroyed;
@@ -628,7 +650,7 @@ describe('destroy_environment', () => {
   it('rejects execution when the environment changed since the preview', async () => {
     const confirmToken = await previewToken();
     const service = operationService({
-      requestApiEnvironmentDeletion: jest.fn(async (_uuid, _environmentId, options) => {
+      requestApiEnvironmentDeletion: jest.fn(async (_uuid, _environmentId, _principal, options) => {
         await options.validateLockedState(environmentBuild(), {} as Transaction);
         return environmentBuild();
       }),

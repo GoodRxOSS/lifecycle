@@ -958,7 +958,11 @@ describe('DELETE /api/v2/environments/{uuid}', () => {
     });
 
     expect(res.status).toBe(202);
-    expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith('x', 707);
+    expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith(
+      'x',
+      707,
+      expect.objectContaining({ kind: expect.any(String) })
+    );
     expect(await res.json()).toMatchObject({
       data: {
         uuid: 'x',
@@ -989,7 +993,11 @@ describe('DELETE /api/v2/environments/{uuid}', () => {
       });
 
       expect(res.status).toBe(202);
-      expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith('x', 707);
+      expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith(
+        'x',
+        707,
+        expect.objectContaining({ kind: expect.any(String) })
+      );
     }
   );
 
@@ -1010,7 +1018,11 @@ describe('DELETE /api/v2/environments/{uuid}', () => {
     });
 
     expect(res.status).toBe(202);
-    expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith('x', 707);
+    expect(mockRequestApiEnvironmentDeletion).toHaveBeenCalledWith(
+      'x',
+      707,
+      expect.objectContaining({ kind: expect.any(String) })
+    );
   });
 });
 

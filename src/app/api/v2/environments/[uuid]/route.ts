@@ -232,7 +232,7 @@ const deleteHandler = createPrincipalApiHandler(
       });
     }
 
-    const claimedBuild = await buildService.requestApiEnvironmentDeletion(uuid, build.id);
+    const claimedBuild = await buildService.requestApiEnvironmentDeletion(uuid, build.id, principal);
     return successResponse(
       {
         uuid: claimedBuild.uuid,

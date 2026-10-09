@@ -28,6 +28,7 @@ import { getBuildSource, isDeployEnabled, resolveBuildSourceRepository } from 's
 import { computeExtendedExpiry, computeInitialExpiry, isExpired } from 'server/lib/lease';
 import { getUtcTimestamp } from 'server/lib/time';
 import { AppError, BadRequestError } from 'server/lib/appError';
+import type { Principal } from 'server/lib/principal';
 import { containsSecretRefTemplate } from 'server/lib/secretRefs';
 import { isNativeBuilderEngine } from 'server/lib/buildEngines';
 import { validateBuildUuidFormat } from 'server/lib/validation/buildUuidValidator';
@@ -215,6 +216,17 @@ export interface CreateApiEnvironmentAuthorization {
   repositoryAllowlistRepoIds?: number[] | null;
   /** Legacy, mutable repository-name constraints retained for older API keys. */
   repositoryAllowlist?: string[] | null;
+}
+
+export function assertEnvironmentDestroyAllowed(build: Pick<Build, 'createdByUserId'>, principal: Principal): void {
+  // Service keys are machine identities scoped by repository allowlist, not by who created the environment.
+  if (principal.kind === 'service_key' || principal.roles.includes('admin')) return;
+  if (build.createdByUserId && principal.userId && build.createdByUserId === principal.userId) return;
+  throw new AppError({
+    httpStatus: 403,
+    code: 'forbidden_role',
+    message: 'Only the creator of this environment or an admin can destroy it.',
+  });
 }
 
 export interface LockedApiEnvironmentDeletionGuard {
@@ -1926,6 +1938,7 @@ export default class BuildService extends BaseService {
   async requestApiEnvironmentDeletion(
     buildUuid: string,
     expectedBuildId: number,
+    principal: Principal,
     guard: LockedApiEnvironmentDeletionGuard = {}
   ): Promise<Build> {
     return this.withBuildDeploymentLock(expectedBuildId, async () => {
@@ -1943,6 +1956,7 @@ export default class BuildService extends BaseService {
             message: `Environment ${buildUuid} was not found.`,
           });
         }
+        assertEnvironmentDestroyAllowed(current, principal);
         if (current.isStatic) {
           throw new AppError({
             httpStatus: 409,
