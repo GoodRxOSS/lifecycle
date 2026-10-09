@@ -21,8 +21,10 @@ import type {
 } from 'server/services/types/agentRuntimeConfig';
 import { isAgentCapabilityAvailability, isAgentCapabilityCatalogId } from 'server/services/agent/capabilityCatalog';
 import {
+  BASE_URL_CAPABLE_PROVIDER_NAMES,
   getProviderEnvVarCandidates,
   isValidEnvVarName,
+  isValidProviderBaseUrl,
   normalizeAgentProviderName,
   type SupportedAgentProviderName,
 } from 'server/services/agent/providerConfig';
@@ -193,7 +195,37 @@ export function validateAgentRuntimeConfig(config: AgentRuntimeConfig): void {
       );
     }
 
-    validateProviderModels(providerName, provider.models || [], provider.enabled !== false);
+    if (provider.baseUrl !== undefined) {
+      if (!BASE_URL_CAPABLE_PROVIDER_NAMES.includes(providerName)) {
+        throw new AgentRuntimeConfigValidationError(
+          `Provider "${providerName}" does not support baseUrl; only ${BASE_URL_CAPABLE_PROVIDER_NAMES.join(
+            ', '
+          )} can target a custom endpoint.`
+        );
+      }
+
+      if (!isValidProviderBaseUrl(provider.baseUrl)) {
+        throw new AgentRuntimeConfigValidationError(
+          `Provider "${providerName}" baseUrl must be an http(s) URL without credentials, a query, or a fragment.`
+        );
+      }
+    }
+
+    if (provider.discoverModels !== undefined && typeof provider.discoverModels !== 'boolean') {
+      throw new AgentRuntimeConfigValidationError(`Provider "${providerName}" discoverModels must be a boolean.`);
+    }
+
+    if (provider.discoverModels && provider.baseUrl === undefined) {
+      throw new AgentRuntimeConfigValidationError(
+        `Provider "${providerName}" discoverModels requires baseUrl, because models are listed from that endpoint.`
+      );
+    }
+
+    validateProviderModels(
+      providerName,
+      provider.models || [],
+      provider.enabled !== false && provider.discoverModels !== true
+    );
   }
 }
 

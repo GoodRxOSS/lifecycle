@@ -5709,6 +5709,18 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               pattern: '^[A-Z_][A-Z0-9_]*$',
               description: 'Environment variable name used to resolve the provider API key.',
             },
+            baseUrl: {
+              type: 'string',
+              format: 'uri',
+              description:
+                'OpenAI-compatible endpoint that receives requests for this provider. Supported only for the openai provider.',
+              example: 'https://llm-gateway.example.com/v1',
+            },
+            discoverModels: {
+              type: 'boolean',
+              description:
+                'List models from baseUrl at runtime using the shared API key. Entries in models then act as per-model overrides, and enabled: false hides a model.',
+            },
             models: {
               type: 'array',
               items: { $ref: '#/components/schemas/AgentRuntimeModelConfig' },

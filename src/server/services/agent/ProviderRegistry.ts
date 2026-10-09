@@ -22,14 +22,26 @@ import type { RequestUserIdentity } from 'server/lib/get-user';
 import { getLogger } from 'server/lib/logger';
 import { importEsm } from 'server/lib/esmImport';
 import { BadRequestError } from 'server/lib/appError';
+import type { AgentRuntimeModelConfig } from 'server/services/types/agentRuntimeConfig';
 import type { AgentModelSummary, AgentResolvedModelSelection } from './types';
-import { getProviderEnvVarCandidates, normalizeStoredAgentProviderName } from './providerConfig';
+import { discoverEndpointModelIds } from './gatewayModelDiscovery';
+import {
+  BASE_URL_CAPABLE_PROVIDER_NAMES,
+  getProviderEnvVarCandidates,
+  normalizeAgentProviderName,
+  normalizeStoredAgentProviderName,
+} from './providerConfig';
 
 type ProviderConfig = {
   name: string;
   apiKeyEnvVar?: string;
+  baseUrl?: string;
+  discoverModels?: boolean;
   enabled?: boolean;
+  models?: AgentRuntimeModelConfig[];
 };
+
+const DISCOVERED_MODEL_MAX_TOKENS = 8192;
 type LanguageModelProvider = (modelId: string) => LanguageModel;
 
 function normalizeModelProvider(provider: string): string | null {
@@ -59,7 +71,8 @@ export class AgentModelSelectionError extends BadRequestError {
 
 async function getProviderInstance(
   provider: AgentResolvedModelSelection['provider'],
-  apiKey: string
+  apiKey: string,
+  baseUrl?: string
 ): Promise<LanguageModelProvider> {
   switch (provider) {
     case 'anthropic': {
@@ -68,7 +81,14 @@ async function getProviderInstance(
     }
     case 'openai': {
       const { createOpenAI } = await importEsm<typeof import('@ai-sdk/openai')>('@ai-sdk/openai');
-      return createOpenAI({ apiKey }) as LanguageModelProvider;
+      if (!baseUrl) {
+        return createOpenAI({ apiKey }) as LanguageModelProvider;
+      }
+
+      // The bare provider targets the Responses API; OpenAI-compatible gateways reliably
+      // implement only Chat Completions.
+      const openai = createOpenAI({ apiKey, baseURL: baseUrl });
+      return ((modelId: string) => openai.chat(modelId)) as LanguageModelProvider;
     }
     case 'gemini':
     case 'google': {
@@ -102,6 +122,54 @@ function findProviderConfig(providerConfigs: ProviderConfig[], providerName: str
       const normalized = normalizeStoredAgentProviderName(provider.name) || provider.name;
       return normalized === targetProvider;
     }) || null
+  );
+}
+
+function getConfiguredBaseUrl(providerConfig: ProviderConfig | null | undefined): string | undefined {
+  const providerName = normalizeAgentProviderName(providerConfig?.name);
+  if (!providerConfig?.baseUrl || !providerName || !BASE_URL_CAPABLE_PROVIDER_NAMES.includes(providerName)) {
+    return undefined;
+  }
+
+  return providerConfig.baseUrl;
+}
+
+function mergeDiscoveredModels(
+  discoveredIds: string[],
+  overrides: AgentRuntimeModelConfig[] = []
+): AgentRuntimeModelConfig[] {
+  const overridesById = new Map(overrides.map((model) => [model.id, model]));
+
+  return discoveredIds.map((id) => ({
+    id,
+    displayName: id,
+    enabled: true,
+    default: false,
+    maxTokens: DISCOVERED_MODEL_MAX_TOKENS,
+    ...overridesById.get(id),
+  }));
+}
+
+async function withDiscoveredModels(providerConfigs: ProviderConfig[]): Promise<ProviderConfig[]> {
+  return Promise.all(
+    providerConfigs.map(async (provider) => {
+      const baseUrl = getConfiguredBaseUrl(provider);
+      if (!provider?.discoverModels || provider.enabled === false || !baseUrl) {
+        return provider;
+      }
+
+      const apiKey = readSharedProviderApiKey(provider.name, provider.apiKeyEnvVar);
+      if (!apiKey) {
+        return provider;
+      }
+
+      const discoveredIds = await discoverEndpointModelIds({ baseUrl, apiKey });
+      if (!discoveredIds) {
+        return provider;
+      }
+
+      return { ...provider, models: mergeDiscoveredModels(discoveredIds, provider.models) };
+    })
   );
 }
 
@@ -205,6 +273,17 @@ export default class AgentProviderRegistry {
     return readSharedProviderApiKey(providerConfig?.name || provider, providerConfig?.apiKeyEnvVar);
   }
 
+  static async getProviderBaseUrl({
+    repoFullName,
+    provider,
+  }: {
+    repoFullName?: string;
+    provider: string;
+  }): Promise<string | undefined> {
+    const providerConfig = await this.getEnabledProviderConfig(repoFullName, provider);
+    return getConfiguredBaseUrl(providerConfig);
+  }
+
   static async getProviderApiKey({
     repoFullName,
     provider,
@@ -234,7 +313,8 @@ export default class AgentProviderRegistry {
 
   static async listAvailableModels(repoFullName?: string): Promise<AgentModelSummary[]> {
     const config = await AgentRuntimeConfigService.getInstance().getEffectiveConfig(repoFullName);
-    return transformProviderModels(config.providers || []).flatMap((model) => {
+    const providers = await withDiscoveredModels((config.providers || []) as ProviderConfig[]);
+    return transformProviderModels(providers).flatMap((model) => {
       const provider = normalizeModelProvider(model.provider);
       if (!provider) {
         return [];
@@ -367,12 +447,15 @@ export default class AgentProviderRegistry {
     selection: AgentResolvedModelSelection;
     userIdentity: RequestUserIdentity;
   }): Promise<LanguageModel> {
-    const apiKey = await this.getRequiredProviderApiKey({
-      provider: selection.provider,
-      userIdentity,
-      repoFullName,
-    });
-    const provider = await getProviderInstance(selection.provider, apiKey);
+    const [apiKey, baseUrl] = await Promise.all([
+      this.getRequiredProviderApiKey({
+        provider: selection.provider,
+        userIdentity,
+        repoFullName,
+      }),
+      this.getProviderBaseUrl({ repoFullName, provider: selection.provider }),
+    ]);
+    const provider = await getProviderInstance(selection.provider, apiKey, baseUrl);
 
     return provider(selection.modelId);
   }
