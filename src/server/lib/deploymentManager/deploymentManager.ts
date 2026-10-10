@@ -81,6 +81,8 @@ export class DeploymentManager {
   private unresolvedDeploys: Deploy[] = [];
   private dependencyCycleDescription = '';
   private readonly options: DeploymentManagerOptions;
+  // The first error a launch threw: nothing launches after it, and deploy() rethrows it once every launch has settled.
+  private abort?: { error: unknown };
 
   constructor(deploys: Deploy[], options: DeploymentManagerOptions = {}) {
     this.options = options;
@@ -224,12 +226,19 @@ export class DeploymentManager {
       const name = deploy.deployable.name;
       let pending = outcomes.get(name);
       if (!pending) {
-        pending = this.launchWhenPrerequisitesDone(deploy, levelOf.get(name) ?? 0, failed, superseded, schedule);
+        pending = this.launchWhenPrerequisitesDone(deploy, levelOf.get(name) ?? 0, failed, superseded, schedule).catch(
+          (error) => {
+            if (!this.abort) this.abort = { error };
+            throw error;
+          }
+        );
         outcomes.set(name, pending);
       }
       return pending;
     };
-    await Promise.all(Array.from(this.deploys.values()).map((deploy) => schedule(deploy)));
+    // Work still in flight settles before the error surfaces, so a queue retry never overlaps it.
+    await Promise.allSettled(Array.from(this.deploys.values()).map((deploy) => schedule(deploy)));
+    this.assertNotAborted();
 
     return { failed: Array.from(failed.values()).filter((deploy): deploy is Deploy => deploy != null) };
   }
@@ -257,6 +266,7 @@ export class DeploymentManager {
         getLogger().info(`Deploy: ${name} checking prerequisite=${dependency}`);
         outcome = await this.options.prerequisiteOutcome(deploy, dependency);
       }
+      this.assertNotAborted();
       if (outcome === 'ready') continue;
       if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
       const statusMessage =
@@ -267,6 +277,7 @@ export class DeploymentManager {
       return 'failed';
     }
 
+    this.assertNotAborted();
     if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
     await this.launchLevel(level, [deploy], failed, superseded);
     if (failed.has(name)) return 'failed';
@@ -280,6 +291,10 @@ export class DeploymentManager {
     superseded.add(deploy.deployable.name);
     getLogger().info(`Deploy: ${deploy.deployable.name} skipped reason=superseded`);
     return false;
+  }
+
+  private assertNotAborted(): void {
+    if (this.abort) throw this.abort.error;
   }
 
   private async launchLevel(

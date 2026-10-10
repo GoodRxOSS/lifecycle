@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-import type { Transaction } from 'objection';
+import type { PartialModelObject, Transaction } from 'objection';
 import type { JobDataWithContext } from 'server/lib/logger';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
+import { DeployStatus } from 'shared/constants';
 
 export interface SourcePushIntent {
   type: 'source';
@@ -99,6 +100,13 @@ export function deploymentIntentDeployFilter(intent: DeploymentIntent): {
   return { githubRepositoryId: intent.githubRepositoryId };
 }
 
+/** A stamped row is unowned and queued: the older run can no longer write to it, and its old status is not current. */
+export function deployStampForGeneration(generation: number): PartialModelObject<Deploy> {
+  const stamp = { desiredGeneration: generation, runUUID: null, status: DeployStatus.QUEUED, statusMessage: null };
+  // The token column is nullable; the model types it as a string.
+  return stamp as unknown as PartialModelObject<Deploy>;
+}
+
 /** Raises the selected rows to `generation`; rows already desired at a newer generation are left alone. */
 export async function stampDeploysForIntent(
   trx: Transaction | undefined,
@@ -107,7 +115,7 @@ export async function stampDeploysForIntent(
   generation: number
 ): Promise<number> {
   return Deploy.query(trx)
-    .patch({ desiredGeneration: generation })
+    .patch(deployStampForGeneration(generation))
     .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
     .where('desiredGeneration', '<', generation);
 }

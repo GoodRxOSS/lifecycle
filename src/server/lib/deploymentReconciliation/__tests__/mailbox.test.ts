@@ -38,6 +38,7 @@ jest.mock('server/models/Deploy', () => ({
 
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
+import { DeployStatus } from 'shared/constants';
 import {
   acceptDeploymentIntent,
   AcceptedDeploymentRefs,
@@ -170,7 +171,12 @@ describe('acceptDeploymentIntent', () => {
     expect(read.whereNull).toHaveBeenCalledWith('deletedAt');
     expect(read.forUpdate).toHaveBeenCalledTimes(1);
     expect(Deploy.query).toHaveBeenCalledWith(TRX);
-    expect(deployStamp.patch).toHaveBeenCalledWith({ desiredGeneration: 3 });
+    expect(deployStamp.patch).toHaveBeenCalledWith({
+      desiredGeneration: 3,
+      runUUID: null,
+      status: DeployStatus.QUEUED,
+      statusMessage: null,
+    });
     expect(deployStamp.where).toHaveBeenCalledWith({
       buildId: 42,
       active: true,

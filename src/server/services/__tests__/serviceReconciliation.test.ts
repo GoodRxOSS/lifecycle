@@ -155,6 +155,7 @@ jest.mock('server/lib/fastly', () => jest.fn().mockImplementation(() => ({})));
 import BuildService from '../build';
 import { DeploymentSupersededError } from 'server/lib/deploymentReconciliation/errors';
 import { AuthorityLockLostError } from 'server/lib/authorityLock';
+import { isDeployAuthorityCurrent } from 'server/lib/deploymentReconciliation/authority';
 import { BuildKind, BuildStatus, DeployStatus, DeployTypes, PullRequestStatus } from 'shared/constants';
 import { ParsingError } from 'server/lib/yamlConfigParser';
 
@@ -201,6 +202,7 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
   };
   const deployRows: any[] = specs.map((spec, index) => ({
     id: index + 1,
+    deployableId: index + 1,
     uuid: `${spec.name}-static-z`,
     buildId: BUILD_ID,
     githubRepositoryId: spec.repo,
@@ -370,6 +372,20 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
 
   sim.buildQuery = () => query(() => [buildRow], hydrateBuild, 'build');
   sim.deployQuery = () => query(() => deployRows, hydrateDeploy, 'deploy');
+  sim.deployableQuery = () =>
+    query(
+      () =>
+        deployRows
+          .filter((row) => !orphanRows.has(row.deployableName))
+          .map((row) => ({
+            id: row.deployableId,
+            buildId: BUILD_ID,
+            name: row.deployableName,
+            type: DeployTypes.GITHUB,
+          })),
+      (row) => row,
+      'deployable'
+    );
   sim.emptyQuery = () =>
     query(
       () => [],
@@ -379,6 +395,7 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
   sim.failPatchOnce = null;
   sim.fetchGraphGate = null;
   sim.importGate = null;
+  sim.importGateRepo = null;
 
   // One mutex per resource, so the simulator exercises the same serialization the Redis locks provide.
   const held = new Map<string, Promise<void>>();
@@ -515,6 +532,7 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
       models: {
         Build: { query: sim.buildQuery },
         Deploy: { query: sim.deployQuery },
+        Deployable: { query: sim.deployableQuery },
         Repository: { query: sim.emptyQuery },
       },
       services: {
@@ -529,7 +547,7 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
               ref: args[6] ?? null,
               pins: args[9] ?? null,
             });
-            if (repo == null && sim.importGate) {
+            if ((repo ?? null) === sim.importGateRepo && sim.importGate) {
               const gate = sim.importGate;
               sim.importGate = null;
               await gate;
@@ -548,6 +566,7 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
               for (const spec of servicesAddedByConfig.splice(0)) {
                 deployRows.push({
                   id: deployRows.length + 1,
+                  deployableId: deployRows.length + 1,
                   uuid: `${spec.name}-static-z`,
                   buildId: BUILD_ID,
                   githubRepositoryId: spec.repo,
@@ -599,25 +618,39 @@ function createWorld(specs: ServiceSpec[], options: { applyMinutes?: number; rea
     if (injected) throw injected;
     const failed = new Set([DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED]);
     // A fenced rollout takes exactly the rows this run claimed; rows already READY were rolled out by an earlier attempt.
-    const targets = deployRows.filter(
-      (row) =>
-        row.runUUID === runUUID &&
-        row.desiredGeneration === expectedGeneration &&
-        !failed.has(row.status) &&
-        row.status !== DeployStatus.READY
-    );
+    const owned = deployRows.filter((row) => row.runUUID === runUUID && row.desiredGeneration === expectedGeneration);
+    const targets = owned.filter((row) => !failed.has(row.status) && row.status !== DeployStatus.READY);
+    // As in the manager: a prerequisite this run failed blocks outright; one outside the run goes through the real probe.
     const blocked = new Set<string>([
       ...(unresolvedServices ?? []),
-      ...deployRows.filter((row) => failed.has(row.status)).map((row) => row.deployableName),
+      ...owned.filter((row) => failed.has(row.status)).map((row) => row.deployableName),
     ]);
+    const prerequisiteOutcome = async (row: any, name: string) => {
+      if (blocked.has(name)) return 'failed';
+      if (targets.some((candidate) => candidate.deployableName === name)) return 'ready';
+      return service.waitForServiceOutcome(BUILD_ID, name, runUUID, expectedGeneration, () =>
+        isDeployAuthorityCurrent(service.db.models, row, runUUID, expectedGeneration)
+      );
+    };
     const applied: any[] = [];
     await sleep(applyMs);
     for (const row of targets) {
       // The per-service promotion gate re-checks the row inside the lock.
       if (!isRowCurrent(row.id, runUUID, expectedGeneration)) continue;
-      const blockedBy = (dependsOn.get(row.deployableName) ?? []).find((name) => blocked.has(name));
+      let blockedBy: string | undefined;
+      let reason = 'failed';
+      for (const name of dependsOn.get(row.deployableName) ?? []) {
+        const outcome = await prerequisiteOutcome(row, name);
+        if (outcome === 'ready') continue;
+        blockedBy = name;
+        reason = outcome === 'failed' ? 'failed' : 'did not finish';
+        break;
+      }
       if (blockedBy) {
-        Object.assign(row, { status: DeployStatus.DEPLOY_FAILED, statusMessage: `Not deployed: ${blockedBy} failed.` });
+        Object.assign(row, {
+          status: DeployStatus.DEPLOY_FAILED,
+          statusMessage: `Not deployed: ${blockedBy} ${reason}.`,
+        });
         log(`gen${expectedGeneration} ${row.deployableName}: BLOCKED by ${blockedBy}`);
         continue;
       }
@@ -1399,5 +1432,45 @@ describe('service-independent reconciliation: review regressions', () => {
     expect(world.row('A').desiredGeneration).toBe(2);
     expect(world.row('A').observedGeneration).toBe(2);
     expect(world.settled()).toBe(true);
+  });
+  test('a dependent waits for a prerequisite whose corrective push is accepted but not yet claimed, instead of failing on the stale row', async () => {
+    const world = createWorld([
+      { name: 'A', repo: 100, buildMinutes: 1 },
+      { name: 'B', repo: 200, buildMinutes: 3 },
+    ]);
+    world.dependsOn.set('B', ['A']);
+    world.failBuild.add('A');
+    await world.merge('A');
+    await jest.advanceTimersByTimeAsync(5 * MIN);
+    expect(world.row('A').status).toBe(DeployStatus.BUILD_FAILED);
+    expect(world.settled()).toBe(true);
+
+    world.failBuild.delete('A');
+    const bSha = await world.merge('B');
+    await jest.advanceTimersByTimeAsync(1 * MIN);
+    // The fix for A lands while B builds; its job is held before the claim, as a slow configuration read would hold it.
+    let releaseA!: () => void;
+    sim.importGateRepo = 100;
+    sim.importGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const aSha = await world.merge('A');
+    await jest.advanceTimersByTimeAsync(4 * MIN);
+
+    expect(world.row('A').runUUID).toBeNull();
+    expect(world.row('A').status).toBe(DeployStatus.QUEUED);
+    expect(world.row('B').status).toBe(DeployStatus.BUILT);
+    expect(logs.some((line) => line.includes('waiting for service=A'))).toBe(true);
+
+    releaseA();
+    await jest.advanceTimersByTimeAsync(30 * MIN);
+
+    expect(world.live.get('A')).toBe(`A@${aSha}`);
+    expect(world.live.get('B')).toBe(`B@${bSha}`);
+    expect(world.row('B').status).toBe(DeployStatus.READY);
+    expect(world.counters.applies.get('B')).toBe(1);
+    expect(world.queue.finalFailures).toEqual([]);
+    expect(world.settled()).toBe(true);
+    expect(world.buildRow.status).toBe(BuildStatus.DEPLOYED);
   });
 });

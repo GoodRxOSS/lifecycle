@@ -77,6 +77,7 @@ import {
   acceptDeploymentIntent,
   deploymentIntentDeployFilter,
   deploymentIntentSelectsAllDeploys,
+  deployStampForGeneration,
   dirtyDeploymentIntents,
   markDeploymentIntentObserved,
   recordIntentConfigFailures,
@@ -3555,8 +3556,9 @@ export default class BuildService extends BaseService {
    * own generation is ordered by the plan or already handled by an earlier
    * phase, so it is never waited on; a row desired at a newer generation is
    * another run's even while it still carries this token. Such rows are polled
-   * until READY, failed, or settled. Codefresh and configuration services
-   * finish at BUILT.
+   * until READY, failed, or settled. A pending row with no token is accepted
+   * but not yet claimed, so the status it still shows is the older run's.
+   * Codefresh and configuration services finish at BUILT.
    */
   private async waitForServiceOutcome(
     buildId: number,
@@ -3575,14 +3577,17 @@ export default class BuildService extends BaseService {
             .select('status', 'runUUID', 'desiredGeneration', 'observedGeneration')
         : null;
       if (!row) return 'ready';
-      if (isDeployFailure(row.status)) return 'failed';
+      const settled = Number(row.observedGeneration) >= Number(row.desiredGeneration);
+      const unclaimed = !settled && row.runUUID == null;
+      if (!unclaimed && isDeployFailure(row.status)) return 'failed';
       const finishesAtBuilt =
         deployable!.type === DeployTypes.CODEFRESH || deployable!.type === DeployTypes.CONFIGURATION;
       const finished =
-        row.status === DeployStatus.READY ||
-        row.status === DeployStatus.DEPLOYED ||
-        (finishesAtBuilt && row.status === DeployStatus.BUILT) ||
-        Number(row.observedGeneration) >= Number(row.desiredGeneration);
+        settled ||
+        (!unclaimed &&
+          (row.status === DeployStatus.READY ||
+            row.status === DeployStatus.DEPLOYED ||
+            (finishesAtBuilt && row.status === DeployStatus.BUILT)));
       if (finished || (row.runUUID === runUUID && Number(row.desiredGeneration) === expectedGeneration)) return 'ready';
       if (!(await isCurrent()) || Date.now() >= deadline) return 'stopped';
       if (!waited) getLogger({ buildId }).info(`Deploy: waiting for service=${name} to finish its rollout`);
@@ -4372,7 +4377,7 @@ export default class BuildService extends BaseService {
 
   private async adoptDeploysForIntent(buildId: number, intent: DeploymentIntent, generation: number): Promise<void> {
     await this.db.models.Deploy.query()
-      .patch({ desiredGeneration: generation })
+      .patch(deployStampForGeneration(generation))
       .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
       .where('desiredGeneration', '<', generation)
       .where('observedGeneration', '<', generation);

@@ -2187,6 +2187,35 @@ describe('BuildService focused changed-line coverage', () => {
     expect(isCurrent).toHaveBeenCalledTimes(1);
   });
 
+  test('waitForServiceOutcome keeps waiting on a pending row no run has claimed yet, whatever status it still shows', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, deploySelect } = outcomeService({ id: 9, type: DeployTypes.GITHUB }, [
+        { status: DeployStatus.BUILD_FAILED, runUUID: null, desiredGeneration: 3, observedGeneration: 1 },
+        { status: DeployStatus.READY, runUUID: null, desiredGeneration: 3, observedGeneration: 1 },
+        { status: DeployStatus.READY, runUUID: 'next', desiredGeneration: 3, observedGeneration: 1 },
+      ]);
+      const isCurrent = jest.fn().mockResolvedValue(true);
+
+      const outcome = service['waitForServiceOutcome'](4, 'a', 'run-g', 2, isCurrent);
+      await jest.advanceTimersByTimeAsync(20_000);
+
+      await expect(outcome).resolves.toBe('ready');
+      expect(deploySelect).toHaveBeenCalledTimes(3);
+      expect(isCurrent).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('waitForServiceOutcome trusts the status of a settled row even when no run holds it', async () => {
+    const { service } = outcomeService({ id: 9, type: DeployTypes.GITHUB }, [
+      { status: DeployStatus.DEPLOY_FAILED, runUUID: null, desiredGeneration: 2, observedGeneration: 2 },
+    ]);
+
+    await expect(service['waitForServiceOutcome'](4, 'a', 'run-g', 2, jest.fn())).resolves.toBe('failed');
+  });
+
   test('waitForServiceOutcome treats a service with no row as ready', async () => {
     const { service } = outcomeService(null, []);
 

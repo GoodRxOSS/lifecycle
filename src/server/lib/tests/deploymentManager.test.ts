@@ -853,6 +853,53 @@ describe('DeploymentManager', () => {
       expect(waitForDeployPodReady).not.toHaveBeenCalled();
     });
 
+    it('lets launched siblings finish and launches nothing more once a promotion lease is lost', async () => {
+      const { deploy: leased } = managedDeploy({ name: 'leased' });
+      const { deploy: slow } = managedDeploy({ name: 'slow' });
+      const { deploy: dependent, patch: dependentPatch } = managedDeploy({
+        name: 'dependent',
+        deploymentDependsOn: ['slow'],
+      });
+      const lost = new AuthorityLockLostError('deploy-promotion.1');
+      const events: string[] = [];
+      let finishSlow!: () => void;
+      const slowApply = new Promise<void>((resolve) => {
+        finishSlow = resolve;
+      });
+      (createKubernetesApplyJob as jest.Mock).mockImplementation(async ({ deploy }: { deploy: Deploy }) => {
+        if (deploy !== slow) return;
+        await slowApply;
+        events.push('slow applied');
+      });
+      const manager = new DeploymentManager([leased, slow, dependent], {
+        nativeMutationGate: (async (deploy: Deploy, action: () => Promise<unknown>) => {
+          if (deploy === leased) throw lost;
+          return { admitted: true, value: await action() };
+        }) as any,
+      });
+
+      try {
+        const outcome = manager.deploy().catch((error) => {
+          events.push('rejected');
+          throw error;
+        });
+        for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+        expect(events).toEqual([]);
+
+        finishSlow();
+        await expect(outcome).rejects.toBe(lost);
+        expect(events).toEqual(['slow applied', 'rejected']);
+        expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+        expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: slow }));
+        expect(dependentPatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+        );
+        expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+      } finally {
+        (createKubernetesApplyJob as jest.Mock).mockResolvedValue(undefined);
+      }
+    });
+
     it('skips a service another run took while an earlier level was still deploying', async () => {
       const { deploy: first } = managedDeploy({ name: 'first' });
       const { deploy: second, where } = managedDeploy({ name: 'second', deploymentDependsOn: ['first'] });
