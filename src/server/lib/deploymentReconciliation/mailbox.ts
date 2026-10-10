@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
+import type { PartialModelObject, Transaction } from 'objection';
 import type { JobDataWithContext } from 'server/lib/logger';
 import Build from 'server/models/Build';
+import Deploy from 'server/models/Deploy';
+import { DeployStatus } from 'shared/constants';
 
 export interface SourcePushIntent {
   type: 'source';
@@ -41,7 +44,12 @@ export interface EnvironmentRedeployIntent {
 }
 
 export type DeploymentIntent = SourcePushIntent | RepositoryRedeployIntent | EnvironmentRedeployIntent;
-export type AcceptedDeploymentIntent = DeploymentIntent & { gen: number };
+export type AcceptedDeploymentIntent = DeploymentIntent & {
+  gen: number;
+  observedGen?: number;
+  /** Services whose YAML failed in this intent's import and had no row to carry it; absent until the import ran. */
+  configFailures?: Record<string, string>;
+};
 export type AcceptedDeploymentRefs = Record<string, AcceptedDeploymentIntent>;
 
 export interface DeploymentReconciliationJobData extends JobDataWithContext {
@@ -65,12 +73,51 @@ export interface AcceptDeploymentIntentResult {
 export function deploymentIntentScopeKey(intent: DeploymentIntent): string {
   switch (intent.type) {
     case 'source':
-      return `source:${intent.githubRepositoryId}:${encodeURIComponent(intent.branch)}`;
+      // A config-repo push selects every row; it must never replace the repo-scoped entry of the same source.
+      return `source:${intent.githubRepositoryId}:${encodeURIComponent(intent.branch)}${
+        intent.target === 'all' ? ':all' : ''
+      }`;
     case 'repository':
       return `repository:${intent.githubRepositoryId}`;
     case 'all':
       return 'all';
   }
+}
+
+export function deploymentIntentSelectsAllDeploys(intent: DeploymentIntent): boolean {
+  return intent.type === 'all' || (intent.type === 'source' && intent.target === 'all');
+}
+
+/** The Deploy rows an intent selects; an empty filter means every active row. */
+export function deploymentIntentDeployFilter(intent: DeploymentIntent): {
+  githubRepositoryId?: number;
+  branchName?: string;
+} {
+  if (intent.type === 'all') return {};
+  if (intent.type === 'source') {
+    return intent.target === 'all' ? {} : { githubRepositoryId: intent.githubRepositoryId, branchName: intent.branch };
+  }
+  return { githubRepositoryId: intent.githubRepositoryId };
+}
+
+/** A stamped row is unowned and queued: the older run can no longer write to it, and its old status is not current. */
+export function deployStampForGeneration(generation: number): PartialModelObject<Deploy> {
+  const stamp = { desiredGeneration: generation, runUUID: null, status: DeployStatus.QUEUED, statusMessage: null };
+  // The token column is nullable; the model types it as a string.
+  return stamp as unknown as PartialModelObject<Deploy>;
+}
+
+/** Raises the selected rows to `generation`; rows already desired at a newer generation are left alone. */
+export async function stampDeploysForIntent(
+  trx: Transaction | undefined,
+  buildId: number,
+  intent: DeploymentIntent,
+  generation: number
+): Promise<number> {
+  return Deploy.query(trx)
+    .patch(deployStampForGeneration(generation))
+    .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
+    .where('desiredGeneration', '<', generation);
 }
 
 /** Returns the latest intent for every scope that has not yet been observed. */
@@ -147,12 +194,77 @@ export async function acceptDeploymentIntent(
       ...acceptedRefs,
       [scopeKey]: { ...intent, gen: generation },
     };
+    // Every row moves to this generation, so an older environment-wide entry has nothing left to execute.
+    if (deploymentIntentSelectsAllDeploys(intent)) {
+      for (const [key, accepted] of Object.entries(acceptedRefs)) {
+        if (key === scopeKey || !deploymentIntentSelectsAllDeploys(accepted) || accepted.observedGen === accepted.gen) {
+          continue;
+        }
+        nextRefs[key] = { ...accepted, observedGen: accepted.gen };
+      }
+    }
 
     await Build.query(trx).findById(buildId).patch({
       desiredGeneration: generation,
       acceptedRefs: nextRefs,
     });
+    await stampDeploysForIntent(trx, buildId, intent, generation);
 
     return { accepted: true, generation, scopeKey };
+  });
+}
+
+/** Marks the entry accepted at `generation` finished, so a replayed signal exits before touching configuration. */
+export async function markDeploymentIntentObserved(buildId: number, generation: number): Promise<boolean> {
+  return Build.transact(async (trx) => {
+    const build = await Build.query(trx)
+      .select('id', 'acceptedRefs')
+      .findById(buildId)
+      .whereNull('deletedAt')
+      .forUpdate();
+    if (!build) return false;
+
+    const acceptedRefs =
+      build.acceptedRefs && typeof build.acceptedRefs === 'object' && !Array.isArray(build.acceptedRefs)
+        ? build.acceptedRefs
+        : {};
+    const entry = Object.entries(acceptedRefs).find(([, intent]) => intent?.gen === generation);
+    if (!entry) return false;
+    const [scopeKey, intent] = entry;
+    if (intent.observedGen === generation) return true;
+
+    await Build.query(trx)
+      .findById(buildId)
+      .patch({ acceptedRefs: { ...acceptedRefs, [scopeKey]: { ...intent, observedGen: generation } } });
+    return true;
+  });
+}
+
+/** Records which row-less services the import at `generation` could not read; an empty map means the import was clean. */
+export async function recordIntentConfigFailures(
+  buildId: number,
+  generation: number,
+  configFailures: Record<string, string>
+): Promise<boolean> {
+  return Build.transact(async (trx) => {
+    const build = await Build.query(trx)
+      .select('id', 'acceptedRefs')
+      .findById(buildId)
+      .whereNull('deletedAt')
+      .forUpdate();
+    if (!build) return false;
+
+    const acceptedRefs =
+      build.acceptedRefs && typeof build.acceptedRefs === 'object' && !Array.isArray(build.acceptedRefs)
+        ? build.acceptedRefs
+        : {};
+    const entry = Object.entries(acceptedRefs).find(([, intent]) => intent?.gen === generation);
+    if (!entry) return false;
+    const [scopeKey, intent] = entry;
+
+    await Build.query(trx)
+      .findById(buildId)
+      .patch({ acceptedRefs: { ...acceptedRefs, [scopeKey]: { ...intent, configFailures } } });
+    return true;
   });
 }

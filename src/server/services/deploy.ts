@@ -20,6 +20,7 @@ import * as codefresh from 'server/lib/codefresh';
 import { getLogger, withLogContext, extractContextForQueue } from 'server/lib/logger';
 import hash from 'object-hash';
 import { BuildKind, DeployStatus, DeployTypes } from 'shared/constants';
+import { isDeployAuthorityCurrent } from 'server/lib/deploymentReconciliation/authority';
 import * as cli from 'server/lib/cli';
 import RDS from 'aws-sdk/clients/rds';
 import resourceGroupsTagging from 'aws-sdk/clients/resourcegroupstaggingapi';
@@ -83,7 +84,8 @@ export default class DeployService extends BaseService {
     githubRepositoryId?: number,
     sourceRef?: string | null,
     sourceBranch?: string | null,
-    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId
+    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId,
+    acceptedSourcePins?: Record<string, string>
   ): Promise<Deploy[]> {
     await build?.$fetchGraph('[deployables.[repository]]');
 
@@ -162,7 +164,9 @@ export default class DeployService extends BaseService {
                 sourceRef,
                 sourceGithubRepositoryId,
                 sourceBranch
-              ) ?? (await getShaForDeploy(deploy));
+              ) ??
+              acceptedSourcePins?.[`${deployableRepositoryId}:${effectiveBranch}`] ??
+              (await getShaForDeploy(deploy));
             patchFields.sha = sha;
           } catch (error) {
             getLogger().debug({ error }, 'Deploy: SHA fetch failed continuing=true');
@@ -330,7 +334,9 @@ export default class DeployService extends BaseService {
     runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    acceptedSourcePins?: Record<string, string>,
+    expectedGeneration?: number
   ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       let result: boolean = false;
@@ -348,7 +354,8 @@ export default class DeployService extends BaseService {
           deploy.branchName,
           sourceRef,
           sourceGithubRepositoryId,
-          sourceBranch
+          sourceBranch,
+          acceptedSourcePins
         );
         const shortSha = fullSha.substring(0, 7);
         const envSha = hash(merge(deploy.env || {}, build.commentRuntimeEnv));
@@ -366,26 +373,40 @@ export default class DeployService extends BaseService {
           let buildLogs: string;
           let codefreshBuildId: string;
           try {
-            const current = await this.patchDeployForRun(deploy, runUUID, {
-              buildLogs: null,
-              buildPipelineId: null,
-              buildOutput: null,
-              deployPipelineId: null,
-              deployOutput: null,
-            });
+            const current = await this.patchDeployForRun(
+              deploy,
+              runUUID,
+              {
+                buildLogs: null,
+                buildPipelineId: null,
+                buildOutput: null,
+                deployPipelineId: null,
+                deployOutput: null,
+              },
+              expectedGeneration
+            );
             if (!current) {
               getLogger().info('Codefresh: skipped reason=superseded');
               return true;
             }
 
-            const pinnedSourceRef = this.getPinnedBuildSourceRef(
-              build,
-              deploy.githubRepositoryId,
-              deploy.branchName,
-              sourceRef,
-              sourceGithubRepositoryId,
-              sourceBranch
-            );
+            if (
+              !(await this.patchDeployForRun(deploy, runUUID, { status: DeployStatus.DEPLOYING }, expectedGeneration))
+            ) {
+              getLogger().info('Codefresh: deploy skipped reason=superseded');
+              return true;
+            }
+            const pinnedSourceRef =
+              this.getPinnedBuildSourceRef(
+                build,
+                deploy.githubRepositoryId,
+                deploy.branchName,
+                sourceRef,
+                sourceGithubRepositoryId,
+                sourceBranch
+              ) ??
+              acceptedSourcePins?.[`${deploy.githubRepositoryId}:${deploy.branchName}`] ??
+              null;
             codefreshBuildId = await cli.codefreshDeploy(deploy, build, deployable, pinnedSourceRef).catch((error) => {
               getLogger().error({ error }, 'Codefresh: build id missing');
               return null;
@@ -455,13 +476,23 @@ export default class DeployService extends BaseService {
     runUUID: string,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    acceptedSourcePins?: Record<string, string>,
+    expectedGeneration?: number
   ): Promise<boolean> {
     if (deploy.deployable != null) {
       if (deploy.deployable.type === DeployTypes.AURORA_RESTORE) {
         return this.deployAurora(deploy, runUUID);
       } else if (deploy.deployable.type === DeployTypes.CODEFRESH) {
-        return this.deployCodefresh(deploy, runUUID, sourceRef, sourceGithubRepositoryId, sourceBranch);
+        return this.deployCodefresh(
+          deploy,
+          runUUID,
+          sourceRef,
+          sourceGithubRepositoryId,
+          sourceBranch,
+          acceptedSourcePins,
+          expectedGeneration
+        );
       }
     }
   }
@@ -478,7 +509,8 @@ export default class DeployService extends BaseService {
     sourceGithubRepositoryId?: number | null,
     sourceBranch?: string | null,
     expectedGeneration?: number,
-    nativeServiceAccount?: string
+    nativeServiceAccount?: string,
+    acceptedSourcePins?: Record<string, string>
   ): Promise<boolean> {
     return withLogContext({ deployUuid: deploy.uuid, serviceName: deploy.deployable?.name }, async () => {
       try {
@@ -499,7 +531,8 @@ export default class DeployService extends BaseService {
               sourceGithubRepositoryId,
               sourceBranch,
               expectedGeneration,
-              nativeServiceAccount
+              nativeServiceAccount,
+              acceptedSourcePins
             );
           case DeployTypes.DOCKER:
             await this.patchAndUpdateActivityFeed(
@@ -524,7 +557,8 @@ export default class DeployService extends BaseService {
                   sourceGithubRepositoryId,
                   sourceBranch,
                   expectedGeneration,
-                  nativeServiceAccount
+                  nativeServiceAccount,
+                  acceptedSourcePins
                 );
               }
 
@@ -539,7 +573,8 @@ export default class DeployService extends BaseService {
                     deploy.branchName,
                     sourceRef,
                     sourceGithubRepositoryId,
-                    sourceBranch
+                    sourceBranch,
+                    acceptedSourcePins
                   );
                 } catch (shaError) {
                   getLogger().debug(
@@ -654,16 +689,18 @@ export default class DeployService extends BaseService {
     branchName: string | null,
     sourceRef?: string | null,
     sourceGithubRepositoryId?: number | null,
-    sourceBranch?: string | null
+    sourceBranch?: string | null,
+    acceptedSourcePins?: Record<string, string>
   ): Promise<string> {
-    const pinned = this.getPinnedBuildSourceRef(
-      deploy.build,
-      deploy.githubRepositoryId,
-      deploy.branchName,
-      sourceRef,
-      sourceGithubRepositoryId,
-      sourceBranch
-    );
+    const pinned =
+      this.getPinnedBuildSourceRef(
+        deploy.build,
+        deploy.githubRepositoryId,
+        deploy.branchName,
+        sourceRef,
+        sourceGithubRepositoryId,
+        sourceBranch
+      ) ?? acceptedSourcePins?.[`${deploy.githubRepositoryId}:${deploy.branchName}`];
     if (pinned) return pinned;
 
     const [owner, name] = repo?.split('/') || [];
@@ -693,9 +730,16 @@ export default class DeployService extends BaseService {
   private async patchDeployForRun(
     deploy: Deploy,
     runUUID: string,
-    params: Objection.PartialModelObject<Deploy>
+    params: Objection.PartialModelObject<Deploy>,
+    expectedGeneration?: number
   ): Promise<boolean> {
-    const updated = await this.db.models.Deploy.query().where({ id: deploy.id, runUUID }).patch(params);
+    const updated = await this.db.models.Deploy.query()
+      .where({
+        id: deploy.id,
+        runUUID,
+        ...(expectedGeneration != null ? { desiredGeneration: expectedGeneration } : {}),
+      })
+      .patch(params);
     if (!updated) {
       getLogger().debug(`Deploy: stale write skipped deployId=${deploy.id} runUUID=${runUUID}`);
       return false;
@@ -703,25 +747,8 @@ export default class DeployService extends BaseService {
     return true;
   }
 
-  private async isDeployRunCurrent(deploy: Deploy, runUUID: string): Promise<boolean> {
-    const current = await this.db.models.Deploy.query().findOne({ id: deploy.id, runUUID }).select('id');
-    return Boolean(current);
-  }
-
-  private async isBuildRunCurrent(
-    buildId: number | null | undefined,
-    runUUID: string,
-    expectedGeneration?: number
-  ): Promise<boolean> {
-    if (!buildId) return false;
-    let current = this.db.models.Build.query().findOne({ id: buildId, runUUID }).whereNull('deletedAt');
-    if (expectedGeneration != null) current = current.where('desiredGeneration', expectedGeneration);
-    return Boolean(await current);
-  }
-
   private async isDeploymentRunCurrent(deploy: Deploy, runUUID: string, expectedGeneration?: number): Promise<boolean> {
-    if (!(await this.isDeployRunCurrent(deploy, runUUID))) return false;
-    return expectedGeneration == null || this.isBuildRunCurrent(deploy.buildId, runUUID, expectedGeneration);
+    return isDeployAuthorityCurrent(this.db.models, deploy, runUUID, expectedGeneration);
   }
 
   private async withDeploySecretMutation<T>(
@@ -1087,7 +1114,8 @@ export default class DeployService extends BaseService {
     sourceGithubRepositoryId?: number | null,
     sourceBranch?: string | null,
     expectedGeneration?: number,
-    nativeServiceAccount?: string
+    nativeServiceAccount?: string,
+    acceptedSourcePins?: Record<string, string>
   ) {
     const { build, deployable } = deploy;
     const uuid = build?.uuid;
@@ -1113,7 +1141,8 @@ export default class DeployService extends BaseService {
         deploy.branchName,
         sourceRef,
         sourceGithubRepositoryId,
-        sourceBranch
+        sourceBranch,
+        acceptedSourcePins
       );
 
       const repositoryName: string = deployable.repository.fullName;

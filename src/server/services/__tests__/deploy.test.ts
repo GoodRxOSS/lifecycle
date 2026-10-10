@@ -732,15 +732,10 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(mockBuildWithNative).not.toHaveBeenCalled();
     });
 
-    test('generation check uses buildId before the Build relation is loaded', async () => {
-      const currentBuildWhere = jest.fn().mockResolvedValue({ id: 91 });
-      mockDb.models.Build = {
-        query: jest.fn(() => ({
-          findOne: jest.fn(() => ({
-            whereNull: jest.fn(() => ({ where: currentBuildWhere })),
-          })),
-        })),
-      };
+    test('generation check fences on the Deploy row and the environment block state before the Build relation is loaded', async () => {
+      const authoritySelect = jest.fn().mockResolvedValue({ id: 91, deployEnabled: true });
+      const authorityFindById = jest.fn(() => ({ select: authoritySelect }));
+      mockDb.models.Build = { query: jest.fn(() => ({ findById: authorityFindById })) };
       const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
       const deploy = {
         id: 17,
@@ -755,7 +750,8 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         deployService.buildImage(deploy as any, 0, 'run-c', undefined, undefined, undefined, 7)
       ).resolves.toBe(true);
 
-      expect(currentBuildWhere).toHaveBeenCalledWith('desiredGeneration', 7);
+      expect(currentDeployFindOne).toHaveBeenCalledWith({ id: 17, runUUID: 'run-c', desiredGeneration: 7 });
+      expect(authorityFindById).toHaveBeenCalledWith(91);
       expect(deploy.$fetchGraph).toHaveBeenCalled();
       expect(patchSpy).toHaveBeenCalledWith(
         deploy,
@@ -787,6 +783,15 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         dockerImage: 'stale-image',
       });
       expect(deploy.$fetchGraph).not.toHaveBeenCalled();
+    });
+
+    test('patchDeployForRun fences on the generation it was handed', async () => {
+      const deploy = { id: 17, uuid: 'sample-service-build', runUUID: 'run-1' };
+
+      await deployService['patchDeployForRun'](deploy as any, 'run-1', { status: DeployStatus.DEPLOYING }, 6);
+
+      expect(conditionalDeployWhere).toHaveBeenCalledWith({ id: 17, runUUID: 'run-1', desiredGeneration: 6 });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({ status: DeployStatus.DEPLOYING });
     });
 
     test('recordDeployFailure writes a terminal status with the original error message', async () => {
@@ -1785,10 +1790,12 @@ describe('DeployService uncovered public behavior', () => {
     };
     const buildQuery: any = {
       findOne: jest.fn(() => buildQuery),
+      findById: jest.fn(() => buildQuery),
+      select: jest.fn(() => buildQuery),
       whereNull: jest.fn(() => buildQuery),
       where: jest.fn(() => buildQuery),
       then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
-        Promise.resolve({ id: 91 }).then(resolve, reject),
+        Promise.resolve({ id: 91, deployEnabled: true }).then(resolve, reject),
     };
     const githubDeploymentAdd = jest.fn().mockResolvedValue(undefined);
     const updatePullRequestActivityStream = jest.fn().mockResolvedValue(undefined);
@@ -2366,7 +2373,7 @@ describe('DeployService uncovered public behavior', () => {
     await expect(service.deployCLI({ deployable: null } as any, 'run-4')).resolves.toBeUndefined();
 
     expect(aurora).toHaveBeenCalledWith(auroraDeploy, 'run-1');
-    expect(codefresh).toHaveBeenCalledWith(codefreshDeployable, 'run-2', 'sha', 42, 'main');
+    expect(codefresh).toHaveBeenCalledWith(codefreshDeployable, 'run-2', 'sha', 42, 'main', undefined, undefined);
   });
 
   test('hostForDeployableDeploy and acmARNForDeploy expose the stable routing fallbacks', () => {
@@ -2572,6 +2579,7 @@ describe('DeployService uncovered public behavior', () => {
     expect(buildFromSource).toHaveBeenCalledWith(
       deploy,
       'run-1',
+      undefined,
       undefined,
       undefined,
       undefined,

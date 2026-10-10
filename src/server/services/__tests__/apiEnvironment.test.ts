@@ -152,6 +152,7 @@ function makeService({
   const deployQueryChain: any = {
     patch: jest.fn(() => deployQueryChain),
     where: jest.fn(() => deployQueryChain),
+    select: jest.fn(() => ({ where: jest.fn().mockResolvedValue([]) })),
   };
   const models = {
     Build: {
@@ -2090,7 +2091,7 @@ describe('applyApiEnvironmentPatch', () => {
     grantLock({ unlock, extend: jest.fn() });
     await pause;
 
-    expect((service as any).redlock.lock).toHaveBeenCalledWith('build-deployment.1', 15 * 60 * 1000);
+    expect((service as any).redlock.lock).toHaveBeenCalledWith('build-deployment.1', 60_000);
     expect(patchFn).toHaveBeenCalledWith(
       expect.objectContaining({ deployEnabled: false, runUUID: expect.any(String) })
     );
@@ -3187,13 +3188,13 @@ describe('processDeleteQueue', () => {
     expect(lockWithOptions).toHaveBeenNthCalledWith(
       1,
       'build-deployment.3',
-      15 * 60 * 1000,
+      60_000,
       expect.objectContaining({ retryCount: 4 })
     );
     expect(lockWithOptions).toHaveBeenNthCalledWith(
       2,
       'build-promotion.3',
-      15 * 60 * 1000,
+      60_000,
       expect.objectContaining({ retryCount: 4 })
     );
   });
@@ -3868,15 +3869,7 @@ describe('recordBuildFailure teardown ownership', () => {
 
     await (service as any).recordBuildFailure(build, BuildStatus.ERROR, 'new-run', new Error('boom'), 'fallback');
 
-    expect(updateStatus).toHaveBeenCalledWith(
-      build,
-      BuildStatus.ERROR,
-      'new-run',
-      true,
-      true,
-      expect.any(Error),
-      undefined
-    );
+    expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.ERROR, 'new-run', true, true, expect.any(Error));
   });
 
   it('re-stamps PR builds unconditionally', async () => {

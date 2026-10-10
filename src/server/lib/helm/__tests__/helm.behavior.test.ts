@@ -614,21 +614,26 @@ describe('Codefresh Helm YAML generation', () => {
     const deploy = makePublicDeploy();
     deploy.deployable.helm.chart.valueFiles = ['helm/preview.yaml'];
 
-    const command = await generateCodefreshRunCommand(deploy);
+    const { command, configPath } = await generateCodefreshRunCommand(deploy);
 
     expect(deploy.$fetchGraph).toHaveBeenCalledWith('build');
     expect(mockMkdir).toHaveBeenCalledWith('/tmp/lifecycle/codefresh', { recursive: true });
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      '/tmp/lifecycle/codefresh/helm-deploy-Preview-ABC.yaml',
-      expect.any(String),
-      'utf8'
-    );
+    expect(configPath).toMatch(/^\/tmp\/lifecycle\/codefresh\/helm-deploy-Preview-ABC-[\w-]{10}\.yaml$/);
+    expect(mockWriteFile).toHaveBeenCalledWith(configPath, expect.any(String), 'utf8');
     const writtenYaml = yaml.load(mockWriteFile.mock.calls[0][1] as string) as any;
     expect(writtenYaml.steps.clone.type).toBe('parallel');
     expect(writtenYaml.steps.deploy.arguments.custom_value_files).toEqual(['helm/preview.yaml']);
-    expect(command).toBe(
-      'codefresh run goodrx/helm-deploy -b "feature/helm-preview" -y /tmp/lifecycle/codefresh/helm-deploy-Preview-ABC.yaml -v ENV=lfc -d'
-    );
+    expect(command).toBe(`codefresh run goodrx/helm-deploy -b "feature/helm-preview" -y ${configPath} -v ENV=lfc -d`);
+  });
+
+  test('writes a separate file for every submission of the same service', async () => {
+    const deploy = makePublicDeploy();
+
+    const first = await generateCodefreshRunCommand(deploy);
+    const second = await generateCodefreshRunCommand(deploy);
+
+    expect(first.configPath).not.toBe(second.configPath);
+    expect(mockWriteFile).toHaveBeenCalledTimes(2);
   });
 
   test('logs and preserves a YAML write failure without constructing a command', async () => {

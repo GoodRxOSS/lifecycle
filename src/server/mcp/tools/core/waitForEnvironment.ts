@@ -257,6 +257,24 @@ interface EvaluatedWait {
   note?: string;
 }
 
+type DeployRequestState = 'settled' | 'pending' | 'unknown';
+
+/** A deploy id is settled once every service row it selected has caught up with its desired generation. */
+export function deployRequestState(build: LoadedEnvironment['build'], deployId: string): DeployRequestState {
+  const rows = (build.deploys ?? []).filter((deploy) => deploy.active !== false);
+  const pendingRow = (deploy: { desiredGeneration?: number; observedGeneration?: number }) =>
+    Number(deploy.desiredGeneration) > Number(deploy.observedGeneration);
+  if (build.runUUID === deployId) return rows.some(pendingRow) ? 'pending' : 'settled';
+  const owned = rows.filter((deploy) => deploy.runUUID === deployId);
+  if (owned.length > 0) return owned.some(pendingRow) ? 'pending' : 'settled';
+  const refs = build.acceptedRefs;
+  const entry =
+    refs && typeof refs === 'object' ? Object.values(refs).find((intent) => intent?.requestId === deployId) : undefined;
+  // An accepted entry whose job finished, including one whose rows a newer intent took over, is settled.
+  if (entry) return entry.observedGen === entry.gen ? 'settled' : 'pending';
+  return 'unknown';
+}
+
 function evaluateWait(
   target: EnvironmentWaitLoadedTarget,
   goal: EnvironmentWaitGoal,
@@ -281,7 +299,7 @@ function evaluateWait(
         note: 'This exact environment is being or has been destroyed, so the deploy cannot finish.',
       };
     }
-    if (build.runUUID !== deployId) {
+    if (deployRequestState(build, deployId) !== 'settled') {
       return {};
     }
   }
@@ -408,7 +426,7 @@ export function createWaitForEnvironmentToolDefinition(
           const liveCurrent = current as Extract<EnvironmentWaitLoadedTarget, { kind: 'live' }>;
           const environment = serializeEnvironmentState(liveCurrent.loaded, { format: 'concise' });
           const phase = getEnvironmentPhase(liveCurrent.loaded.build);
-          if (deployId && liveCurrent.loaded.build.runUUID !== deployId) {
+          if (deployId && deployRequestState(liveCurrent.loaded.build, deployId) === 'unknown') {
             return {
               target: { uuid, environmentId },
               result: {
