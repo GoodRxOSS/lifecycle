@@ -942,6 +942,9 @@ describe('service-independent reconciliation', () => {
     });
     expect(world.row('B').desiredGeneration).toBe(1);
     expect(world.queue.adds.filter(({ opts }) => opts.jobId === `reconcile-${BUILD_ID}-1`)).toHaveLength(1);
+    await world.service.processResolveAndDeployBuildQueue({ data: { buildId: BUILD_ID, runUUID: 'legacy-full' } });
+    expect(world.buildRow.acceptedRefs.all.gen).toBe(2);
+    expect(world.queue.adds.filter(({ opts }) => opts.jobId === `reconcile-${BUILD_ID}-2`)).toHaveLength(1);
     await expect(world.service.processDeploymentReconciliationQueue({ data: {} } as any)).rejects.toThrow(
       'buildId and generation are required'
     );
@@ -960,6 +963,20 @@ describe('service-independent reconciliation', () => {
 
     const jobIds = add.mock.calls.map(([, , opts]) => opts.jobId).sort();
     expect(jobIds).toEqual([`reconcile-${BUILD_ID}-3`, `reconcile-${BUILD_ID}-4`]);
+  });
+
+  test('the sweep also signals a build whose watermark says settled while a row is still pending', async () => {
+    const world = createWorld(SPECS);
+    world.buildRow.desiredGeneration = 5;
+    world.buildRow.observedGeneration = 5;
+    world.row('A').desiredGeneration = 5;
+    world.row('A').observedGeneration = 4;
+    const add = jest.fn().mockResolvedValue(undefined);
+    world.service.deploymentReconciliationQueue = { add };
+
+    await world.service.enqueuePendingDeploymentReconciliations();
+
+    expect(add.mock.calls.map(([, , opts]) => opts.jobId)).toEqual([`reconcile-${BUILD_ID}-5`]);
   });
 
   test('steady merges to other services never delay A', async () => {
@@ -1278,6 +1295,13 @@ describe('service-independent reconciliation: review regressions', () => {
     expect(world.live.get('A')).toBe(`A@${aSha}`);
     expect(world.buildRow.status).toBe(BuildStatus.ERROR);
     expect(world.buildRow.statusMessage).toContain('Not imported: N');
+
+    // A manual full redeploy re-evaluates N and re-reports it from the newest environment-wide import.
+    await world.redeployEnvironment('manual');
+    await jest.advanceTimersByTimeAsync(45 * MIN);
+    expect(world.settled()).toBe(true);
+    expect(world.buildRow.status).toBe(BuildStatus.ERROR);
+    expect(world.buildRow.statusMessage).toContain('Not imported: N (N lifecycle.yaml is invalid)');
 
     delete world.serviceConfigFailures.N;
     await world.pushConfigRepo();

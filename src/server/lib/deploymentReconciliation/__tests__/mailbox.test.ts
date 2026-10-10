@@ -556,6 +556,15 @@ describe('markDeploymentIntentObserved', () => {
 
     expect(Build.query).toHaveBeenCalledTimes(1);
   });
+
+  it('returns false for a missing build or a malformed mailbox', async () => {
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery(undefined));
+    await expect(markDeploymentIntentObserved(42, 4)).resolves.toBe(false);
+
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery({ id: 42, acceptedRefs: ['not', 'a', 'map'] }));
+    await expect(markDeploymentIntentObserved(42, 4)).resolves.toBe(false);
+    expect(Build.query).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('recordIntentConfigFailures', () => {
@@ -586,6 +595,15 @@ describe('recordIntentConfigFailures', () => {
 
     await expect(recordIntentConfigFailures(42, 9, {})).resolves.toBe(false);
     expect(Build.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns false for a missing build or a malformed mailbox', async () => {
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery(undefined));
+    await expect(recordIntentConfigFailures(42, 3, {})).resolves.toBe(false);
+
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery({ id: 42, acceptedRefs: 'broken' }));
+    await expect(recordIntentConfigFailures(42, 3, {})).resolves.toBe(false);
+    expect(Build.query).toHaveBeenCalledTimes(2);
   });
 });
 

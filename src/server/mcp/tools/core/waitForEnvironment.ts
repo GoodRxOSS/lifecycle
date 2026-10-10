@@ -260,7 +260,7 @@ interface EvaluatedWait {
 type DeployRequestState = 'settled' | 'pending' | 'unknown';
 
 /** A deploy id is settled once every service row it selected has caught up with its desired generation. */
-function deployRequestState(build: LoadedEnvironment['build'], deployId: string): DeployRequestState {
+export function deployRequestState(build: LoadedEnvironment['build'], deployId: string): DeployRequestState {
   const rows = (build.deploys ?? []).filter((deploy) => deploy.active !== false);
   const pendingRow = (deploy: { desiredGeneration?: number; observedGeneration?: number }) =>
     Number(deploy.desiredGeneration) > Number(deploy.observedGeneration);

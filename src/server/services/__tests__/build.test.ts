@@ -2313,6 +2313,101 @@ describe('BuildService focused changed-line coverage', () => {
     });
   });
 
+  test('a legacy rollout without a generation still throws when a service fails', async () => {
+    const deploy = {
+      id: 12,
+      uuid: 'legacy-web',
+      active: true,
+      deployable: { name: 'web', type: DeployTypes.GITHUB, deploymentDependsOn: [] },
+    };
+    mockDeployQuery.mockReturnValue(deployQuery([deploy]));
+    const service = serviceWith({});
+    const build = {
+      id: 4,
+      uuid: 'legacy',
+      namespace: 'env-legacy',
+      kind: BuildKind.SANDBOX,
+      $query: jest.fn(),
+    };
+    jest.spyOn(DeploymentManager.prototype, 'deploy').mockResolvedValueOnce({ failed: [deploy as any] });
+
+    await expect(
+      service.generateAndApplyManifests({ build: build as any, githubRepositoryId: null, namespace: build.namespace })
+    ).rejects.toThrow('Deployment failed for web');
+  });
+
+  test('a fenced rollout keeps failed rows in the plan by name and probes prerequisites outside the plan', async () => {
+    const failed = {
+      id: 13,
+      uuid: 'migrations-run',
+      active: true,
+      status: DeployStatus.BUILD_FAILED,
+      runUUID: 'run-g',
+      deployable: { name: 'migrations', type: DeployTypes.GITHUB, deploymentDependsOn: [] },
+    };
+    const api = {
+      id: 14,
+      uuid: 'api-run',
+      active: true,
+      status: DeployStatus.BUILT,
+      runUUID: 'run-g',
+      deployable: { name: 'api', type: DeployTypes.GITHUB, deploymentDependsOn: ['cache'] },
+    };
+    mockDeployQuery.mockReturnValue(deployQuery([failed, api]));
+    const deployableLookup = jest.fn(() => ({ select: jest.fn().mockResolvedValue(undefined) }));
+    const service = serviceWith({
+      models: {
+        Build: {
+          query: jest.fn(() => ({
+            findById: jest.fn(() => ({
+              select: jest
+                .fn()
+                .mockResolvedValue({ id: 4, status: BuildStatus.DEPLOYING, deployEnabled: true, pullRequestId: null }),
+            })),
+          })),
+        },
+        Deploy: {
+          query: jest.fn(() => ({
+            findOne: jest.fn(() => ({ select: jest.fn().mockResolvedValue({ id: 14, observedGeneration: 1 }) })),
+          })),
+        },
+        Deployable: { query: jest.fn(() => ({ findOne: deployableLookup })) },
+      },
+    });
+    jest.spyOn(service as any, 'updateDeploysImageDetails').mockResolvedValue(undefined);
+    const build = {
+      id: 4,
+      uuid: 'fenced',
+      namespace: 'env-fenced',
+      kind: BuildKind.SANDBOX,
+      pullRequest: null,
+      $query: jest.fn(),
+    };
+    let observedFailedServices: string[] = [];
+    let prerequisite: string | undefined;
+    jest.spyOn(DeploymentManager.prototype, 'deploy').mockImplementationOnce(async function (this: any) {
+      observedFailedServices = this.options.failedServices;
+      prerequisite = await this.options.prerequisiteOutcome(api, 'cache');
+      return { failed: [] };
+    });
+
+    await expect(
+      service.generateAndApplyManifests({
+        build: build as any,
+        runUUID: 'run-g',
+        expectedGeneration: 2,
+        githubRepositoryId: null,
+        namespace: build.namespace,
+        enqueueIngress: false,
+        unresolvedServices: ['billing'],
+      })
+    ).resolves.toBe(true);
+
+    expect(observedFailedServices).toEqual(['billing', 'migrations']);
+    expect(prerequisite).toBe('ready');
+    expect(deployableLookup).toHaveBeenCalledWith({ buildId: 4, name: 'cache' });
+  });
+
   test('filters inactive manifests and rejects a loaded active deploy missing its deployable', async () => {
     mockDeployQuery.mockReturnValue(
       deployQuery([
@@ -3697,6 +3792,53 @@ describe('BuildService uncovered public behavior', () => {
     await expect(withLock.withBuildDeploymentLock(2, action)).resolves.toBe('done');
     expect(lock).toHaveBeenCalledWith('build-deployment.2', 15 * 60 * 1000);
     expect(unlock).toHaveBeenCalledTimes(1);
+  });
+
+  test('withCurrentDeployPromotionLock keeps waiting on a contended service lock and logs once a minute', async () => {
+    jest.useFakeTimers();
+    try {
+      const unlock = jest.fn().mockResolvedValue(undefined);
+      const lock = jest.fn(async () => {
+        if (Date.now() < 60_500) throw new Error('resource is locked');
+        return { unlock, extend: jest.fn() };
+      });
+      const service = serviceWith({}, { lock });
+
+      const admitted = service.withCurrentDeployPromotionLock(
+        3,
+        async () => true,
+        async () => 'applied'
+      );
+      await jest.advanceTimersByTimeAsync(61_000);
+
+      await expect(admitted).resolves.toEqual({ admitted: true, value: 'applied' });
+      expect(lock).toHaveBeenCalledWith('deploy-promotion.3', 15 * 60 * 1000);
+      expect(unlock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('barrierDeployPromotionLocks takes and releases every service lock of the environment', async () => {
+    const unlock = jest.fn().mockResolvedValue(undefined);
+    const lock = jest.fn().mockResolvedValue({ unlock, extend: jest.fn() });
+    const service = serviceWith(
+      {
+        models: {
+          Deploy: {
+            query: jest.fn(() => ({
+              select: jest.fn(() => ({ where: jest.fn().mockResolvedValue([{ id: 1 }, { id: 2 }]) })),
+            })),
+          },
+        },
+      },
+      { lock }
+    );
+
+    await (service as any).barrierDeployPromotionLocks(4);
+
+    expect(lock.mock.calls.map(([resource]) => resource)).toEqual(['deploy-promotion.1', 'deploy-promotion.2']);
+    expect(unlock).toHaveBeenCalledTimes(2);
   });
 
   test('the generation try-lock is short-lived and renewed often, so a dead worker frees its generation quickly', async () => {
