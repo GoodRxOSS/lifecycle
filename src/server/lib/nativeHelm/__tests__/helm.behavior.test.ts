@@ -24,6 +24,7 @@ const mockWithLogContext = jest.fn();
 const mockMkdir = jest.fn();
 const mockWriteFile = jest.fn();
 const mockShellPromise = jest.fn();
+const mockUnlink = jest.fn();
 const mockNanoid = jest.fn();
 const mockMetricsConstructor = jest.fn();
 const mockMetricIncrement = jest.fn();
@@ -73,6 +74,7 @@ jest.mock('fs', () => ({
     promises: {
       mkdir: (...args: unknown[]) => mockMkdir(...args),
       writeFile: (...args: unknown[]) => mockWriteFile(...args),
+      unlink: (...args: unknown[]) => mockUnlink(...args),
     },
   },
 }));
@@ -99,7 +101,10 @@ jest.mock('server/lib/helm/utils', () => ({
 
 jest.mock('server/lib/helm/helm', () => ({
   constructHelmDeploysBuildMetaData: (...args: unknown[]) => mockConstructBuildMetadata(...args),
-  generateCodefreshRunCommand: (...args: unknown[]) => mockGenerateCodefreshRunCommand(...args),
+  generateCodefreshRunCommand: async (...args: unknown[]) => {
+    const plan = await mockGenerateCodefreshRunCommand(...args);
+    return typeof plan === 'string' ? { command: plan, configPath: null } : plan;
+  },
 }));
 
 jest.mock('server/lib/codefresh/utils', () => ({
@@ -681,6 +686,38 @@ describe('native Helm orchestration behavior', () => {
 
     expect(mockGenerateCodefreshRunCommand).toHaveBeenCalledWith(deploy);
     expect(mockPatchIngress).not.toHaveBeenCalled();
+  });
+
+  it('removes the submission file once the provider has the command', async () => {
+    const { deploy } = createDeploy({
+      deployable: { name: 'sample-service', repository: { fullName: 'example/repository' } },
+    });
+    mockGenerateCodefreshRunCommand.mockResolvedValueOnce({
+      command: 'codefresh run pipeline',
+      configPath: '/tmp/lifecycle/codefresh/helm-deploy-sample-abc.yaml',
+    });
+    mockUnlink.mockResolvedValue(undefined);
+
+    await expect(deployHelm([deploy])).resolves.toBeUndefined();
+
+    expect(mockShellPromise).toHaveBeenCalledWith('codefresh run pipeline');
+    expect(mockUnlink).toHaveBeenCalledWith('/tmp/lifecycle/codefresh/helm-deploy-sample-abc.yaml');
+  });
+
+  it('removes the submission file when the provider gate refuses the row', async () => {
+    const { deploy } = createDeploy({
+      deployable: { name: 'sample-service', repository: { fullName: 'example/repository' } },
+    });
+    mockGenerateCodefreshRunCommand.mockResolvedValueOnce({
+      command: 'codefresh run pipeline',
+      configPath: '/tmp/x.yaml',
+    });
+    mockUnlink.mockResolvedValue(undefined);
+
+    await expect(deployHelm([deploy], { providerSubmissionGate: async () => false })).rejects.toThrow();
+
+    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockUnlink).toHaveBeenCalledWith('/tmp/x.yaml');
   });
 
   it('records a normal deployment failure after tracking failure metrics', async () => {

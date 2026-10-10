@@ -25,6 +25,7 @@ import yaml from 'js-yaml';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
 import { buildLifecycleLabels } from 'server/lib/kubernetes/labels';
+import { BuildStatus } from 'shared/constants';
 
 const MANIFEST_PATH = `${TMP_PATH}/ingress`;
 
@@ -95,9 +96,17 @@ export default class IngressService extends BaseService {
     return withLogContext({ correlationId, buildUuid, sender, _ddTraceContext }, async () => {
       const isCurrent = async () => {
         if (!runUUID) return true;
-        let authority = this.db.models.Build.query().findOne({ id: buildId, runUUID }).whereNull('deletedAt');
-        if (expectedGeneration != null) authority = authority.where('desiredGeneration', expectedGeneration);
-        return Boolean(await authority);
+        const build = await this.db.models.Build.query()
+          .findById(buildId)
+          .select('id', 'runUUID', 'status')
+          .whereNull('deletedAt');
+        if (!build || build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) return false;
+        if (expectedGeneration == null) return build.runUUID === runUUID;
+        // Ingress is regenerated from every service's current row, so it stays valid while the run owns any of them.
+        const owned = await this.db.models.Deploy.query()
+          .findOne({ buildId, runUUID, desiredGeneration: expectedGeneration })
+          .select('id');
+        return Boolean(owned);
       };
       if (!(await isCurrent())) {
         getLogger({ buildId }).info('Ingress: skipped reason=superseded');
@@ -105,39 +114,48 @@ export default class IngressService extends BaseService {
       }
       getLogger({ stage: LogStage.INGRESS_PROCESSING }).info('Ingress: creating');
 
-      // We just want to create/update ingress for active services only
-      const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
-      const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
-      const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-      const manifests = configurations.map((configuration) => {
-        return yaml.dump(
-          this.generateNginxManifestForConfiguration({
-            configuration,
-            ingressClassName: lifecycleDefaults?.ingressClassName,
-            altHosts: domainDefaults?.altHttp || [],
-          }),
-          {
-            skipInvalid: true,
-          }
-        );
-      });
-      const apply = () =>
-        Promise.all(
+      // Every service's current route is read under the promotion lock so a job that
+      // owns one service cannot publish a snapshot older than a sibling's rollout.
+      const apply = async () => {
+        const configurations = await this.db.services.BuildService.configurationsForBuildId(buildId, false);
+        const namespace = await this.db.services.BuildService.getNamespace({ id: buildId });
+        const { lifecycleDefaults, domainDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+        const manifests = configurations.map((configuration) => {
+          return yaml.dump(
+            this.generateNginxManifestForConfiguration({
+              configuration,
+              ingressClassName: lifecycleDefaults?.ingressClassName,
+              altHosts: domainDefaults?.altHttp || [],
+            }),
+            {
+              skipInvalid: true,
+            }
+          );
+        });
+        const applied = await Promise.all(
           manifests.map((manifest, idx) =>
             this.applyManifests(manifest, `${buildId}-${idx}-nginx`, namespace, buildId, runUUID, expectedGeneration)
           )
         );
+        return applied.every(Boolean);
+      };
 
+      let applied = false;
       if (runUUID && this.db.services.BuildService.withCurrentBuildPromotionLock) {
         const result = await this.db.services.BuildService.withCurrentBuildPromotionLock(buildId, isCurrent, apply);
         if (!result.admitted) {
           getLogger({ buildId }).info('Ingress: skipped at promotion reason=superseded');
           return;
         }
+        applied = result.value === true;
       } else {
-        await apply();
+        applied = await apply();
       }
 
+      // Only a run whose every manifest applied clears an earlier ingress failure note from the environment status.
+      if (applied && expectedGeneration != null) {
+        await this.db.services.BuildService.publishDerivedBuildStatus?.(buildId, { clearStatusMessage: true });
+      }
       getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: created');
     });
   };
@@ -234,11 +252,13 @@ export default class IngressService extends BaseService {
       await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`, {
         timeout: 90_000,
       });
+      return true;
     } catch (error) {
       getLogger({ stage: LogStage.INGRESS_FAILED }).warn({ error }, 'Ingress: manifest apply failed');
       if (buildId !== undefined) {
         await this.recordIngressFailureOnBuild(buildId, error, runUUID, expectedGeneration).catch(() => undefined);
       }
+      return false;
     }
   };
 
@@ -252,17 +272,25 @@ export default class IngressService extends BaseService {
     const note = `Ingress apply failed: ${(error as Error)?.message || String(error)}`
       .replace(/\s+/g, ' ')
       .slice(0, 300);
+    if (runUUID && expectedGeneration != null) {
+      // A late failure from a run that no longer owns any service must not land on the current environment.
+      const owned = await this.db.models.Deploy.query()
+        .findOne({ buildId, runUUID, desiredGeneration: expectedGeneration })
+        .select('id');
+      if (!owned) return;
+    }
     let buildRead = this.db.models.Build.query().findById(buildId).whereNull('deletedAt');
-    if (runUUID) buildRead = buildRead.where('runUUID', runUUID);
-    if (expectedGeneration != null) buildRead = buildRead.where('desiredGeneration', expectedGeneration);
+    if (runUUID && expectedGeneration == null) buildRead = buildRead.where('runUUID', runUUID);
     const build = await buildRead;
     if (!build || build.statusMessage?.includes(note)) {
       return;
     }
     const statusMessage = [build.statusMessage, note].filter(Boolean).join(' | ').slice(-500);
-    let buildPatch = this.db.models.Build.query().patch({ statusMessage }).where({ id: buildId });
-    if (runUUID) buildPatch = buildPatch.where('runUUID', runUUID);
-    if (expectedGeneration != null) buildPatch = buildPatch.where('desiredGeneration', expectedGeneration);
+    let buildPatch = this.db.models.Build.query()
+      .patch({ statusMessage })
+      .where({ id: buildId })
+      .whereNull('deletedAt');
+    if (runUUID && expectedGeneration == null) buildPatch = buildPatch.where('runUUID', runUUID);
     await buildPatch;
   };
 }

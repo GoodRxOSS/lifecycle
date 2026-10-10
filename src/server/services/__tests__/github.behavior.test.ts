@@ -111,7 +111,7 @@ function buildQueryResult(result: unknown) {
   const query = {
     whereIn: jest.fn(),
     andWhere: jest.fn(),
-    first: jest.fn().mockResolvedValue(result),
+    whereNull: jest.fn().mockResolvedValue(result == null ? [] : [result]),
   };
   query.whereIn.mockImplementation((_column, callback) => {
     const nested = {
@@ -616,9 +616,9 @@ describe('GithubService push fallback behavior', () => {
       throw new Error('query unavailable');
     });
 
-    await expect(
-      service.handlePushForStaticEnv({ githubRepositoryId: 101, branchName: 'main' })
-    ).resolves.toBeUndefined();
+    await expect(service.handlePushForStaticEnv({ githubRepositoryId: 101, branchName: 'main' })).resolves.toEqual(
+      new Set()
+    );
 
     expect(mockLoggerError).toHaveBeenCalledWith(
       expect.objectContaining({ error: expect.any(Error) }),
@@ -639,6 +639,29 @@ describe('GithubService push fallback behavior', () => {
     expect(mockLoggerError).toHaveBeenCalledWith(
       expect.objectContaining({ error: expect.any(Error) }),
       'Push: webhook processing failed'
+    );
+  });
+
+  it('claims every root static build even when one enqueue fails', async () => {
+    const { service, db } = createHarness();
+    const query = buildQueryResult({ id: 44 });
+    query.whereNull.mockResolvedValue([{ id: 44 }, { id: 45 }]);
+    db.models.Build.query.mockReturnValue(query);
+    db.services.BuildService.enqueueResolveAndDeployBuild
+      .mockRejectedValueOnce(new Error('redis unavailable'))
+      .mockResolvedValue(undefined);
+
+    await expect(
+      service.handlePushForStaticEnv({ githubRepositoryId: 101, branchName: 'main', headCommit: 'head-sha' })
+    ).resolves.toEqual(new Set([44, 45]));
+
+    expect(db.services.BuildService.enqueueResolveAndDeployBuild).toHaveBeenCalledTimes(2);
+    expect(db.services.BuildService.enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ buildId: 45 })
+    );
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.any(Error) }),
+      'Push: static env redeploy enqueue failed'
     );
   });
 

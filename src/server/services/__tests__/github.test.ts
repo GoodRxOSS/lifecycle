@@ -1103,7 +1103,7 @@ describe('Github Service - handlePushWebhook', () => {
           return buildQuery;
         }),
         andWhere: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({ id: buildId }),
+        whereNull: jest.fn().mockResolvedValue([{ id: buildId }]),
       };
 
       mockDb.models.Build = { query: jest.fn().mockReturnValue(buildQuery) };
@@ -1215,7 +1215,7 @@ describe('Github Service - handlePushWebhook', () => {
           return buildQuery;
         }),
         andWhere: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({ id: buildId }),
+        whereNull: jest.fn().mockResolvedValue([{ id: buildId }]),
       };
 
       mockDb.models.Build = { query: jest.fn().mockReturnValue(buildQuery) };

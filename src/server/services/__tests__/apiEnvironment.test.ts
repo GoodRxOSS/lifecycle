@@ -152,6 +152,7 @@ function makeService({
   const deployQueryChain: any = {
     patch: jest.fn(() => deployQueryChain),
     where: jest.fn(() => deployQueryChain),
+    select: jest.fn(() => ({ where: jest.fn().mockResolvedValue([]) })),
   };
   const models = {
     Build: {
@@ -3868,15 +3869,7 @@ describe('recordBuildFailure teardown ownership', () => {
 
     await (service as any).recordBuildFailure(build, BuildStatus.ERROR, 'new-run', new Error('boom'), 'fallback');
 
-    expect(updateStatus).toHaveBeenCalledWith(
-      build,
-      BuildStatus.ERROR,
-      'new-run',
-      true,
-      true,
-      expect.any(Error),
-      undefined
-    );
+    expect(updateStatus).toHaveBeenCalledWith(build, BuildStatus.ERROR, 'new-run', true, true, expect.any(Error));
   });
 
   it('re-stamps PR builds unconditionally', async () => {

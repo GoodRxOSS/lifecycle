@@ -49,7 +49,11 @@ import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValid
 
 import { type LifecycleYamlConfigOptions } from 'server/models/yaml/types';
 import type { DeployableReconciliationResult } from 'server/services/deployable';
-import { DeploymentManager, DeploymentSupersededError } from 'server/lib/deploymentManager/deploymentManager';
+import {
+  DeploymentManager,
+  DeploymentSupersededError,
+  type PrerequisiteOutcome,
+} from 'server/lib/deploymentManager/deploymentManager';
 import { AuthorityLockLostError, type AuthorityLockResult, withAuthorityLock } from 'server/lib/authorityLock';
 import { ensureServiceAccountForJob } from 'server/lib/kubernetes/common/serviceAccount';
 import { Tracer } from 'server/lib/tracer';
@@ -68,21 +72,36 @@ import ApiAccessConfigService from './apiAccessConfig';
 import { getBranchName, getDeployType, getRepositoryName, type Service } from 'server/models/yaml/YamlService';
 import type { LifecycleConfig } from 'server/models/yaml/Config';
 import * as YamlService from 'server/models/yaml';
-import { getEnvironmentPhaseFromState, isActiveServiceReady } from 'server/lib/environments/readiness';
+import { getEnvironmentPhaseFromState, isActiveServiceReady, isDeployFailure } from 'server/lib/environments/readiness';
 import {
   acceptDeploymentIntent,
+  deploymentIntentDeployFilter,
+  deploymentIntentSelectsAllDeploys,
   dirtyDeploymentIntents,
+  markDeploymentIntentObserved,
+  recordIntentConfigFailures,
+  type AcceptedDeploymentIntent,
+  type AcceptedDeploymentRefs,
   type DeploymentIntent,
   type DeploymentReconciliationJobData,
-  type DirtyDeploymentIntent,
 } from 'server/lib/deploymentReconciliation/mailbox';
+import {
+  environmentBlockReason,
+  isDeployAuthorityCurrent,
+  loadEnvironmentAuthority,
+} from 'server/lib/deploymentReconciliation/authority';
 
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
 const TEARDOWN_RETRY_GRACE_MS = 15 * 60 * 1000;
 const BUILD_DEPLOYMENT_LOCK_TTL_MS = 15 * 60 * 1000;
+// Short with frequent renewal, so a worker that dies mid-run frees its generation within a minute.
+const GENERATION_LOCK_TTL_MS = 60 * 1000;
 const DEPLOY_SECRET_MUTATION_LOCK_TTL_MS = 2 * 60 * 1000;
 const DEPLOYMENT_RECONCILIATION_SWEEP_MS = 5_000;
+const BUILD_STATUS_LOCK_TTL_MS = 30_000;
+const PREREQUISITE_SETTLE_POLL_MS = 10_000;
+const PREREQUISITE_SETTLE_WAIT_MS = 90 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const PR_AUTHORITY_REVALIDATED_DELETE_REASONS = new Set([
   'pull_request_closed',
@@ -128,12 +147,17 @@ interface DeploymentScopeOptions {
   sourceGithubRepositoryId?: number | null;
   /** Exact mailbox generation owned by this pass. */
   expectedGeneration?: number;
+  /** Latest accepted push SHA per `<repositoryId>:<branch>`; a full pass must not read a laggy head below it. */
+  acceptedSourcePins?: AcceptedSourcePins;
 }
+
+type AcceptedSourcePins = Record<string, string>;
 
 interface DeploymentReconciliationClaim {
   generation: number;
   token: string;
-  dirty: DirtyDeploymentIntent[];
+  intent: AcceptedDeploymentIntent;
+  acceptedSourcePins: AcceptedSourcePins;
 }
 
 interface DeploymentReconciliationScope {
@@ -152,12 +176,20 @@ interface DeploymentScopePreparation {
   sourceGithubRepositoryId?: number | null;
   sourceRef?: string | null;
   sourceBranch?: string | null;
+  acceptedSourcePins?: AcceptedSourcePins;
+  /** Services the import could not read and that have no row; their dependents are blocked. */
+  unresolvedServices?: string[];
 }
 
 interface DeploymentScopeOutcome {
-  status: BuildStatus;
-  error?: unknown;
+  deployed: number;
+  failed: number;
 }
+
+type IntentConfiguration =
+  | { kind: 'deferred' }
+  | { kind: 'observed' }
+  | { kind: 'ready'; preparation: DeploymentScopePreparation; owned: number };
 
 interface DeploymentReconciliationRequest {
   buildId: number;
@@ -510,7 +542,8 @@ export default class BuildService extends BaseService {
         'createdByUserId',
         'createdByTokenId',
         'createdByGithubLogin',
-        'runUUID'
+        'runUUID',
+        'acceptedRefs'
       )
       .withGraphFetched('[baseBuild, pullRequest, deploys.[deployable, repository]]')
       .modifyGraph('pullRequest', (b) => {
@@ -545,6 +578,8 @@ export default class BuildService extends BaseService {
           'deployPipelineId',
           'githubRepositoryId',
           'runUUID',
+          'desiredGeneration',
+          'observedGeneration',
           'publicUrl',
           'dockerImage',
           'buildLogs',
@@ -2314,6 +2349,7 @@ export default class BuildService extends BaseService {
       sourceGithubRepositoryId?: number | null;
       runUUID?: string;
       expectedGeneration?: number;
+      acceptedSourcePins?: AcceptedSourcePins;
     } = {}
   ) {
     const buildSource = getBuildSource(build);
@@ -2325,11 +2361,14 @@ export default class BuildService extends BaseService {
       buildSource.githubRepositoryId != null &&
       Number(sourceGithubRepositoryId) === Number(buildSource.githubRepositoryId) &&
       options.sourceBranch === buildSource.branchName;
-    const rootSourceRef = sourceRefTargetsRoot ? options.sourceRef : null;
+    const rootSourceRef = sourceRefTargetsRoot
+      ? options.sourceRef
+      : options.acceptedSourcePins?.[`${buildSource.githubRepositoryId}:${buildSource.branchName}`] ?? null;
+    let reconciliationResult: DeployableReconciliationResult | undefined;
     // Write the deployables here for now and not going to use them yet.
     try {
       const buildId = build?.id;
-      const reconciliationResult = await this.db.services.Deployable.upsertDeployables(
+      reconciliationResult = await this.db.services.Deployable.upsertDeployables(
         buildId,
         build.uuid,
         build.pullRequest,
@@ -2338,7 +2377,8 @@ export default class BuildService extends BaseService {
         filterGithubRepositoryId,
         options.sourceRef,
         options.sourceBranch,
-        sourceGithubRepositoryId
+        sourceGithubRepositoryId,
+        options.acceptedSourcePins
       );
 
       if (options.skipDeletedServiceReconciliation) {
@@ -2374,6 +2414,7 @@ export default class BuildService extends BaseService {
     await this.db.services.Webhook.upsertWebhooksWithYaml(build, build.pullRequest, rootSourceRef).catch((error) => {
       getLogger().warn({ error }, 'Config: webhook import warning');
     });
+    return reconciliationResult;
   }
 
   private async reconcileDeletedDeployables(
@@ -2509,8 +2550,8 @@ export default class BuildService extends BaseService {
               ...(runUUID
                 ? {
                     nativeMutationGate: async <T>(action: () => Promise<T>) => {
-                      const result = await this.withCurrentBuildPromotionLock(
-                        buildId,
+                      const result = await this.withCurrentDeployPromotionLock(
+                        deploy.id,
                         () => this.isDeploymentRunCurrent(buildId, runUUID, expectedGeneration),
                         action
                       );
@@ -2645,20 +2686,7 @@ export default class BuildService extends BaseService {
    * queued or in-flight PR job from recreating resources while deletion waits.
    */
   private deploymentBlockReason(build: Build | null | undefined): string | null {
-    if (!build) return 'build_missing';
-    if (build.deletedAt != null) return 'build_deleted';
-
-    if (build.pullRequest || build.pullRequestId != null) {
-      if (build.status === BuildStatus.TEARING_DOWN) return 'tearing_down';
-      if (!build.pullRequest) return 'pull_request_missing';
-      if (build.pullRequest.status !== PullRequestStatus.OPEN) return 'pull_request_closed';
-      if (!isDeployEnabled(build)) return 'deploy_disabled';
-      // Re-adding the deploy label to an open PR may reclaim the row after teardown completes.
-      return null;
-    }
-
-    if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) return 'torn_down';
-    return build.deployEnabled === true ? null : 'deploy_disabled';
+    return environmentBlockReason(build);
   }
 
   /** PR setup is allowed without a deploy label, but not while teardown is active or the PR is closed. */
@@ -2708,10 +2736,6 @@ export default class BuildService extends BaseService {
       .where({ id: build.id })
       .whereNull('deletedAt');
 
-    if (expectedGeneration != null) {
-      claim = claim.where('desiredGeneration', expectedGeneration);
-    }
-
     // API-created environments keep their kill switch on the Build row, so make
     // that half of the claim atomic. PR authority is re-read immediately below.
     if (!build.pullRequest && build.pullRequestId == null) {
@@ -2756,7 +2780,6 @@ export default class BuildService extends BaseService {
       getLogger().info('Deploy: preparation skipped reason=ownership_lost');
       return null;
     }
-    build.runUUID = runUUID;
 
     const deploys = await this.db.services.Deploy.findOrCreateDeploys(
       build.environment!,
@@ -2764,7 +2787,8 @@ export default class BuildService extends BaseService {
       githubRepositoryId ?? undefined,
       sourceRef,
       options.sourceBranch,
-      options.sourceGithubRepositoryId ?? githubRepositoryId
+      options.sourceGithubRepositoryId ?? githubRepositoryId,
+      options.acceptedSourcePins
     );
     build.$setRelated('deploys', deploys);
     await build.$fetchGraph('pullRequest');
@@ -2774,31 +2798,11 @@ export default class BuildService extends BaseService {
       getLogger().info('Deploy: preparation skipped after config reason=ownership_lost');
       return null;
     }
-
-    let deployClaim = this.db.models.Deploy.query().patch({ runUUID }).where({ buildId: build.id });
-    if (githubRepositoryId != null) {
-      deployClaim = deployClaim.where('githubRepositoryId', githubRepositoryId);
-      if (options.sourceBranch) deployClaim = deployClaim.where('branchName', options.sourceBranch);
-    }
-    await deployClaim;
-    for (const deploy of deploys ?? []) {
-      if (
-        (githubRepositoryId == null || deploy.githubRepositoryId === githubRepositoryId) &&
-        (githubRepositoryId == null || !options.sourceBranch || deploy.branchName === options.sourceBranch)
-      ) {
-        deploy.runUUID = runUUID;
-      }
-    }
-
-    await this.markConfigurationsAsBuilt(build, runUUID, githubRepositoryId, options.sourceBranch);
-    await this.updateStatusAndComment(build, BuildStatus.BUILDING, runUUID, true, true, null, expectedGeneration);
     await build.pullRequest?.$fetchGraph('repository');
 
     try {
       const dependencyGraph = await generateGraph(build, 'TB');
-      let graphPatch = this.db.models.Build.query().patch({ dependencyGraph }).where({ id: build.id, runUUID });
-      if (expectedGeneration != null) graphPatch = graphPatch.where('desiredGeneration', expectedGeneration);
-      await graphPatch;
+      await this.db.models.Build.query().patch({ dependencyGraph }).where({ id: build.id }).whereNull('deletedAt');
     } catch (error) {
       getLogger().warn({ error }, 'Graph: generation failed');
     }
@@ -2810,19 +2814,28 @@ export default class BuildService extends BaseService {
       sourceGithubRepositoryId: options.sourceGithubRepositoryId ?? githubRepositoryId,
       sourceRef,
       sourceBranch: options.sourceBranch,
+      acceptedSourcePins: options.acceptedSourcePins,
     };
   }
 
   private async executeDeploymentScope(
     preparation: DeploymentScopePreparation,
-    expectedGeneration?: number
+    expectedGeneration: number
   ): Promise<DeploymentScopeOutcome | null> {
-    const { build, runUUID, githubRepositoryId, sourceGithubRepositoryId, sourceRef, sourceBranch } = preparation;
+    const {
+      build,
+      runUUID,
+      githubRepositoryId,
+      sourceGithubRepositoryId,
+      sourceRef,
+      sourceBranch,
+      acceptedSourcePins,
+    } = preparation;
 
     try {
       if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) return null;
 
-      const results = await Promise.all([
+      await Promise.all([
         this.buildImages(
           build,
           runUUID,
@@ -2830,28 +2843,29 @@ export default class BuildService extends BaseService {
           sourceRef,
           sourceBranch,
           expectedGeneration,
-          sourceGithubRepositoryId
+          sourceGithubRepositoryId,
+          acceptedSourcePins
         ),
-        this.deployCLIServices(build, runUUID, githubRepositoryId, sourceRef, sourceBranch, sourceGithubRepositoryId),
+        this.deployCLIServices(
+          build,
+          runUUID,
+          githubRepositoryId,
+          sourceRef,
+          sourceBranch,
+          sourceGithubRepositoryId,
+          expectedGeneration,
+          acceptedSourcePins
+        ),
       ]);
-      getLogger().debug(`Build results: buildImages=${results[0]} deployCLIServices=${results[1]}`);
 
-      // A/B may finish the expensive operation they already entered, but may not
-      // enter native promotion after C has become authoritative.
+      // A row that failed its image phase is recorded on the row; its siblings still roll out.
       if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) {
         getLogger().info('Deploy: rollout skipped reason=ownership_lost');
         return null;
       }
+      await this.publishDerivedBuildStatus(build.id);
 
-      if (!_.every(results)) {
-        getLogger({ buildId: build.id, githubRepositoryId, sourceBranch }).warn('Build: errored skipping=rollout');
-        return { status: BuildStatus.ERROR };
-      }
-
-      await this.updateStatusAndComment(build, BuildStatus.DEPLOYING, runUUID, true, true, null, expectedGeneration);
-      if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) return null;
-
-      const applySuccess = await this.generateAndApplyManifests({
+      await this.generateAndApplyManifests({
         build,
         runUUID,
         expectedGeneration,
@@ -2859,10 +2873,9 @@ export default class BuildService extends BaseService {
         sourceBranch,
         namespace: build.namespace,
         enqueueIngress: false,
+        unresolvedServices: preparation.unresolvedServices,
       });
-      if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) return null;
-
-      return { status: applySuccess ? BuildStatus.DEPLOYED : BuildStatus.ERROR };
+      return this.summarizeIntentDeploys(build.id, runUUID, expectedGeneration);
     } catch (error) {
       if (error instanceof DeploymentSupersededError) {
         getLogger().info('Build: deployment phase stopped reason=superseded');
@@ -2874,28 +2887,59 @@ export default class BuildService extends BaseService {
         getLogger().info('Build: failure ignored reason=ownership_lost');
         return null;
       }
-
-      return { status: BuildStatus.ERROR, error };
+      await this.recordFailureOnOwnedDeploys(build.id, runUUID, expectedGeneration, error, 'Deployment failed.');
+      return this.summarizeIntentDeploys(build.id, runUUID, expectedGeneration);
     }
   }
 
+  private async summarizeIntentDeploys(
+    buildId: number,
+    runUUID: string,
+    generation: number
+  ): Promise<DeploymentScopeOutcome> {
+    const rows = await this.db.models.Deploy.query()
+      .select('status')
+      .where({ buildId, runUUID, desiredGeneration: generation });
+    const failed = rows.filter((row) => isDeployFailure(row.status)).length;
+    return { deployed: rows.length - failed, failed };
+  }
+
+  /**
+   * With a generation this is intent authority: the run still owns a row at that
+   * generation, or its accepted intent is still the newest for its key before
+   * rows are claimed. Without a generation it is the legacy environment token.
+   */
   private async isDeploymentRunCurrent(
     buildId: number,
     runUUID: string,
     expectedGeneration?: number
   ): Promise<boolean> {
-    const current = await this.db.models.Build.query()
-      .findById(buildId)
-      .select('id', 'runUUID', 'status', 'deployEnabled', 'deletedAt', 'pullRequestId', 'desiredGeneration');
-    if (current?.pullRequestId != null) {
-      await current.$fetchGraph('pullRequest');
-    }
-    return Boolean(
-      current &&
-        current.runUUID === runUUID &&
-        (expectedGeneration == null || Number(current.desiredGeneration) === expectedGeneration) &&
-        this.deploymentBlockReason(current) == null
+    const current = await loadEnvironmentAuthority(this.db.models, buildId);
+    if (!current || this.deploymentBlockReason(current) != null) return false;
+    if (expectedGeneration == null) return current.runUUID === runUUID;
+    const owned = await this.db.models.Deploy.query()
+      .findOne({ buildId, runUUID, desiredGeneration: expectedGeneration })
+      .select('id');
+    if (owned) return true;
+    return this.isIntentAccepted(buildId, runUUID, expectedGeneration);
+  }
+
+  private async isIntentAccepted(buildId: number, runUUID: string, generation: number): Promise<boolean> {
+    const build = await this.db.models.Build.query().findById(buildId).select('id', 'acceptedRefs');
+    const refs = build?.acceptedRefs;
+    if (!refs || typeof refs !== 'object' || Array.isArray(refs)) return false;
+    return Object.values(refs).some(
+      (intent) => intent?.gen === generation && intent?.requestId === runUUID && intent?.observedGen !== generation
     );
+  }
+
+  /** Admission to the config lock ignores block reasons so a blocked environment can still observe or defer its work. */
+  private async isIntentPending(buildId: number, runUUID: string, generation: number): Promise<boolean> {
+    const owned = await this.db.models.Deploy.query()
+      .findOne({ buildId, runUUID, desiredGeneration: generation })
+      .select('id');
+    if (owned) return true;
+    return this.isIntentAccepted(buildId, runUUID, generation);
   }
 
   async withBuildDeploymentLock<T>(buildId: number, action: () => Promise<T>): Promise<T> {
@@ -2940,6 +2984,46 @@ export default class BuildService extends BaseService {
       action,
       onWait: (error) => getLogger({ error, deployId }).warn('Deploy secrets: waiting for current resource writer'),
     });
+  }
+
+  async withCurrentDeployPromotionLock<T>(
+    deployId: number,
+    isCurrent: () => Promise<boolean>,
+    action: () => Promise<T>
+  ): Promise<AuthorityLockResult<T>> {
+    return withAuthorityLock({
+      redlock: this.redlock,
+      resource: `deploy-promotion.${deployId}`,
+      ttlMs: BUILD_DEPLOYMENT_LOCK_TTL_MS,
+      isCurrent,
+      action,
+      onWait: (error) => getLogger({ error, deployId }).warn('Deploy promotion: waiting for admitted native mutation'),
+    });
+  }
+
+  /** Pending rows of a torn-down environment would otherwise be scanned by every sweep forever. */
+  private async observePendingDeploysForTeardown(buildId: number): Promise<void> {
+    const rows = await this.db.models.Deploy.query()
+      .select('id', 'desiredGeneration', 'observedGeneration')
+      .where({ buildId });
+    for (const row of rows) {
+      if (Number(row.desiredGeneration) <= Number(row.observedGeneration)) continue;
+      await this.db.models.Deploy.query().patch({ observedGeneration: row.desiredGeneration }).where({ id: row.id });
+    }
+  }
+
+  /** Lets every admitted per-service mutation finish before cleanup touches the namespace. */
+  private async barrierDeployPromotionLocks(buildId: number): Promise<void> {
+    const deploys = await this.db.models.Deploy.query().select('id').where({ buildId });
+    for (const deploy of deploys) {
+      await withAuthorityLock({
+        redlock: this.redlock,
+        resource: `deploy-promotion.${deploy.id}`,
+        ttlMs: BUILD_DEPLOYMENT_LOCK_TTL_MS,
+        isCurrent: async () => true,
+        action: async () => undefined,
+      });
+    }
   }
 
   private async withCurrentBuildDeploymentLock<T>(
@@ -2989,20 +3073,25 @@ export default class BuildService extends BaseService {
     try {
       lock =
         typeof lockWithOptions === 'function'
-          ? await lockWithOptions.call(this.redlock, resource, BUILD_DEPLOYMENT_LOCK_TTL_MS, {
+          ? await lockWithOptions.call(this.redlock, resource, GENERATION_LOCK_TTL_MS, {
               retryCount: 1,
               retryDelay: 1,
             })
-          : await this.redlock.lock(resource, BUILD_DEPLOYMENT_LOCK_TTL_MS);
+          : await this.redlock.lock(resource, GENERATION_LOCK_TTL_MS);
     } catch {
       getLogger({ buildId, generation }).info('Build reconciliation: duplicate generation signal coalesced');
       return;
     }
 
-    await this.runWithRenewableLock(resource, lock, action);
+    await this.runWithRenewableLock(resource, lock, action, GENERATION_LOCK_TTL_MS);
   }
 
-  private async runWithRenewableLock<T>(resource: string, acquiredLock: any, action: () => Promise<T>): Promise<T> {
+  private async runWithRenewableLock<T>(
+    resource: string,
+    acquiredLock: any,
+    action: () => Promise<T>,
+    ttlMs = BUILD_DEPLOYMENT_LOCK_TTL_MS
+  ): Promise<T> {
     let lock = acquiredLock;
     if (!lock?.unlock) return action();
     let renewalError: unknown;
@@ -3010,12 +3099,12 @@ export default class BuildService extends BaseService {
     const renewalTimer = setInterval(() => {
       renewal = renewal
         .then(async () => {
-          lock = await lock.extend(BUILD_DEPLOYMENT_LOCK_TTL_MS);
+          lock = await lock.extend(ttlMs);
         })
         .catch((error) => {
           renewalError = error;
         });
-    }, BUILD_DEPLOYMENT_LOCK_TTL_MS / 3);
+    }, ttlMs / 3);
 
     try {
       const result = await action();
@@ -3149,6 +3238,8 @@ export default class BuildService extends BaseService {
         // bulk fence prevents detached readiness/provider waits from restoring
         // READY or failure state after teardown records TORN_DOWN.
         await this.db.models.Deploy.query().where({ buildId: build.id }).patch({ runUUID: teardownRunUUID });
+        await this.barrierDeployPromotionLocks(build.id);
+        await this.observePendingDeploysForTeardown(build.id);
       }
       // A failing cleanup step must never block namespace deletion below; retries pick up the rest.
       const cleanupResults = await Promise.allSettled([
@@ -3222,8 +3313,91 @@ export default class BuildService extends BaseService {
     runUUID: string,
     updateMissionControl: boolean,
     updateStatus: boolean,
-    error: Error | null = null,
-    expectedGeneration?: number
+    error: Error | null = null
+  ) {
+    return this.publishBuildStatus(build, status, { runUUID, updateMissionControl, updateStatus, error });
+  }
+
+  /** Environment status is derived from its services; only teardown and a root config error override it. */
+  async publishDerivedBuildStatus(
+    buildId: number,
+    options: { clearConfigError?: boolean; clearStatusMessage?: boolean } = {}
+  ): Promise<void> {
+    // Concurrent jobs derive from different row snapshots; serializing the read-modify-write keeps the last write current.
+    await withAuthorityLock({
+      redlock: this.redlock,
+      resource: `build-status.${buildId}`,
+      ttlMs: BUILD_STATUS_LOCK_TTL_MS,
+      isCurrent: async () => true,
+      action: () => this.publishDerivedBuildStatusUnlocked(buildId, options),
+    });
+  }
+
+  private async publishDerivedBuildStatusUnlocked(
+    buildId: number,
+    options: { clearConfigError?: boolean; clearStatusMessage?: boolean } = {}
+  ): Promise<void> {
+    const build = await this.db.models.Build.query().findById(buildId).whereNull('deletedAt');
+    if (!build) return;
+    if (build.status === BuildStatus.TEARING_DOWN || build.status === BuildStatus.TORN_DOWN) return;
+    if (build.status === BuildStatus.CONFIG_ERROR && !options.clearConfigError) return;
+    await build.$fetchGraph('[deploys.[deployable], pullRequest.[repository]]');
+
+    const active = (build.deploys ?? []).filter((deploy) => deploy.active !== false);
+    const pending = active.filter((deploy) => Number(deploy.desiredGeneration) > Number(deploy.observedGeneration));
+    const failedRows = active.some(
+      (deploy) => isDeployFailure(deploy.status) && deploy.status !== DeployStatus.TORN_DOWN
+    );
+    const unresolvedNote = Object.entries(unresolvedServiceFailures(build.acceptedRefs, active))
+      .map(([name, reason]) => `${name} (${reason})`)
+      .join('; ');
+    let status: BuildStatus;
+    if (pending.length > 0) {
+      const rollingOut = pending.some((deploy) =>
+        [DeployStatus.BUILT, DeployStatus.DEPLOYING].includes(deploy.status as DeployStatus)
+      );
+      status = rollingOut ? BuildStatus.DEPLOYING : BuildStatus.BUILDING;
+    } else if (failedRows || unresolvedNote) {
+      status = BuildStatus.ERROR;
+    } else {
+      status = isDeployEnabled(build) ? BuildStatus.DEPLOYED : BuildStatus.BUILT;
+    }
+
+    let error: Error | null = null;
+    if (status === BuildStatus.ERROR && unresolvedNote) {
+      const rowMessage = failedRows ? this.resolveBuildStatusMessage(status, active, null) : '';
+      error = new Error([rowMessage, `Not imported: ${unresolvedNote}`].filter(Boolean).join(' | '));
+    }
+    const statusMessage = this.resolveBuildStatusMessage(status, active, error);
+    if (build.status === status && (build.statusMessage ?? '') === statusMessage) return;
+    // An ingress failure note on an otherwise healthy environment is cleared only by the ingress job itself.
+    if (build.status === status && statusMessage === '' && !options.clearStatusMessage) return;
+    await this.publishBuildStatus(build, status, { updateMissionControl: true, updateStatus: true, error });
+  }
+
+  private async recordRootConfigError(build: Build, error: unknown): Promise<void> {
+    const statusError =
+      error instanceof Error
+        ? error
+        : new Error(statusMessageFromError(error, 'Lifecycle configuration failed validation.'));
+    await withAuthorityLock({
+      redlock: this.redlock,
+      resource: `build-status.${build.id}`,
+      ttlMs: BUILD_STATUS_LOCK_TTL_MS,
+      isCurrent: async () => true,
+      action: () =>
+        this.publishBuildStatus(build, BuildStatus.CONFIG_ERROR, {
+          updateMissionControl: true,
+          updateStatus: true,
+          error: statusError,
+        }),
+    });
+  }
+
+  private async publishBuildStatus(
+    build: Build,
+    status: BuildStatus,
+    options: { runUUID?: string; updateMissionControl: boolean; updateStatus: boolean; error: Error | null }
   ) {
     return withLogContext({ buildUuid: build.uuid }, async () => {
       let published = false;
@@ -3236,12 +3410,13 @@ export default class BuildService extends BaseService {
         const isSandboxBuild = build.kind === BuildKind.SANDBOX;
         const repository = pullRequest?.repository;
 
-        const statusMessage = this.resolveBuildStatusMessage(status, deploys || [], error);
+        const statusMessage = this.resolveBuildStatusMessage(status, deploys || [], options.error);
         let patch = this.db.models.Build.query()
           .patch({ status, statusMessage })
-          .where({ id: build.id, runUUID })
+          .where({ id: build.id })
           .whereNull('deletedAt');
-        if (expectedGeneration != null) patch = patch.where('desiredGeneration', expectedGeneration);
+        if (options.runUUID) patch = patch.where('runUUID', options.runUUID);
+        else patch = patch.whereNotIn('status', [BuildStatus.TEARING_DOWN, BuildStatus.TORN_DOWN]);
         if ((await patch) !== 1) return;
 
         published = true;
@@ -3253,9 +3428,9 @@ export default class BuildService extends BaseService {
             deploys,
             pullRequest,
             repository,
-            updateMissionControl,
-            updateStatus,
-            error
+            options.updateMissionControl,
+            options.updateStatus,
+            options.error
           ).catch((e) => {
             getLogger().error({ error: e }, 'ActivityStream: update failed');
           });
@@ -3305,7 +3480,7 @@ export default class BuildService extends BaseService {
     }
 
     const statusError = error instanceof Error ? error : new Error(statusMessageFromError(error, fallbackMessage));
-    await this.updateStatusAndComment(build, status, activeRunUUID, true, true, statusError, expectedGeneration);
+    await this.updateStatusAndComment(build, status, activeRunUUID, true, true, statusError);
   }
 
   private resolveBuildStatusMessage(status: BuildStatus, deploys: Deploy[], error: Error | null): string {
@@ -3375,13 +3550,97 @@ export default class BuildService extends BaseService {
     }
   }
 
+  /**
+   * The outcome of that service's current rollout. A row this run owns is
+   * ordered by the plan or already handled by an earlier phase, so it is never
+   * waited on; a row another run is rolling out is polled until it is READY,
+   * failed, or settled. Codefresh and configuration services finish at BUILT.
+   */
+  private async waitForServiceOutcome(
+    buildId: number,
+    name: string,
+    runUUID: string,
+    isCurrent: () => Promise<boolean>
+  ): Promise<PrerequisiteOutcome> {
+    const deadline = Date.now() + PREREQUISITE_SETTLE_WAIT_MS;
+    let waited = false;
+    for (;;) {
+      const deployable = await this.db.models.Deployable.query().findOne({ buildId, name }).select('id', 'type');
+      const row = deployable
+        ? await this.db.models.Deploy.query()
+            .findOne({ buildId, deployableId: deployable.id, active: true })
+            .select('status', 'runUUID', 'desiredGeneration', 'observedGeneration')
+        : null;
+      if (!row) return 'ready';
+      if (isDeployFailure(row.status)) return 'failed';
+      const finishesAtBuilt =
+        deployable!.type === DeployTypes.CODEFRESH || deployable!.type === DeployTypes.CONFIGURATION;
+      const finished =
+        row.status === DeployStatus.READY ||
+        row.status === DeployStatus.DEPLOYED ||
+        (finishesAtBuilt && row.status === DeployStatus.BUILT) ||
+        Number(row.observedGeneration) >= Number(row.desiredGeneration);
+      if (finished || row.runUUID === runUUID) return 'ready';
+      if (!(await isCurrent()) || Date.now() >= deadline) return 'stopped';
+      if (!waited) getLogger({ buildId }).info(`Deploy: waiting for service=${name} to finish its rollout`);
+      waited = true;
+      await new Promise((resolve) => setTimeout(resolve, PREREQUISITE_SETTLE_POLL_MS));
+    }
+  }
+
+  /**
+   * A fenced run processes exactly the rows it claimed, whichever repository
+   * they belong to now; the intent's repository filter was applied when the
+   * rows were stamped. Rows already READY belong to an earlier attempt of the
+   * same run and are left alone; a row whose service definition is gone fails
+   * on its own instead of failing its siblings.
+   */
+  private async selectRunDeploys(
+    buildId: number,
+    runUUID: string | undefined,
+    githubRepositoryId: number | null | undefined,
+    sourceBranch: string | null | undefined,
+    expectedGeneration?: number,
+    excludeFailed = false
+  ): Promise<Deploy[]> {
+    const fenced = expectedGeneration != null;
+    let query = Deploy.query().where({
+      buildId,
+      ...(runUUID ? { runUUID } : {}),
+      ...(!fenced && githubRepositoryId ? { githubRepositoryId } : {}),
+      ...(!fenced && githubRepositoryId && sourceBranch ? { branchName: sourceBranch } : {}),
+    });
+    if (fenced) query = query.where('desiredGeneration', expectedGeneration);
+    const skipped: DeployStatus[] = [
+      ...(expectedGeneration != null ? [DeployStatus.READY, DeployStatus.DEPLOYED] : []),
+      ...(excludeFailed ? [DeployStatus.ERROR, DeployStatus.BUILD_FAILED, DeployStatus.DEPLOY_FAILED] : []),
+    ];
+    if (skipped.length > 0) query = query.whereNotIn('status', skipped);
+    const deploys = await query.withGraphFetched({ deployable: true });
+    if (expectedGeneration == null || !runUUID) return deploys;
+    const orphaned = deploys.filter((deploy) => deploy.active && !deploy.deployable);
+    for (const deploy of orphaned) {
+      getLogger().error(`Deploy: service definition missing uuid=${deploy.uuid}`);
+      await this.recordPhaseFailure(
+        deploy,
+        runUUID,
+        DeployStatus.ERROR,
+        'Service definition missing.',
+        expectedGeneration
+      );
+    }
+    return deploys.filter((deploy) => !orphaned.includes(deploy));
+  }
+
   async deployCLIServices(
     build: Build,
     runUUID: string,
     githubRepositoryId: number | null = null,
     sourceRef?: string | null,
     sourceBranch?: string | null,
-    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId
+    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId,
+    expectedGeneration?: number,
+    acceptedSourcePins?: AcceptedSourcePins
   ): Promise<boolean> {
     await build?.$fetchGraph({
       deploys: {
@@ -3392,14 +3651,14 @@ export default class BuildService extends BaseService {
     if (!buildId) {
       getLogger().error('Build: id missing for=deployCLIServices');
     }
-    const deploys = await Deploy.query()
-      .where({
-        buildId,
-        runUUID,
-        ...(githubRepositoryId ? { githubRepositoryId } : {}),
-        ...(githubRepositoryId && sourceBranch ? { branchName: sourceBranch } : {}),
-      })
-      .withGraphFetched({ deployable: true });
+    const deploys = await this.selectRunDeploys(
+      buildId,
+      runUUID,
+      githubRepositoryId,
+      sourceBranch,
+      expectedGeneration,
+      expectedGeneration != null
+    );
     try {
       return _.every(
         await Promise.all(
@@ -3418,8 +3677,19 @@ export default class BuildService extends BaseService {
                   runUUID,
                   sourceRef,
                   sourceGithubRepositoryId,
-                  sourceBranch
+                  sourceBranch,
+                  acceptedSourcePins,
+                  expectedGeneration
                 );
+                if (result === false) {
+                  await this.recordPhaseFailure(
+                    deploy,
+                    runUUID,
+                    DeployStatus.ERROR,
+                    'CLI deploy failed.',
+                    expectedGeneration
+                  );
+                }
                 return result;
               } catch (err) {
                 getLogger().error({ error: err }, `CLI: deploy failed uuid=${deploy?.uuid}`);
@@ -3434,6 +3704,7 @@ export default class BuildService extends BaseService {
       );
     } catch (error) {
       getLogger().error({ error }, 'CLI: build failed');
+      await this.recordPhaseFailures(deploys, runUUID, DeployStatus.ERROR, 'CLI deploy failed.', expectedGeneration);
       return false;
     }
   }
@@ -3450,23 +3721,22 @@ export default class BuildService extends BaseService {
     sourceRef?: string | null,
     sourceBranch?: string | null,
     expectedGeneration?: number,
-    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId
+    sourceGithubRepositoryId: number | null | undefined = githubRepositoryId,
+    acceptedSourcePins?: AcceptedSourcePins
   ): Promise<boolean> {
     const buildId = build?.id;
     if (!buildId) {
       getLogger().error('Build: id missing for=buildImages');
     }
 
-    const deploys = await Deploy.query()
-      .where({
-        buildId,
-        runUUID,
-        ...(githubRepositoryId ? { githubRepositoryId } : {}),
-        ...(githubRepositoryId && sourceBranch ? { branchName: sourceBranch } : {}),
-      })
-      .withGraphFetched({
-        deployable: true,
-      });
+    const deploys = await this.selectRunDeploys(
+      buildId,
+      runUUID,
+      githubRepositoryId,
+      sourceBranch,
+      expectedGeneration,
+      expectedGeneration != null
+    );
 
     try {
       const deploysToBuild = deploys.filter((deploy): deploy is Deploy & { deployable: Deployable } => {
@@ -3520,9 +3790,19 @@ export default class BuildService extends BaseService {
             sourceGithubRepositoryId,
             sourceBranch,
             expectedGeneration,
-            nativeServiceAccount
+            nativeServiceAccount,
+            acceptedSourcePins
           );
           getLogger().debug(`buildImage completed: deployUuid=${deploy.uuid} result=${result}`);
+          if (result === false) {
+            await this.recordPhaseFailure(
+              deploy,
+              runUUID,
+              DeployStatus.BUILD_FAILED,
+              'Image build failed.',
+              expectedGeneration
+            );
+          }
           return result;
         })
       );
@@ -3532,6 +3812,13 @@ export default class BuildService extends BaseService {
     } catch (error) {
       if (error instanceof AuthorityLockLostError || error instanceof DeploymentSupersededError) throw error;
       getLogger().error({ error }, 'Docker: build error');
+      await this.recordPhaseFailures(
+        deploys,
+        runUUID,
+        DeployStatus.BUILD_FAILED,
+        'Image build setup failed.',
+        expectedGeneration
+      );
       return false;
     }
   }
@@ -3548,6 +3835,7 @@ export default class BuildService extends BaseService {
     sourceBranch,
     namespace,
     enqueueIngress = true,
+    unresolvedServices = [],
   }: {
     build: Build;
     runUUID?: string;
@@ -3556,6 +3844,7 @@ export default class BuildService extends BaseService {
     sourceBranch?: string | null;
     namespace: string;
     enqueueIngress?: boolean;
+    unresolvedServices?: string[];
   }): Promise<boolean> {
     try {
       const buildId = build?.id;
@@ -3591,16 +3880,21 @@ export default class BuildService extends BaseService {
           });
       }
 
-      const allDeploys = await Deploy.query()
-        .where({
-          buildId,
-          ...(runUUID ? { runUUID } : {}),
-          ...(githubRepositoryId ? { githubRepositoryId } : {}),
-          ...(githubRepositoryId && sourceBranch ? { branchName: sourceBranch } : {}),
-        })
-        .withGraphFetched({
-          deployable: true,
-        });
+      const allDeploys = await this.selectRunDeploys(
+        buildId,
+        runUUID,
+        githubRepositoryId,
+        sourceBranch,
+        expectedGeneration
+      );
+      // A service whose image or import failed stays in the plan so its dependents are blocked, but it is never applied.
+      const failedServices = new Set([
+        ...unresolvedServices,
+        ...allDeploys
+          .filter((deploy) => expectedGeneration != null && isDeployFailure(deploy.status))
+          .map((deploy) => deploy.deployable?.name)
+          .filter((name): name is string => Boolean(name)),
+      ]);
 
       const activeDeploys = allDeploys.filter((deploy): deploy is Deploy & { deployable: Deployable } => {
         if (!deploy.active) return false;
@@ -3612,6 +3906,7 @@ export default class BuildService extends BaseService {
 
       // Generate manifests for GitHub/Docker/CLI deploys
       for (const deploy of activeDeploys) {
+        if (failedServices.has(deploy.deployable.name)) continue;
         const deployType = deploy.deployable.type;
         if (deployType === DeployTypes.GITHUB || deployType === DeployTypes.DOCKER || CLIDeployTypes.has(deployType)) {
           // Generate individual manifest for this deploy
@@ -3638,19 +3933,40 @@ export default class BuildService extends BaseService {
         const managedDeploys = activeDeploys.filter(
           (d) => d.deployable.type !== DeployTypes.CODEFRESH && d.deployable.type !== DeployTypes.CONFIGURATION
         );
+        if (managedDeploys.length === 0 && expectedGeneration != null) {
+          getLogger().info('Deploy: nothing to roll out reason=already_deployed');
+        }
         const isCurrent = runUUID
           ? () => this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration)
           : undefined;
+        const deployIsCurrent = (deploy: Deploy) =>
+          expectedGeneration != null
+            ? () => isDeployAuthorityCurrent(this.db.models, deploy, runUUID!, expectedGeneration)
+            : isCurrent!;
         const deploymentManager = new DeploymentManager(managedDeploys, {
           isCurrent,
+          expectedGeneration,
+          failedServices: Array.from(failedServices),
+          prerequisiteOutcome:
+            runUUID && expectedGeneration != null
+              ? (deploy, prerequisite) =>
+                  this.waitForServiceOutcome(build.id, prerequisite, runUUID, deployIsCurrent(deploy))
+              : undefined,
           nativeMutationGate: runUUID
-            ? (action) => this.withCurrentBuildPromotionLock(build.id, isCurrent!, action)
+            ? (deploy, action) =>
+                expectedGeneration != null
+                  ? this.withCurrentDeployPromotionLock(deploy.id, deployIsCurrent(deploy), action)
+                  : this.withCurrentBuildPromotionLock(build.id, isCurrent!, action)
             : undefined,
           nativeSecretMutationGate: runUUID
-            ? (deploy, action) => this.withCurrentDeploySecretMutationLock(deploy.id, isCurrent!, action)
+            ? (deploy, action) => this.withCurrentDeploySecretMutationLock(deploy.id, deployIsCurrent(deploy), action)
             : undefined,
         });
-        await deploymentManager.deploy();
+        const { failed } = await deploymentManager.deploy();
+        // Fenced runs carry failures on their rows; legacy whole-environment callers still expect a throw.
+        if (failed.length > 0 && expectedGeneration == null) {
+          throw new Error(`Deployment failed for ${failed.map((deploy) => deploy.deployable.name).join(', ')}`);
+        }
       }
 
       if (runUUID && !(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) {
@@ -3672,15 +3988,17 @@ export default class BuildService extends BaseService {
       if (githubTypeDeploys.length > 0) {
         const legacyManifest = k8s.generateManifest({
           build,
-          deploys: githubTypeDeploys,
+          deploys: githubTypeDeploys.filter((d) => !failedServices.has(d.deployable.name)),
           uuid: build.uuid,
           namespace,
           serviceAccountName,
         });
         if (legacyManifest && legacyManifest.replace(/---/g, '').trim().length > 0) {
-          let manifestPatch = this.db.models.Build.query().patch({ manifest: legacyManifest }).where({ id: build.id });
-          if (runUUID) manifestPatch = manifestPatch.where('runUUID', runUUID);
-          if (expectedGeneration != null) manifestPatch = manifestPatch.where('desiredGeneration', expectedGeneration);
+          let manifestPatch = this.db.models.Build.query()
+            .patch({ manifest: legacyManifest })
+            .where({ id: build.id })
+            .whereNull('deletedAt');
+          if (runUUID && expectedGeneration == null) manifestPatch = manifestPatch.where('runUUID', runUUID);
           await manifestPatch;
         }
       }
@@ -3732,6 +4050,7 @@ export default class BuildService extends BaseService {
     await build?.$fetchGraph('deploys');
     const deploys = (build.deploys ?? []).filter(
       (deploy) =>
+        !isDeployFailure(deploy.status) &&
         (!githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId) &&
         (!githubRepositoryId || !sourceBranch || deploy.branchName === sourceBranch)
     );
@@ -3759,7 +4078,7 @@ export default class BuildService extends BaseService {
     },
   });
 
-  deploymentReconciliationQueue = this.queueManager.registerQueue(QUEUE_NAMES.DEPLOYMENT_RECONCILIATION, {
+  deploymentReconciliationQueue = this.queueManager.registerQueue(QUEUE_NAMES.SERVICE_RECONCILIATION, {
     connection: redisClient.getConnection(),
     defaultJobOptions: {
       attempts: 10,
@@ -3991,73 +4310,95 @@ export default class BuildService extends BaseService {
     });
   };
 
-  private async claimDeploymentReconciliation(
+  private async claimDeploymentIntent(
     buildId: number,
     generation: number
   ): Promise<DeploymentReconciliationClaim | null> {
     const build = await this.db.models.Build.query().findById(buildId).whereNull('deletedAt');
     if (!build) return null;
+    const refs: AcceptedDeploymentRefs =
+      build.acceptedRefs && typeof build.acceptedRefs === 'object' && !Array.isArray(build.acceptedRefs)
+        ? build.acceptedRefs
+        : {};
+    await this.stampPendingIntents(buildId, refs, Number(build.observedGeneration));
 
-    const desiredGeneration = Number(build.desiredGeneration);
-    const observedGeneration = Number(build.observedGeneration);
-    if (!Number.isSafeInteger(desiredGeneration) || !Number.isSafeInteger(observedGeneration)) {
-      throw new Error(`Build ${buildId} has invalid deployment generations`);
+    const intent = Object.values(refs).find((candidate) => candidate?.gen === generation);
+    if (!intent?.requestId) {
+      getLogger({ buildId, generation }).info('Build reconciliation: signal ignored reason=intent_replaced');
+      return null;
     }
-    // One signal owns exactly one generation. B must never wake up later and
-    // read/execute C's mailbox contents.
-    if (desiredGeneration !== generation || generation <= observedGeneration) return null;
-
-    const dirty = dirtyDeploymentIntents(build.acceptedRefs, observedGeneration).filter(
-      ({ intent }) => intent.gen <= generation
-    );
-    const latest = dirty.find(({ intent }) => intent.gen === generation)?.intent;
-    if (!latest?.requestId) throw new Error(`Build ${buildId} generation ${generation} has no request token`);
-
-    return { generation, token: latest.requestId, dirty };
+    if (intent.observedGen === generation) {
+      getLogger({ buildId, generation }).info('Build reconciliation: signal ignored reason=already_observed');
+      return null;
+    }
+    return { generation, token: intent.requestId, intent, acceptedSourcePins: this.acceptedSourcePins(refs) };
   }
 
-  private deploymentReconciliationScopes(dirty: DirtyDeploymentIntent[]): DeploymentReconciliationScope[] {
-    const newestBroadIndex = _.findLastIndex(
-      dirty,
-      ({ intent }) => intent.type === 'all' || (intent.type === 'source' && intent.target === 'all')
-    );
+  /**
+   * Every accepted push SHA is a floor for its repository and branch, whatever
+   * pass deploys the row. A full-environment push (config repo, or PR failure
+   * recovery) is a floor too, since a later full pass replaces its entry.
+   */
+  private acceptedSourcePins(refs: AcceptedDeploymentRefs): AcceptedSourcePins {
+    const newest = new Map<string, { gen: number; sha: string }>();
+    for (const intent of Object.values(refs)) {
+      if (intent?.type !== 'source' || !intent.sha) continue;
+      const key = `${intent.githubRepositoryId}:${intent.branch}`;
+      const current = newest.get(key);
+      if (!current || Number(intent.gen) > current.gen) newest.set(key, { gen: Number(intent.gen), sha: intent.sha });
+    }
+    return Object.fromEntries(Array.from(newest.entries()).map(([key, { sha }]) => [key, sha]));
+  }
 
-    // A full pass subsumes older unpinned requests, but it must not erase a
-    // delivered source SHA. Run unpinned/live-head work first and immutable
-    // source floors last so a temporarily stale provider read cannot roll C
-    // back to B. A source-targeted full pass still precedes selective pins.
-    const retained = dirty.filter(
-      ({ intent }, index) => newestBroadIndex < 0 || index >= newestBroadIndex || intent.type === 'source'
-    );
-    const ordered = _.orderBy(
-      retained,
-      [
-        ({ intent }) => {
-          if (intent.type === 'all') return 0;
-          if (intent.type === 'repository') return 1;
-          return intent.target === 'all' ? 2 : 3;
-        },
-        ({ intent }) => intent.gen,
-      ],
-      ['asc', 'desc']
-    );
+  /** Intents accepted before rows carried generations never stamped them; adopting here is idempotent. */
+  private async stampPendingIntents(
+    buildId: number,
+    refs: AcceptedDeploymentRefs,
+    observedGeneration: number
+  ): Promise<void> {
+    for (const { intent } of dirtyDeploymentIntents(refs, observedGeneration)) {
+      await this.adoptDeploysForIntent(buildId, intent, intent.gen);
+    }
+  }
 
-    return ordered.map(({ intent }) => {
-      if (intent.type === 'all') return { githubRepositoryId: null };
-      if (intent.type === 'source') {
-        return {
-          githubRepositoryId: intent.target === 'all' ? null : intent.githubRepositoryId,
-          sourceGithubRepositoryId: intent.githubRepositoryId,
-          sourceRef: intent.sha,
-          sourceBeforeRef: intent.beforeSha,
-          sourceBranch: intent.branch,
-        };
-      }
+  private async adoptDeploysForIntent(buildId: number, intent: DeploymentIntent, generation: number): Promise<void> {
+    await this.db.models.Deploy.query()
+      .patch({ desiredGeneration: generation })
+      .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
+      .where('desiredGeneration', '<', generation)
+      .where('observedGeneration', '<', generation);
+  }
+
+  /**
+   * Taking a row from another run resets it: whatever it showed came from an
+   * older generation. Rows this run already owns keep what they reached, so a
+   * retry resumes rather than repeats them. The count covers every pending row
+   * the run owns afterwards.
+   */
+  private async claimIntentDeploys(buildId: number, generation: number, token: string): Promise<number> {
+    const pending = () =>
+      this.db.models.Deploy.query()
+        .where({ buildId, desiredGeneration: generation })
+        .where('observedGeneration', '<', generation);
+    const reset = { runUUID: token, status: DeployStatus.QUEUED, statusMessage: null };
+    await pending().patch(reset).whereNull('runUUID');
+    await pending().patch(reset).whereNot('runUUID', token);
+    const owned = await pending().where('runUUID', token).select('id');
+    return owned.length;
+  }
+
+  private deploymentReconciliationScope(intent: AcceptedDeploymentIntent): DeploymentReconciliationScope {
+    if (intent.type === 'all') return { githubRepositoryId: null };
+    if (intent.type === 'source') {
       return {
-        githubRepositoryId: intent.githubRepositoryId,
-        skipDeletedServiceReconciliation: true,
+        githubRepositoryId: intent.target === 'all' ? null : intent.githubRepositoryId,
+        sourceGithubRepositoryId: intent.githubRepositoryId,
+        sourceRef: intent.sha,
+        sourceBeforeRef: intent.beforeSha,
+        sourceBranch: intent.branch,
       };
-    });
+    }
+    return { githubRepositoryId: intent.githubRepositoryId, skipDeletedServiceReconciliation: true };
   }
 
   /**
@@ -4070,47 +4411,101 @@ export default class BuildService extends BaseService {
     const repository: Repository | undefined = await this.db.models.Repository.query()
       .findOne({ githubRepositoryId: scope.sourceGithubRepositoryId })
       .whereNull('deletedAt');
-    const repositoryFullName = repository?.fullName;
+    return this.advanceAcceptedSourceRef(
+      repository?.fullName,
+      scope.sourceBranch,
+      scope.sourceRef,
+      scope.sourceBeforeRef
+    );
+  }
+
+  /** An accepted push is a floor. The live head replaces it only when GitHub proves the head descends from it. */
+  private async advanceAcceptedSourceRef(
+    repositoryFullName: string | undefined,
+    branch: string,
+    sha: string,
+    beforeSha?: string
+  ): Promise<string> {
     const [owner, name] = repositoryFullName?.split('/') ?? [];
-    if (!repositoryFullName || !owner || !name) return scope.sourceRef;
+    if (!repositoryFullName || !owner || !name) return sha;
 
     let currentRef: string;
     try {
-      currentRef = await github.getSHAForBranch(scope.sourceBranch, owner, name);
+      currentRef = await github.getSHAForBranch(branch, owner, name);
     } catch (error) {
-      getLogger({ error, repositoryFullName, branch: scope.sourceBranch }).warn(
+      getLogger({ error, repositoryFullName, branch }).warn(
         'Build reconciliation: branch head lookup failed; using accepted source'
       );
-      return scope.sourceRef;
+      return sha;
     }
-    if (!currentRef || currentRef === scope.sourceRef || currentRef === scope.sourceBeforeRef) return scope.sourceRef;
+    if (!currentRef || currentRef === sha || currentRef === beforeSha) return sha;
 
     try {
-      const comparison = await github.compareCommits({
-        fullName: repositoryFullName,
-        base: scope.sourceRef,
-        head: currentRef,
-      });
+      const comparison = await github.compareCommits({ fullName: repositoryFullName, base: sha, head: currentRef });
       if (comparison === 'ahead') return currentRef;
     } catch (error) {
-      getLogger({ error, repositoryFullName, branch: scope.sourceBranch }).warn(
+      getLogger({ error, repositoryFullName, branch }).warn(
         'Build reconciliation: commit comparison failed; using accepted source'
       );
     }
-    return scope.sourceRef;
+    return sha;
   }
 
-  private async markDeploymentReconciliationObserved(
+  /** Pins are resolved once per full pass so YAML, image and rollout all see one revision per service. */
+  private async resolveAcceptedSourcePins(pins: AcceptedSourcePins): Promise<AcceptedSourcePins> {
+    const resolved: AcceptedSourcePins = {};
+    for (const [key, sha] of Object.entries(pins)) {
+      const separator = key.indexOf(':');
+      const repositoryId = Number(key.slice(0, separator));
+      const branch = key.slice(separator + 1);
+      const repository: Repository | undefined = await this.db.models.Repository.query()
+        .findOne({ githubRepositoryId: repositoryId })
+        .whereNull('deletedAt');
+      resolved[key] = await this.advanceAcceptedSourceRef(repository?.fullName, branch, sha);
+    }
+    return resolved;
+  }
+
+  /** Rows this run still owns at this generation are caught up, whatever their outcome. */
+  private async observeIntentDeploys(buildId: number, generation: number, token?: string): Promise<number> {
+    let update = this.db.models.Deploy.query()
+      .patch({ observedGeneration: generation })
+      .where({ buildId, desiredGeneration: generation })
+      .where('observedGeneration', '<', generation);
+    if (token) update = update.where('runUUID', token);
+    return update;
+  }
+
+  /** The Build watermark is the newest generation every active service has caught up with. */
+  private async refreshBuildObservedGeneration(buildId: number, finishingGeneration?: number): Promise<void> {
+    const [build, pending] = await Promise.all([
+      this.db.models.Build.query().findById(buildId).select('id', 'desiredGeneration', 'acceptedRefs'),
+      this.db.models.Deploy.query()
+        .select('desiredGeneration')
+        .where({ buildId, active: true })
+        .whereRaw('?? > ??', ['desiredGeneration', 'observedGeneration']),
+    ]);
+    if (!build) return;
+    // An accepted intent that never finished is pending work even when no row carries its generation,
+    // which is the shape of an environment-wide intent whose rows were all taken by later intents.
+    const outstanding = [
+      ...pending.map((row) => Number(row.desiredGeneration)),
+      ...unobservedAcceptedGenerations(build.acceptedRefs),
+    ].filter((generation) => generation !== finishingGeneration);
+    const minPending = outstanding.reduce((min, generation) => Math.min(min, generation), Infinity);
+    const observedGeneration = Number.isFinite(minPending) ? minPending - 1 : Number(build.desiredGeneration);
+    await this.db.models.Build.query().patch({ observedGeneration }).where({ id: buildId });
+  }
+
+  /** The completion mark is written last: a retry after any earlier failure republishes instead of exiting early. */
+  private async finishIntent(
     buildId: number,
     generation: number,
-    token?: string
-  ): Promise<boolean> {
-    let update = this.db.models.Build.query()
-      .patch({ observedGeneration: generation })
-      .where({ id: buildId, desiredGeneration: generation })
-      .whereNull('deletedAt');
-    if (token) update = update.where('runUUID', token);
-    return (await update) === 1;
+    options: { clearConfigError?: boolean } = {}
+  ): Promise<void> {
+    await this.refreshBuildObservedGeneration(buildId, generation);
+    await this.publishDerivedBuildStatus(buildId, options);
+    await markDeploymentIntentObserved(buildId, generation);
   }
 
   private async signalPendingDeploymentReconciliation(buildId: number, generation: number): Promise<void> {
@@ -4134,7 +4529,7 @@ export default class BuildService extends BaseService {
   async enqueuePendingDeploymentReconciliations(): Promise<void> {
     const pendingAfter = (id: number) =>
       this.db.models.Build.query()
-        .select('id', 'desiredGeneration')
+        .select('id', 'desiredGeneration', 'acceptedRefs')
         .whereRaw('?? > ??', ['desiredGeneration', 'observedGeneration'])
         .whereNull('deletedAt')
         .where('id', '>', id)
@@ -4148,12 +4543,53 @@ export default class BuildService extends BaseService {
     }
     if (builds.length > 0) this.deploymentReconciliationSweepCursor = Number(builds[builds.length - 1].id);
 
+    const pendingRows = await this.db.models.Deploy.query()
+      .select('buildId', 'desiredGeneration')
+      .where('active', true)
+      .whereRaw('?? > ??', ['desiredGeneration', 'observedGeneration']);
+    const pendingByBuild = new Map<number, Set<number>>();
+    for (const row of pendingRows) {
+      const buildId = Number(row.buildId);
+      const generations = pendingByBuild.get(buildId) ?? new Set<number>();
+      generations.add(Number(row.desiredGeneration));
+      pendingByBuild.set(buildId, generations);
+    }
+
+    const signals = new Map<number, Set<number>>();
+    for (const build of builds) {
+      const buildId = Number(build.id);
+      // Rows are the durable record of pending work, and an accepted entry that never finished still is work.
+      // The Build generation is signalled only when neither exists, the shape of intents accepted before
+      // rows had generations.
+      const generations = new Set([
+        ...(pendingByBuild.get(buildId) ?? []),
+        ...unobservedAcceptedGenerations(build.acceptedRefs),
+      ]);
+      if (generations.size === 0) generations.add(Number(build.desiredGeneration));
+      signals.set(buildId, generations);
+    }
+    const candidateIds = Array.from(pendingByBuild.keys()).filter((id) => !signals.has(id));
+    const liveIds = new Set(
+      candidateIds.length > 0
+        ? (await this.db.models.Build.query().select('id').whereNull('deletedAt').whereIn('id', candidateIds)).map(
+            (build) => Number(build.id)
+          )
+        : []
+    );
+    for (const [buildId, generations] of pendingByBuild) {
+      if (!signals.has(buildId) && liveIds.has(buildId)) signals.set(buildId, generations);
+    }
+
     await Promise.all(
-      builds.map((build) =>
-        this.signalPendingDeploymentReconciliation(build.id, Number(build.desiredGeneration)).catch((error) => {
-          getLogger({ error, buildId: build.id }).warn('Build reconciliation: sweep signal failed');
-        })
-      )
+      Array.from(signals.entries()).map(async ([buildId, generations]) => {
+        for (const generation of generations) {
+          try {
+            await this.signalPendingDeploymentReconciliation(buildId, generation);
+          } catch (error) {
+            getLogger({ error, buildId }).warn('Build reconciliation: sweep signal failed');
+          }
+        }
+      })
     );
   }
 
@@ -4175,50 +4611,147 @@ export default class BuildService extends BaseService {
     return Number(job.attemptsMade ?? 0) + 1 >= attempts;
   }
 
-  /**
-   * A failure can happen before the normal run claim finishes. On the final
-   * BullMQ attempt, reacquire the short mutation lock and establish the same
-   * generation token before publishing one terminal failure.
-   */
+  /** On the final queue attempt, rows this run owns that never settled are recorded failed so nothing stays pending. */
   private async recordFinalDeploymentReconciliationFailure(
     buildId: number,
     claim: DeploymentReconciliationClaim,
-    build: Build | null,
-    runUUID: string | null,
     error: unknown
   ): Promise<boolean> {
-    let failureBuild = build;
-    let failureRunUUID = runUUID;
-
-    if (!failureBuild || !failureRunUUID) {
-      const terminalClaim = await this.withCurrentBuildDeploymentLock(
-        buildId,
-        async () => Boolean(await this.claimDeploymentReconciliation(buildId, claim.generation)),
-        async () => {
-          const currentClaim = await this.claimDeploymentReconciliation(buildId, claim.generation);
-          if (!currentClaim || currentClaim.token !== claim.token) return null;
-
-          const currentBuild = await this.loadBuildDeploymentAuthority(buildId);
-          if (!currentBuild) return null;
-          const claimedRunUUID = await this.claimDeploymentRun(currentBuild, claim.token, claim.generation);
-          return claimedRunUUID ? { build: currentBuild, runUUID: claimedRunUUID } : null;
-        }
-      );
-      if (!terminalClaim.admitted || !terminalClaim.value) return false;
-      failureBuild = terminalClaim.value.build;
-      failureRunUUID = terminalClaim.value.runUUID;
-    }
-
-    if (!(await this.isDeploymentRunCurrent(buildId, failureRunUUID, claim.generation))) return false;
-    await this.recordBuildFailure(
-      failureBuild,
-      BuildStatus.ERROR,
-      failureRunUUID,
+    await this.claimIntentDeploys(buildId, claim.generation, claim.token);
+    await this.recordFailureOnOwnedDeploys(
+      buildId,
+      claim.token,
+      claim.generation,
       error,
-      'Build queue processing failed.',
-      claim.generation
+      'Build queue processing failed.'
     );
-    return this.markDeploymentReconciliationObserved(buildId, claim.generation, failureRunUUID);
+    const observed = await this.observeIntentDeploys(buildId, claim.generation, claim.token);
+    await this.finishIntent(buildId, claim.generation);
+    return observed > 0;
+  }
+
+  private async recordFailureOnOwnedDeploys(
+    buildId: number,
+    token: string,
+    generation: number,
+    error: unknown,
+    fallbackMessage: string
+  ): Promise<void> {
+    const statusMessage = compactStatusMessage(statusMessageFromError(error, fallbackMessage));
+    await this.db.models.Deploy.query()
+      .patch({ status: DeployStatus.ERROR, statusMessage })
+      .where({ buildId, runUUID: token, desiredGeneration: generation })
+      .where('observedGeneration', '<', generation)
+      .whereNotIn('status', [
+        DeployStatus.READY,
+        DeployStatus.DEPLOYED,
+        DeployStatus.ERROR,
+        DeployStatus.BUILD_FAILED,
+        DeployStatus.DEPLOY_FAILED,
+        DeployStatus.TORN_DOWN,
+      ]);
+  }
+
+  private async recordPhaseFailure(
+    deploy: Deploy,
+    runUUID: string,
+    status: DeployStatus,
+    fallbackMessage: string,
+    expectedGeneration?: number
+  ): Promise<void> {
+    await this.db.models.Deploy.query()
+      .patch({ status, statusMessage: fallbackMessage })
+      .where({
+        id: deploy.id,
+        runUUID,
+        ...(expectedGeneration != null ? { desiredGeneration: expectedGeneration } : {}),
+      })
+      .whereNotIn('status', [
+        DeployStatus.ERROR,
+        DeployStatus.BUILD_FAILED,
+        DeployStatus.DEPLOY_FAILED,
+        DeployStatus.TORN_DOWN,
+      ]);
+  }
+
+  /** Rows still in flight when a whole phase fails must not roll out as if they had succeeded. */
+  private async recordPhaseFailures(
+    deploys: Array<Pick<Deploy, 'id'>>,
+    runUUID: string,
+    status: DeployStatus,
+    fallbackMessage: string,
+    expectedGeneration?: number
+  ): Promise<void> {
+    for (const deploy of deploys) {
+      await this.db.models.Deploy.query()
+        .patch({ status, statusMessage: fallbackMessage })
+        .where({
+          id: deploy.id,
+          runUUID,
+          ...(expectedGeneration != null ? { desiredGeneration: expectedGeneration } : {}),
+        })
+        .whereNotIn('status', [
+          DeployStatus.READY,
+          DeployStatus.DEPLOYED,
+          DeployStatus.BUILT,
+          DeployStatus.ERROR,
+          DeployStatus.BUILD_FAILED,
+          DeployStatus.DEPLOY_FAILED,
+          DeployStatus.TORN_DOWN,
+        ]);
+    }
+  }
+
+  /** A service whose own lifecycle.yaml is broken fails alone; the root config and every other service proceed. */
+  private async recordServiceConfigFailures(
+    buildId: number,
+    generation: number,
+    token: string,
+    failures: Record<string, string>
+  ): Promise<string[]> {
+    const rows = await this.db.models.Deploy.query()
+      .where({ buildId, desiredGeneration: generation })
+      .where('observedGeneration', '<', generation)
+      .withGraphFetched('deployable');
+    const matched = new Set<string>();
+    for (const row of rows) {
+      const message = row.deployable?.name ? failures[row.deployable.name] : undefined;
+      if (!message) continue;
+      matched.add(row.deployable.name);
+      // The row keeps this run's token so rollout planning still sees it as a failed prerequisite.
+      await this.db.models.Deploy.query()
+        .patch({
+          runUUID: token,
+          status: DeployStatus.ERROR,
+          statusMessage: compactStatusMessage(message),
+          observedGeneration: generation,
+        })
+        .where({ id: row.id, desiredGeneration: generation });
+    }
+    return Object.keys(failures).filter((name) => !matched.has(name));
+  }
+
+  /** The failing intent takes its rows, so a superseded run's token-fenced writes cannot land after they are observed. */
+  private async recordConfigErrorOnIntentDeploys(
+    buildId: number,
+    generation: number,
+    token: string,
+    error: unknown
+  ): Promise<void> {
+    const statusMessage = compactStatusMessage(
+      statusMessageFromError(error, 'Lifecycle configuration failed validation.')
+    );
+    await this.db.models.Deploy.query()
+      .patch({ runUUID: token, status: DeployStatus.ERROR, statusMessage })
+      .where({ buildId, desiredGeneration: generation })
+      .where('observedGeneration', '<', generation);
+  }
+
+  private async takeIntentDeploys(buildId: number, generation: number, token: string): Promise<void> {
+    await this.db.models.Deploy.query()
+      .patch({ runUUID: token })
+      .where({ buildId, desiredGeneration: generation })
+      .where('observedGeneration', '<', generation);
   }
 
   processDeploymentReconciliationQueue = async (job: DeploymentReconciliationQueueJob) => {
@@ -4229,175 +4762,176 @@ export default class BuildService extends BaseService {
       }
 
       await this.tryWithDeploymentGenerationLock(buildId, Number(generation), async () => {
-        const claim = await this.claimDeploymentReconciliation(buildId, Number(generation));
+        const claim = await this.claimDeploymentIntent(buildId, Number(generation));
         if (!claim) return;
+        const { token, intent } = claim;
+        const envWide = deploymentIntentSelectsAllDeploys(intent);
+        const scope = this.deploymentReconciliationScope(intent);
+        const logContext = { buildId, generation: claim.generation };
+        const state: { build: Build | null } = { build: null };
 
-        let build: Build | null = null;
-        let activeBuild: Build | null = null;
-        let activeRunUUID: string | null = null;
         try {
-          const initialClaim = await this.withCurrentBuildDeploymentLock(
+          const configuration = await this.withCurrentBuildDeploymentLock(
             buildId,
-            async () => Boolean(await this.claimDeploymentReconciliation(buildId, claim.generation)),
-            async () => {
-              const currentClaim = await this.claimDeploymentReconciliation(buildId, claim.generation);
-              if (!currentClaim) return;
-              build = await this.loadBuildDeploymentAuthority(buildId);
-              if (!build) return;
+            () => this.isIntentPending(buildId, token, claim.generation),
+            async (): Promise<IntentConfiguration | null> => {
+              const build = await this.loadBuildDeploymentAuthority(buildId);
+              if (!build) return null;
               if (build.uuid) updateLogContext({ buildUuid: build.uuid });
+              state.build = build;
 
               const blocked = this.deploymentBlockReason(build);
-              if (blocked) {
-                if (blocked === 'tearing_down') {
-                  getLogger({ buildId, generation: claim.generation }).info(
-                    'Build reconciliation: deferred reason=tearing_down'
-                  );
-                  return;
-                }
-                getLogger({ buildId, generation: claim.generation }).info(
-                  `Build reconciliation: observed without execution reason=${blocked}`
-                );
-                await this.markDeploymentReconciliationObserved(buildId, claim.generation);
-                return;
+              if (blocked === 'tearing_down') {
+                getLogger(logContext).info('Build reconciliation: deferred reason=tearing_down');
+                return { kind: 'deferred' };
               }
-              activeRunUUID = await this.claimDeploymentRun(build, claim.token, claim.generation);
-            }
-          );
+              if (blocked) {
+                getLogger(logContext).info(`Build reconciliation: observed without execution reason=${blocked}`);
+                await this.observeIntentDeploys(buildId, claim.generation);
+                return { kind: 'observed' };
+              }
+              if (!envWide) {
+                const pendingRow = await this.db.models.Deploy.query()
+                  .findOne({ buildId, desiredGeneration: claim.generation })
+                  .where('observedGeneration', '<', claim.generation)
+                  .select('id');
+                if (!pendingRow) {
+                  getLogger(logContext).info('Build reconciliation: nothing pending reason=rows_settled_or_taken');
+                  return { kind: 'observed' };
+                }
+              }
+              if (envWide && !(await this.claimDeploymentRun(build, token, claim.generation))) return null;
 
-          if (!initialClaim.admitted || !build || !activeRunUUID) return;
-          const reconciliationBuild = build;
-          activeBuild = reconciliationBuild;
-          const terminalOutcomes: Array<{ status: BuildStatus; error?: unknown }> = [];
-          const scopes = this.deploymentReconciliationScopes(claim.dirty);
-          getLogger({ stage: LogStage.BUILD_STARTING, buildId, generation: claim.generation }).info(
-            `Build reconciliation: started scopes=${scopes.length}`
-          );
-
-          for (const scope of scopes) {
-            const sourceRef = await this.resolveCurrentSourceRef(scope);
-            let preparation: DeploymentScopePreparation | null = null;
-            const configuration = await this.withCurrentBuildDeploymentLock(
-              buildId,
-              () => this.isDeploymentRunCurrent(buildId, claim.token, claim.generation),
-              async () => {
-                if (!(await this.isDeploymentRunCurrent(buildId, claim.token, claim.generation))) return;
-
-                await this.importYamlConfigFile(
-                  reconciliationBuild.environment!,
-                  reconciliationBuild,
+              const sourceRef = await this.resolveCurrentSourceRef(scope);
+              const acceptedSourcePins = await this.resolveAcceptedSourcePins(
+                acceptedSourcePinsForIntent(claim.acceptedSourcePins, intent, rootSourcePinKey(build))
+              );
+              let imported: DeployableReconciliationResult | undefined;
+              let preparation: DeploymentScopePreparation | null;
+              try {
+                imported = await this.importYamlConfigFile(
+                  build.environment!,
+                  build,
                   scope.githubRepositoryId ?? undefined,
                   {
                     skipDeletedServiceReconciliation: scope.skipDeletedServiceReconciliation,
                     sourceRef,
                     sourceBranch: scope.sourceBranch,
                     sourceGithubRepositoryId: scope.sourceGithubRepositoryId,
-                    runUUID: claim.token,
+                    runUUID: token,
                     expectedGeneration: claim.generation,
+                    acceptedSourcePins,
                   }
                 );
-                preparation = await this.prepareDeploymentScope(
-                  reconciliationBuild,
-                  scope.githubRepositoryId,
-                  sourceRef,
-                  {
-                    runUUID: claim.token,
-                    sourceBranch: scope.sourceBranch,
-                    sourceGithubRepositoryId: scope.sourceGithubRepositoryId,
-                    expectedGeneration: claim.generation,
-                  }
+                // Every intent reads the root config, so any successful import proves it valid again.
+                if (build.status === BuildStatus.CONFIG_ERROR) {
+                  await this.publishDerivedBuildStatus(buildId, { clearConfigError: true });
+                }
+                preparation = await this.prepareDeploymentScope(build, scope.githubRepositoryId, sourceRef, {
+                  runUUID: token,
+                  sourceBranch: scope.sourceBranch,
+                  sourceGithubRepositoryId: scope.sourceGithubRepositoryId,
+                  expectedGeneration: claim.generation,
+                  acceptedSourcePins,
+                });
+              } catch (error) {
+                if (!(error instanceof ParsingError || error instanceof ValidationError)) throw error;
+                // Recorded while the configuration lock is held, so the status follows the order the config was read in.
+                if (envWide) {
+                  await this.recordRootConfigError(build, error);
+                  await this.takeIntentDeploys(buildId, claim.generation, token);
+                } else {
+                  await this.recordConfigErrorOnIntentDeploys(buildId, claim.generation, token, error);
+                }
+                await this.observeIntentDeploys(buildId, claim.generation);
+                return { kind: 'observed' };
+              }
+              if (!preparation) return null;
+              await this.adoptDeploysForIntent(buildId, intent, claim.generation);
+              let unresolvedServices: string[] = [];
+              if (imported?.configFailures && Object.keys(imported.configFailures).length > 0) {
+                unresolvedServices = await this.recordServiceConfigFailures(
+                  buildId,
+                  claim.generation,
+                  token,
+                  imported.configFailures
                 );
               }
-            );
-
-            if (!configuration.admitted || !preparation) return;
-            const outcome = await this.executeDeploymentScope(preparation, claim.generation);
-            if (!outcome) return;
-            terminalOutcomes.push(outcome);
-            if (!(await this.isDeploymentRunCurrent(buildId, claim.token, claim.generation))) return;
-          }
-
-          // Scope workers mutate one shared ingress snapshot. Publish it once,
-          // after every selected scope has settled, so an earlier scope cannot
-          // overwrite the final configuration for the same generation.
-          if (terminalOutcomes.some(({ status }) => status === BuildStatus.DEPLOYED)) {
-            await this.enqueueIngressManifest(buildId, claim.token, claim.generation);
-          }
-
-          const failedOutcome = terminalOutcomes.find(({ status }) => status === BuildStatus.ERROR);
-          const finalStatus = failedOutcome
-            ? BuildStatus.ERROR
-            : isDeployEnabled(reconciliationBuild)
-            ? BuildStatus.DEPLOYED
-            : BuildStatus.BUILT;
-          await this.updateStatusAndComment(
-            reconciliationBuild,
-            finalStatus,
-            claim.token,
-            true,
-            true,
-            failedOutcome?.error instanceof Error ? failedOutcome.error : null,
-            claim.generation
+              await recordIntentConfigFailures(
+                buildId,
+                claim.generation,
+                Object.fromEntries(
+                  unresolvedServices.map((name) => [name, imported?.configFailures?.[name] ?? 'invalid lifecycle.yaml'])
+                )
+              );
+              preparation.unresolvedServices = unresolvedServices;
+              const owned = await this.claimIntentDeploys(buildId, claim.generation, token);
+              await this.markConfigurationsAsBuilt(build, token, scope.githubRepositoryId, scope.sourceBranch);
+              return { kind: 'ready', preparation, owned };
+            }
           );
+          if (!configuration.admitted || !configuration.value) return;
+          const outcome = configuration.value;
+          if (outcome.kind === 'deferred') return;
+          if (outcome.kind === 'observed') {
+            await this.finishIntent(buildId, claim.generation);
+            return;
+          }
+          if (outcome.owned === 0) {
+            getLogger(logContext).info('Build reconciliation: completed services=0');
+            await this.finishIntent(buildId, claim.generation);
+            return;
+          }
 
-          if (await this.markDeploymentReconciliationObserved(buildId, claim.generation, claim.token)) {
-            getLogger({ stage: LogStage.BUILD_COMPLETE, buildId, generation: claim.generation }).info(
-              'Build reconciliation: completed'
+          getLogger({ stage: LogStage.BUILD_STARTING, ...logContext }).info(
+            `Build reconciliation: started services=${outcome.owned}`
+          );
+          await this.publishDerivedBuildStatus(buildId);
+          const summary = await this.executeDeploymentScope(outcome.preparation, claim.generation);
+          if (summary?.deployed) await this.enqueueIngressManifest(buildId, token, claim.generation);
+          const observed = await this.observeIntentDeploys(buildId, claim.generation, token);
+          await this.finishIntent(buildId, claim.generation);
+          if (observed > 0) {
+            getLogger({ stage: LogStage.BUILD_COMPLETE, ...logContext }).info(
+              `Build reconciliation: completed services=${observed}`
             );
           }
         } catch (error) {
-          if (error instanceof AuthorityLockLostError) {
-            const stillCurrent = activeRunUUID
-              ? await this.isDeploymentRunCurrent(buildId, activeRunUUID, claim.generation)
-              : Boolean(await this.claimDeploymentReconciliation(buildId, claim.generation));
-            if (stillCurrent) {
-              getLogger({ error, buildId, generation: claim.generation }).warn(
-                'Build reconciliation: mutation lock lost; leaving generation pending for retry'
-              );
-              throw error;
-            }
-          }
-          const stillCurrent = activeRunUUID
-            ? await this.isDeploymentRunCurrent(buildId, activeRunUUID, claim.generation)
-            : Boolean(await this.claimDeploymentReconciliation(buildId, claim.generation));
-          if (stillCurrent) {
-            const configError = error instanceof ParsingError || error instanceof ValidationError;
-            if (configError && activeBuild && activeRunUUID) {
-              await this.recordBuildFailure(
-                activeBuild,
-                BuildStatus.CONFIG_ERROR,
-                activeRunUUID,
-                error,
-                'Lifecycle configuration failed validation.',
-                claim.generation
-              );
-              await this.markDeploymentReconciliationObserved(buildId, claim.generation, activeRunUUID);
-              return;
-            }
-
-            if (!this.isFinalDeploymentReconciliationAttempt(job)) {
-              getLogger({ error, buildId, generation: claim.generation }).warn(
-                'Build reconciliation: transient failure; leaving generation pending for queue retry'
-              );
-              throw error;
-            }
-
-            if (
-              await this.recordFinalDeploymentReconciliationFailure(buildId, claim, activeBuild, activeRunUUID, error)
-            ) {
-              getLogger({ stage: LogStage.BUILD_FAILED, buildId, generation: claim.generation }).error(
-                { error },
-                'Build reconciliation: failed after final queue attempt'
-              );
-              return;
-            }
-
-            // Authority may have changed while the final failure was being
-            // recorded. Stale failures are intentionally silent; a still-current
-            // failure must remain retryable if its terminal write could not land.
-            if (!(await this.claimDeploymentReconciliation(buildId, claim.generation))) return;
+          const stillCurrent = await this.isDeploymentRunCurrent(buildId, token, claim.generation).catch(() => false);
+          if (error instanceof AuthorityLockLostError && stillCurrent) {
+            getLogger({ error, ...logContext }).warn(
+              'Build reconciliation: mutation lock lost; leaving generation pending for retry'
+            );
             throw error;
           }
-          getLogger({ buildId, generation: claim.generation }).info('Build reconciliation: stale failure ignored');
+          if (!stillCurrent) {
+            getLogger(logContext).info('Build reconciliation: stale failure ignored');
+            return;
+          }
+
+          if (error instanceof ParsingError || error instanceof ValidationError) {
+            if (envWide && state.build) {
+              await this.recordRootConfigError(state.build, error);
+              await this.takeIntentDeploys(buildId, claim.generation, token);
+            } else {
+              await this.recordConfigErrorOnIntentDeploys(buildId, claim.generation, token, error);
+            }
+            await this.observeIntentDeploys(buildId, claim.generation);
+            await this.finishIntent(buildId, claim.generation);
+            return;
+          }
+
+          if (!this.isFinalDeploymentReconciliationAttempt(job)) {
+            getLogger({ error, ...logContext }).warn(
+              'Build reconciliation: transient failure; leaving generation pending for queue retry'
+            );
+            throw error;
+          }
+
+          await this.recordFinalDeploymentReconciliationFailure(buildId, claim, error);
+          getLogger({ stage: LogStage.BUILD_FAILED, error, ...logContext }).error(
+            'Build reconciliation: failed after final queue attempt'
+          );
         }
       });
     });
@@ -4411,6 +4945,66 @@ export default class BuildService extends BaseService {
   processResolveAndDeployBuildQueue = async (job) => {
     await this.adoptLegacyDeploymentJob(job.data);
   };
+}
+
+/**
+ * A full pass honours every floor. A narrower intent honours the root config
+ * floor plus, for a repository redeploy, that repository's own; a push carries
+ * its own revision. Floors are verified against GitHub, so a narrow intent
+ * must not pay for every repository's lookup.
+ */
+function acceptedSourcePinsForIntent(
+  pins: AcceptedSourcePins,
+  intent: DeploymentIntent,
+  rootKey: string | null
+): AcceptedSourcePins {
+  if (deploymentIntentSelectsAllDeploys(intent)) return pins;
+  const ownPrefix = intent.type === 'repository' ? `${intent.githubRepositoryId}:` : null;
+  return Object.fromEntries(
+    Object.entries(pins).filter(([key]) => key === rootKey || (ownPrefix != null && key.startsWith(ownPrefix)))
+  );
+}
+
+function rootSourcePinKey(build: Build): string | null {
+  const source = getBuildSource(build);
+  if (source.githubRepositoryId == null || !source.branchName) return null;
+  return `${source.githubRepositoryId}:${source.branchName}`;
+}
+
+/**
+ * Row-less services whose YAML failed in the newest import that evaluated them.
+ * An environment-wide import evaluates everything and replaces every older
+ * note; a newer service-scoped import adds its own. A service that has a row
+ * again carries its own state.
+ */
+function unresolvedServiceFailures(
+  refs: AcceptedDeploymentRefs | null | undefined,
+  active: Array<Pick<Deploy, 'deployable'>>
+): Record<string, string> {
+  if (!refs || typeof refs !== 'object' || Array.isArray(refs)) return {};
+  const imported = Object.values(refs).filter((entry) => entry?.configFailures && Number.isSafeInteger(entry.gen));
+  const newestEnvWide = imported
+    .filter((entry) => deploymentIntentSelectsAllDeploys(entry))
+    .sort((left, right) => right.gen - left.gen)[0];
+  const carried = new Set(active.map((deploy) => deploy.deployable?.name).filter(Boolean));
+  const failures: Record<string, string> = {};
+  for (const entry of imported) {
+    const counts =
+      entry === newestEnvWide ||
+      (!deploymentIntentSelectsAllDeploys(entry) && (!newestEnvWide || entry.gen > newestEnvWide.gen));
+    if (!counts) continue;
+    for (const [name, reason] of Object.entries(entry.configFailures ?? {})) {
+      if (!carried.has(name)) failures[name] = reason;
+    }
+  }
+  return failures;
+}
+
+function unobservedAcceptedGenerations(refs: AcceptedDeploymentRefs | null | undefined): number[] {
+  if (!refs || typeof refs !== 'object' || Array.isArray(refs)) return [];
+  return Object.values(refs)
+    .filter((intent) => Number.isSafeInteger(intent?.gen) && intent.observedGen !== intent.gen)
+    .map((intent) => intent.gen);
 }
 
 function canonicalJson(value: unknown): unknown {
