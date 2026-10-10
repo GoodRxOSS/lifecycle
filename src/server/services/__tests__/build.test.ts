@@ -3829,7 +3829,7 @@ describe('BuildService uncovered public behavior', () => {
     const lock = jest.fn().mockResolvedValue({ unlock, extend: jest.fn() });
     const withLock = serviceWith({}, { lock });
     await expect(withLock.withBuildDeploymentLock(2, action)).resolves.toBe('done');
-    expect(lock).toHaveBeenCalledWith('build-deployment.2', 15 * 60 * 1000);
+    expect(lock).toHaveBeenCalledWith('build-deployment.2', 60_000);
     expect(unlock).toHaveBeenCalledTimes(1);
   });
 
@@ -3851,7 +3851,7 @@ describe('BuildService uncovered public behavior', () => {
       await jest.advanceTimersByTimeAsync(61_000);
 
       await expect(admitted).resolves.toEqual({ admitted: true, value: 'applied' });
-      expect(lock).toHaveBeenCalledWith('deploy-promotion.3', 15 * 60 * 1000);
+      expect(lock).toHaveBeenCalledWith('deploy-promotion.3', 60_000);
       expect(unlock).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
@@ -3910,7 +3910,7 @@ describe('BuildService uncovered public behavior', () => {
     const lock = jest.fn().mockResolvedValue({ extend, unlock });
     const service = serviceWith({}, { lock });
     const action = jest.fn(async () => {
-      jest.advanceTimersByTime(5 * 60 * 1000);
+      jest.advanceTimersByTime(20_000);
       await Promise.resolve();
       await Promise.resolve();
       return 'done';
@@ -3918,7 +3918,7 @@ describe('BuildService uncovered public behavior', () => {
 
     await expect(service.withBuildDeploymentLock(7, action)).rejects.toBe(renewalFailure);
 
-    expect(extend).toHaveBeenCalledWith(15 * 60 * 1000);
+    expect(extend).toHaveBeenCalledWith(60_000);
     expect(unlock).toHaveBeenCalledTimes(1);
   });
 
@@ -5585,7 +5585,7 @@ describe('BuildService uncovered public behavior', () => {
     {
       name: 'build promotion',
       resource: 'build-promotion.41',
-      ttlMs: 15 * 60 * 1000,
+      ttlMs: 60_000,
       warning: 'Build promotion: waiting for admitted native mutation',
       context: (error: Error) => ({ error, buildId: 41 }),
       run: (service: BuildService, isCurrent: () => Promise<boolean>, action: () => Promise<string>) =>
@@ -5681,7 +5681,7 @@ describe('BuildService uncovered public behavior', () => {
 
     await expect(result).resolves.toBe(true);
     expect(lockWithOptions).toHaveBeenCalledTimes(2);
-    expect(lockWithOptions).toHaveBeenNthCalledWith(1, 'build-deployment.7', 15 * 60 * 1000, {
+    expect(lockWithOptions).toHaveBeenNthCalledWith(1, 'build-deployment.7', 60_000, {
       retryCount: 4,
       retryDelay: 1000,
       retryJitter: 200,
@@ -5757,7 +5757,7 @@ describe('BuildService uncovered public behavior', () => {
 
     await expect(result).resolves.toBeUndefined();
     expect(lockWithOptions).toHaveBeenCalledTimes(2);
-    expect(lockWithOptions).toHaveBeenNthCalledWith(1, 'build-deployment.7', 15 * 60 * 1000, {
+    expect(lockWithOptions).toHaveBeenNthCalledWith(1, 'build-deployment.7', 60_000, {
       retryCount: 4,
       retryDelay: 1000,
       retryJitter: 200,

@@ -95,9 +95,8 @@ import {
 const tracer = Tracer.getInstance();
 tracer.initialize('build-service');
 const TEARDOWN_RETRY_GRACE_MS = 15 * 60 * 1000;
-const BUILD_DEPLOYMENT_LOCK_TTL_MS = 15 * 60 * 1000;
-// Short with frequent renewal, so a worker that dies mid-run frees its generation within a minute.
-const GENERATION_LOCK_TTL_MS = 60 * 1000;
+// Short with frequent renewal, so a worker that dies mid-run frees its locks within a minute.
+const BUILD_DEPLOYMENT_LOCK_TTL_MS = 60 * 1000;
 const DEPLOY_SECRET_MUTATION_LOCK_TTL_MS = 2 * 60 * 1000;
 const DEPLOYMENT_RECONCILIATION_SWEEP_MS = 5_000;
 const BUILD_STATUS_LOCK_TTL_MS = 30_000;
@@ -3074,25 +3073,20 @@ export default class BuildService extends BaseService {
     try {
       lock =
         typeof lockWithOptions === 'function'
-          ? await lockWithOptions.call(this.redlock, resource, GENERATION_LOCK_TTL_MS, {
+          ? await lockWithOptions.call(this.redlock, resource, BUILD_DEPLOYMENT_LOCK_TTL_MS, {
               retryCount: 1,
               retryDelay: 1,
             })
-          : await this.redlock.lock(resource, GENERATION_LOCK_TTL_MS);
+          : await this.redlock.lock(resource, BUILD_DEPLOYMENT_LOCK_TTL_MS);
     } catch {
       getLogger({ buildId, generation }).info('Build reconciliation: duplicate generation signal coalesced');
       return;
     }
 
-    await this.runWithRenewableLock(resource, lock, action, GENERATION_LOCK_TTL_MS);
+    await this.runWithRenewableLock(resource, lock, action);
   }
 
-  private async runWithRenewableLock<T>(
-    resource: string,
-    acquiredLock: any,
-    action: () => Promise<T>,
-    ttlMs = BUILD_DEPLOYMENT_LOCK_TTL_MS
-  ): Promise<T> {
+  private async runWithRenewableLock<T>(resource: string, acquiredLock: any, action: () => Promise<T>): Promise<T> {
     let lock = acquiredLock;
     if (!lock?.unlock) return action();
     let renewalError: unknown;
@@ -3100,12 +3094,12 @@ export default class BuildService extends BaseService {
     const renewalTimer = setInterval(() => {
       renewal = renewal
         .then(async () => {
-          lock = await lock.extend(ttlMs);
+          lock = await lock.extend(BUILD_DEPLOYMENT_LOCK_TTL_MS);
         })
         .catch((error) => {
           renewalError = error;
         });
-    }, ttlMs / 3);
+    }, BUILD_DEPLOYMENT_LOCK_TTL_MS / 3);
 
     try {
       const result = await action();
