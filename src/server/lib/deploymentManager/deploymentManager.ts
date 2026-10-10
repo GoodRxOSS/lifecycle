@@ -63,6 +63,8 @@ export interface DeploymentManagerOptions {
 
 export type PrerequisiteOutcome = 'ready' | 'failed' | 'stopped';
 
+type ServiceOutcome = 'ready' | 'failed' | 'superseded';
+
 interface KubernetesDeploymentContext {
   deploy: Deploy;
   deployService: DeployService;
@@ -84,7 +86,10 @@ export class DeploymentManager {
     this.options = options;
     deploys.forEach((deploy) => {
       this.deploys.set(deploy.deployable.name, deploy);
-      this.dependencies.set(deploy.deployable.name, [...(deploy.deployable.deploymentDependsOn ?? [])]);
+      this.dependencies.set(
+        deploy.deployable.name,
+        (deploy.deployable.deploymentDependsOn ?? []).filter((dependency) => dependency !== deploy.deployable.name)
+      );
     });
 
     this.calculateDeploymentOrder();
@@ -210,74 +215,63 @@ export class DeploymentManager {
       }
     }
 
-    for (let level = 0; level < this.deploymentLevels.size; level++) {
-      await this.assertCurrent();
-
-      const runnable: Deploy[] = [];
-      const waiting: Array<{ deploy: Deploy; prerequisites: string[] }> = [];
-      for (const deploy of this.deploymentLevels.get(level) ?? []) {
-        const name = deploy.deployable.name;
-        if (superseded.has(name) || failed.has(name)) continue;
-        const failedDependency = this.dependencies.get(name)?.find((dependency) => failed.has(dependency));
-        if (failedDependency) {
-          const statusMessage = `Not deployed: ${failedDependency} failed.`;
-          getLogger().warn(`Deploy: ${name} skipped — ${statusMessage}`);
-          await this.tryPatchDeploy(deploy, { status: DeployStatus.DEPLOY_FAILED, statusMessage });
-          failed.set(name, deploy);
-          continue;
-        }
-        // A prerequisite another run took, or one outside this plan, may be mid-rollout elsewhere right now.
-        const prerequisites = (this.dependencies.get(name) ?? []).filter(
-          (dependency) => superseded.has(dependency) || !this.deploys.has(dependency)
-        );
-        if (prerequisites.length > 0 && this.options.prerequisiteOutcome) {
-          waiting.push({ deploy, prerequisites });
-          continue;
-        }
-        if (!(await this.claimForLaunch(deploy, superseded))) continue;
-        runnable.push(deploy);
+    // Each service launches as soon as its own prerequisites are done, so a service that waits on another run
+    // never holds back unrelated work in later levels.
+    const levelOf = new Map<string, number>();
+    this.deploymentLevels.forEach((deploys, level) => deploys.forEach((d) => levelOf.set(d.deployable.name, level)));
+    const outcomes = new Map<string, Promise<ServiceOutcome>>();
+    const schedule = (deploy: Deploy): Promise<ServiceOutcome> => {
+      const name = deploy.deployable.name;
+      let pending = outcomes.get(name);
+      if (!pending) {
+        pending = this.launchWhenPrerequisitesDone(deploy, levelOf.get(name) ?? 0, failed, superseded, schedule);
+        outcomes.set(name, pending);
       }
-      // A service held back by a prerequisite check must not delay its level mates, which may be long rollouts.
-      await Promise.all([
-        this.launchLevel(level, runnable, failed, superseded),
-        ...waiting.map(({ deploy, prerequisites }) =>
-          this.launchAfterPrerequisites(level, deploy, prerequisites, failed, superseded)
-        ),
-      ]);
-    }
+      return pending;
+    };
+    await Promise.all(Array.from(this.deploys.values()).map((deploy) => schedule(deploy)));
 
     return { failed: Array.from(failed.values()).filter((deploy): deploy is Deploy => deploy != null) };
   }
 
-  private async launchAfterPrerequisites(
-    level: number,
+  private async launchWhenPrerequisitesDone(
     deploy: Deploy,
-    prerequisites: string[],
+    level: number,
     failed: Map<string, Deploy | null>,
-    superseded: Set<string>
-  ): Promise<void> {
+    superseded: Set<string>,
+    outcomeOf: (prerequisite: Deploy) => Promise<ServiceOutcome>
+  ): Promise<ServiceOutcome> {
     const name = deploy.deployable.name;
-    let blockedBy: { prerequisite: string; outcome: PrerequisiteOutcome } | null = null;
-    for (const prerequisite of prerequisites) {
-      getLogger().info(`Deploy: ${name} checking prerequisite=${prerequisite}`);
-      const outcome = await this.options.prerequisiteOutcome!(deploy, prerequisite);
-      if (outcome !== 'ready') {
-        blockedBy = { prerequisite, outcome };
-        break;
+    if (superseded.has(name)) return 'superseded';
+    if (failed.has(name)) return 'failed';
+
+    for (const dependency of this.dependencies.get(name) ?? []) {
+      const inPlan = this.deploys.get(dependency);
+      let outcome: ServiceOutcome | PrerequisiteOutcome | 'external';
+      if (failed.has(dependency)) outcome = 'failed';
+      else if (inPlan && !superseded.has(dependency)) outcome = await outcomeOf(inPlan);
+      else outcome = 'external';
+      if (outcome === 'superseded' || outcome === 'external') {
+        // A prerequisite another run took, or one outside this plan, may be mid-rollout elsewhere right now.
+        if (!this.options.prerequisiteOutcome) continue;
+        getLogger().info(`Deploy: ${name} checking prerequisite=${dependency}`);
+        outcome = await this.options.prerequisiteOutcome(deploy, dependency);
       }
-    }
-    if (!(await this.claimForLaunch(deploy, superseded))) return;
-    if (blockedBy) {
+      if (outcome === 'ready') continue;
+      if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
       const statusMessage =
-        blockedBy.outcome === 'failed'
-          ? `Not deployed: ${blockedBy.prerequisite} failed.`
-          : `Not deployed: ${blockedBy.prerequisite} did not finish.`;
+        outcome === 'failed' ? `Not deployed: ${dependency} failed.` : `Not deployed: ${dependency} did not finish.`;
       getLogger().warn(`Deploy: ${name} skipped — ${statusMessage}`);
       await this.tryPatchDeploy(deploy, { status: DeployStatus.DEPLOY_FAILED, statusMessage });
       failed.set(name, deploy);
-      return;
+      return 'failed';
     }
+
+    if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
     await this.launchLevel(level, [deploy], failed, superseded);
+    if (failed.has(name)) return 'failed';
+    if (superseded.has(name)) return 'superseded';
+    return 'ready';
   }
 
   /** A newer intent may have taken this row while earlier levels ran; nothing launches for a row we no longer own. */

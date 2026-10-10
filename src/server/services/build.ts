@@ -3551,15 +3551,18 @@ export default class BuildService extends BaseService {
   }
 
   /**
-   * The outcome of that service's current rollout. A row this run owns is
-   * ordered by the plan or already handled by an earlier phase, so it is never
-   * waited on; a row another run is rolling out is polled until it is READY,
-   * failed, or settled. Codefresh and configuration services finish at BUILT.
+   * The outcome of that service's current rollout. A row this run owns at its
+   * own generation is ordered by the plan or already handled by an earlier
+   * phase, so it is never waited on; a row desired at a newer generation is
+   * another run's even while it still carries this token. Such rows are polled
+   * until READY, failed, or settled. Codefresh and configuration services
+   * finish at BUILT.
    */
   private async waitForServiceOutcome(
     buildId: number,
     name: string,
     runUUID: string,
+    expectedGeneration: number,
     isCurrent: () => Promise<boolean>
   ): Promise<PrerequisiteOutcome> {
     const deadline = Date.now() + PREREQUISITE_SETTLE_WAIT_MS;
@@ -3580,7 +3583,7 @@ export default class BuildService extends BaseService {
         row.status === DeployStatus.DEPLOYED ||
         (finishesAtBuilt && row.status === DeployStatus.BUILT) ||
         Number(row.observedGeneration) >= Number(row.desiredGeneration);
-      if (finished || row.runUUID === runUUID) return 'ready';
+      if (finished || (row.runUUID === runUUID && Number(row.desiredGeneration) === expectedGeneration)) return 'ready';
       if (!(await isCurrent()) || Date.now() >= deadline) return 'stopped';
       if (!waited) getLogger({ buildId }).info(`Deploy: waiting for service=${name} to finish its rollout`);
       waited = true;
@@ -3950,7 +3953,13 @@ export default class BuildService extends BaseService {
           prerequisiteOutcome:
             runUUID && expectedGeneration != null
               ? (deploy, prerequisite) =>
-                  this.waitForServiceOutcome(build.id, prerequisite, runUUID, deployIsCurrent(deploy))
+                  this.waitForServiceOutcome(
+                    build.id,
+                    prerequisite,
+                    runUUID,
+                    expectedGeneration,
+                    deployIsCurrent(deploy)
+                  )
               : undefined,
           nativeMutationGate: runUUID
             ? (deploy, action) =>

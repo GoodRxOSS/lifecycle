@@ -1047,6 +1047,33 @@ describe('DeploymentManager', () => {
       }
     });
 
+    it('starts later work whose own prerequisites are done while an unrelated service waits on another run', async () => {
+      const { deploy: y } = managedDeploy({ name: 'y' });
+      const { deploy: c } = managedDeploy({ name: 'c', deploymentDependsOn: ['y'] });
+      const { deploy: b } = managedDeploy({ name: 'b', deploymentDependsOn: ['a'] });
+      let releaseB!: () => void;
+      const cApplied = new Promise<void>((resolve) => {
+        releaseB = resolve;
+      });
+      (createKubernetesApplyJob as jest.Mock).mockImplementation(async ({ deploy }: { deploy: Deploy }) => {
+        if (deploy === c) releaseB();
+      });
+      // The run that owns a needs c first, so b can only proceed once c (level 1 here) has been applied.
+      const prerequisiteOutcome = jest.fn(async () => {
+        await cApplied;
+        return 'ready' as const;
+      });
+      const manager = new DeploymentManager([y, c, b], { prerequisiteOutcome });
+
+      try {
+        await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+        expect(createKubernetesApplyJob).toHaveBeenCalledTimes(3);
+        expect(prerequisiteOutcome).toHaveBeenCalledWith(b, 'a');
+      } finally {
+        (createKubernetesApplyJob as jest.Mock).mockResolvedValue(undefined);
+      }
+    });
+
     it('fences every ownership patch on the generation it was handed', async () => {
       const { deploy, where } = managedDeploy({ name: 'chart', type: 'helm' });
       (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);

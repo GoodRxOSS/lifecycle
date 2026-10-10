@@ -2126,7 +2126,7 @@ describe('BuildService focused changed-line coverage', () => {
       ]);
       const isCurrent = jest.fn().mockResolvedValue(true);
 
-      const outcome = service['waitForServiceOutcome'](4, 'migrations', 'run-g', isCurrent);
+      const outcome = service['waitForServiceOutcome'](4, 'migrations', 'run-g', 2, isCurrent);
       await jest.advanceTimersByTimeAsync(10_000);
 
       await expect(outcome).resolves.toBe('ready');
@@ -2142,7 +2142,7 @@ describe('BuildService focused changed-line coverage', () => {
       { status: DeployStatus.ERROR, runUUID: 'other', desiredGeneration: 2, observedGeneration: 2 },
     ]);
 
-    await expect(service['waitForServiceOutcome'](4, 'migrations', 'run-g', jest.fn())).resolves.toBe('failed');
+    await expect(service['waitForServiceOutcome'](4, 'migrations', 'run-g', 2, jest.fn())).resolves.toBe('failed');
   });
 
   test('waitForServiceOutcome never waits on a row this run owns, such as a Codefresh service built earlier in the run', async () => {
@@ -2154,8 +2154,8 @@ describe('BuildService focused changed-line coverage', () => {
       { status: DeployStatus.QUEUED, runUUID: 'run-g', desiredGeneration: 2, observedGeneration: 1 },
     ]);
 
-    await expect(codefresh.service['waitForServiceOutcome'](4, 'ci', 'run-g', isCurrent)).resolves.toBe('ready');
-    await expect(unhandled.service['waitForServiceOutcome'](4, 'ext', 'run-g', isCurrent)).resolves.toBe('ready');
+    await expect(codefresh.service['waitForServiceOutcome'](4, 'ci', 'run-g', 2, isCurrent)).resolves.toBe('ready');
+    await expect(unhandled.service['waitForServiceOutcome'](4, 'ext', 'run-g', 2, isCurrent)).resolves.toBe('ready');
     expect(isCurrent).not.toHaveBeenCalled();
   });
 
@@ -2164,7 +2164,7 @@ describe('BuildService focused changed-line coverage', () => {
       { status: DeployStatus.BUILT, runUUID: 'other', desiredGeneration: 2, observedGeneration: 1 },
     ]);
 
-    await expect(service['waitForServiceOutcome'](4, 'ci', 'run-g', jest.fn())).resolves.toBe('ready');
+    await expect(service['waitForServiceOutcome'](4, 'ci', 'run-g', 2, jest.fn())).resolves.toBe('ready');
   });
 
   test('waitForServiceOutcome stops once this run no longer owns the waiting row', async () => {
@@ -2173,14 +2173,24 @@ describe('BuildService focused changed-line coverage', () => {
     ]);
 
     await expect(
-      service['waitForServiceOutcome'](4, 'migrations', 'run-g', jest.fn().mockResolvedValue(false))
+      service['waitForServiceOutcome'](4, 'migrations', 'run-g', 2, jest.fn().mockResolvedValue(false))
     ).resolves.toBe('stopped');
+  });
+
+  test('waitForServiceOutcome keeps waiting on a row this run still holds but a newer accept already re-stamped', async () => {
+    const { service } = outcomeService({ id: 9, type: DeployTypes.GITHUB }, [
+      { status: DeployStatus.BUILDING, runUUID: 'run-g', desiredGeneration: 3, observedGeneration: 0 },
+    ]);
+    const isCurrent = jest.fn().mockResolvedValue(false);
+
+    await expect(service['waitForServiceOutcome'](4, 'a', 'run-g', 2, isCurrent)).resolves.toBe('stopped');
+    expect(isCurrent).toHaveBeenCalledTimes(1);
   });
 
   test('waitForServiceOutcome treats a service with no row as ready', async () => {
     const { service } = outcomeService(null, []);
 
-    await expect(service['waitForServiceOutcome'](4, 'gone', 'run-g', jest.fn())).resolves.toBe('ready');
+    await expect(service['waitForServiceOutcome'](4, 'gone', 'run-g', 2, jest.fn())).resolves.toBe('ready');
   });
 
   test('acceptedSourcePins keeps the newest accepted SHA per repository and branch, including full-environment pushes', () => {
