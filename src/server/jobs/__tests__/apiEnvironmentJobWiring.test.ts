@@ -173,7 +173,7 @@ describe('bootstrapJobs', () => {
     const createWorker = registeredWorkers.find((worker) => worker.queue === QUEUE_NAMES.API_ENV_CREATE);
     const expiryWorker = registeredWorkers.find((worker) => worker.queue === QUEUE_NAMES.API_ENV_EXPIRY);
     const reconciliationWorker = registeredWorkers.find(
-      (worker) => worker.queue === QUEUE_NAMES.DEPLOYMENT_RECONCILIATION
+      (worker) => worker.queue === QUEUE_NAMES.SERVICE_RECONCILIATION
     );
     expect(createWorker).toMatchObject({
       handler: services.BuildService.processApiEnvironmentCreateQueue,
@@ -181,6 +181,8 @@ describe('bootstrapJobs', () => {
     });
     expect(expiryWorker?.handler).toBe(services.BuildService.processApiEnvironmentExpiryQueue);
     expect(reconciliationWorker?.handler).toBe(services.BuildService.processDeploymentReconciliationQueue);
+    // Old-queue jobs are drained by old workers only; leftovers are recovered by the sweep, never by a second model.
+    expect(registeredWorkers.some((worker) => worker.queue === QUEUE_NAMES.DEPLOYMENT_RECONCILIATION)).toBe(false);
     expect(workerOnHandlers[QUEUE_NAMES.API_ENV_CREATE]?.failed).toBe(
       services.BuildService.handleApiEnvironmentCreateFailure
     );

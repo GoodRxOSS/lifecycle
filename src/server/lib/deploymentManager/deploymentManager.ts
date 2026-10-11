@@ -18,7 +18,11 @@ import { Deploy } from 'server/models';
 import { deployHelm } from '../helm';
 import { shouldUseNativeHelm } from '../nativeHelm';
 import { DeployStatus, DeployTypes, CLIDeployTypes } from 'shared/constants';
-import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
+import {
+  listUnfinishedDeployJobs,
+  createKubernetesApplyJob,
+  monitorKubernetesJob,
+} from '../kubernetesApply/applyManifest';
 import { nanoid, customAlphabet } from 'nanoid';
 import DeployService from 'server/services/deploy';
 import { getLogger, withLogContext } from 'server/lib/logger';
@@ -28,15 +32,20 @@ import { buildDeployJobName } from '../kubernetes/jobNames';
 import GlobalConfigService from 'server/services/globalConfig';
 import { getLogArchivalService } from 'server/services/logArchival';
 import { DeploymentSupersededError } from 'server/lib/deploymentReconciliation/errors';
+import { AuthorityLockLostError } from 'server/lib/authorityLock';
 import type { HelmSecretMutationGate } from 'server/lib/nativeHelm/helm';
 
 export { DeploymentSupersededError } from 'server/lib/deploymentReconciliation/errors';
 
 const generateJobId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 6);
+const EARLIER_DEPLOY_POLL_MS = 5_000;
+// A native Helm Job lives at most its 30-minute deadline plus a 5-minute grace period.
+const EARLIER_DEPLOY_WAIT_MS = 45 * 60_000;
+const UNSTARTED_DEPLOY_MESSAGE = 'Deployment failed. Redeploy the service to try again.';
 
 export type NativeMutationGateResult<T> = { admitted: true; value: T } | { admitted: false };
 
-export type NativeMutationGate = <T>(action: () => Promise<T>) => Promise<NativeMutationGateResult<T>>;
+export type NativeMutationGate = <T>(deploy: Deploy, action: () => Promise<T>) => Promise<NativeMutationGateResult<T>>;
 
 export interface DeploymentManagerOptions {
   /** Returns false once this deployment generation is no longer authoritative. */
@@ -48,7 +57,13 @@ export interface DeploymentManagerOptions {
   nativeMutationGate?: NativeMutationGate;
   /** Serializes only writers of one Deploy's ExternalSecret resources. */
   nativeSecretMutationGate?: HelmSecretMutationGate;
+  /** Services that already failed before rollout; they stay in the plan so their dependents are blocked. */
+  failedServices?: string[];
+  /** Rows re-stamped to a newer generation are no longer this run's, even before the successor claims them. */
+  expectedGeneration?: number;
 }
+
+type ServiceOutcome = 'ready' | 'failed' | 'superseded';
 
 interface KubernetesDeploymentContext {
   deploy: Deploy;
@@ -59,16 +74,24 @@ interface KubernetesDeploymentContext {
 
 export class DeploymentManager {
   private deploys: Map<string, Deploy> = new Map();
+  // Declared dependencies as configured; leveling consumes the lists on the deployables themselves.
+  private dependencies: Map<string, string[]> = new Map();
   private deploymentLevels: Map<number, Deploy[]> = new Map();
   // Deploys never placed in a level: members of a dependency cycle, or dependents of one.
   private unresolvedDeploys: Deploy[] = [];
   private dependencyCycleDescription = '';
   private readonly options: DeploymentManagerOptions;
+  // The first error a launch threw: nothing launches after it, and deploy() rethrows it once every launch has settled.
+  private abort?: { error: unknown };
 
   constructor(deploys: Deploy[], options: DeploymentManagerOptions = {}) {
     this.options = options;
     deploys.forEach((deploy) => {
       this.deploys.set(deploy.deployable.name, deploy);
+      this.dependencies.set(
+        deploy.deployable.name,
+        (deploy.deployable.deploymentDependsOn ?? []).filter((dependency) => dependency !== deploy.deployable.name)
+      );
     });
 
     this.calculateDeploymentOrder();
@@ -165,13 +188,21 @@ export class DeploymentManager {
     });
   }
 
-  public async deploy(): Promise<void> {
+  public async deploy(): Promise<{ failed: Deploy[] }> {
     await this.assertCurrent();
 
     const unresolved = new Set(this.unresolvedDeploys);
+    const superseded = new Set<string>();
+    // Keyed by name so a failed prerequisite that never reaches this manager (a Codefresh service) still blocks dependents.
+    const failed = new Map<string, Deploy | null>();
+    for (const name of this.options.failedServices ?? []) {
+      failed.set(name, this.deploys.get(name) ?? null);
+    }
     for (const value of this.deploys.values()) {
-      if (!unresolved.has(value)) {
-        await this.patchDeployIfCurrent(value, { status: DeployStatus.QUEUED });
+      if (unresolved.has(value) || failed.has(value.deployable.name)) continue;
+      if (!(await this.tryPatchDeploy(value, { status: DeployStatus.QUEUED }))) {
+        superseded.add(value.deployable.name);
+        getLogger().info(`Deploy: ${value.deployable.name} skipped reason=superseded`);
       }
     }
 
@@ -181,91 +212,193 @@ export class DeploymentManager {
       const statusMessage = `Dependency cycle detected: ${this.dependencyCycleDescription}; deploy order cannot be resolved`;
       for (const deploy of this.unresolvedDeploys) {
         getLogger().error(`Deploy: ${deploy.deployable.name} failed — ${statusMessage}`);
-        await this.patchDeployIfCurrent(deploy, { status: DeployStatus.DEPLOY_FAILED, statusMessage });
+        await this.tryPatchDeploy(deploy, { status: DeployStatus.DEPLOY_FAILED, statusMessage });
+        failed.set(deploy.deployable.name, deploy);
       }
     }
 
-    for (let level = 0; level < this.deploymentLevels.size; level++) {
-      await this.assertCurrent();
-
-      const deploysAtLevel = this.deploymentLevels.get(level);
-      if (deploysAtLevel) {
-        const helmDeploys = deploysAtLevel.filter((d) => this.shouldDeployWithHelm(d));
-        const githubDeploys = deploysAtLevel.filter((d) => this.shouldDeployWithKubernetes(d));
-
-        const helmMethods = await Promise.all(
-          helmDeploys.map(async (deploy) => ({ deploy, native: await shouldUseNativeHelm(deploy) }))
-        );
-        await this.assertCurrent();
-
-        const nativeHelmDeploys = helmMethods.filter(({ native }) => native).map(({ deploy }) => deploy);
-        const codefreshHelmDeploys = helmMethods.filter(({ native }) => !native).map(({ deploy }) => deploy);
-
-        const nativeHelmServices = nativeHelmDeploys.map((d) => d.deployable.name).join(',');
-        const codefreshHelmServices = codefreshHelmDeploys.map((d) => d.deployable.name).join(',');
-        const k8sServices = githubDeploys.map((d) => d.deployable.name).join(',');
-        getLogger().info(
-          `Deploy: level ${level} nativeHelm=[${nativeHelmServices}] codefreshHelm=[${codefreshHelmServices}] k8s=[${k8sServices}]`
-        );
-
-        // Codefresh is intentionally not part of native mutation admission. It
-        // may continue in the provider while a newer generation starts.
-        const codefreshDeploy = codefreshHelmDeploys.length > 0 ? deployHelm(codefreshHelmDeploys) : Promise.resolve();
-        // Attach a handler immediately because supersession may deliberately
-        // detach this provider wait before we await it below.
-        void codefreshDeploy.catch(() => undefined);
-
-        let kubernetesDeployments: KubernetesDeploymentContext[] = [];
-        let nativeFailure: unknown;
-        try {
-          if (nativeHelmDeploys.length > 0 || githubDeploys.length > 0) {
-            const nativeResult = await this.runNativeMutation(async () => {
-              // Run same-generation siblings in parallel, but do not release the
-              // promotion gate until every admitted native mutation is terminal.
-              const settled = await Promise.allSettled([
-                ...nativeHelmDeploys.map((deploy) =>
-                  deployHelm([deploy], { secretMutationGate: this.options.nativeSecretMutationGate })
-                ),
-                ...githubDeploys.map((deploy) => this.applyManifests(deploy)),
-              ]);
-              const failure = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
-              const successfulKubernetesDeployments = settled
-                .slice(nativeHelmDeploys.length)
-                .filter(
-                  (result): result is PromiseFulfilledResult<KubernetesDeploymentContext> =>
-                    result.status === 'fulfilled'
-                )
-                .map((result) => result.value);
-              return { kubernetesDeployments: successfulKubernetesDeployments, failure: failure?.reason };
-            });
-            kubernetesDeployments = nativeResult.kubernetesDeployments;
-            nativeFailure = nativeResult.failure;
+    // Each service launches as soon as its own prerequisites are done, so a slow service never holds back unrelated work.
+    const levelOf = new Map<string, number>();
+    this.deploymentLevels.forEach((deploys, level) => deploys.forEach((d) => levelOf.set(d.deployable.name, level)));
+    const outcomes = new Map<string, Promise<ServiceOutcome>>();
+    const schedule = (deploy: Deploy): Promise<ServiceOutcome> => {
+      const name = deploy.deployable.name;
+      let pending = outcomes.get(name);
+      if (!pending) {
+        pending = this.launchWhenPrerequisitesDone(deploy, levelOf.get(name) ?? 0, failed, superseded, schedule).catch(
+          (error) => {
+            if (!this.abort) this.abort = { error };
+            throw error;
           }
+        );
+        outcomes.set(name, pending);
+      }
+      return pending;
+    };
+    // Work still in flight settles before the error surfaces, so a queue retry never overlaps it.
+    await Promise.allSettled(Array.from(this.deploys.values()).map((deploy) => schedule(deploy)));
+    this.assertNotAborted();
 
-          await this.assertCurrent();
+    return { failed: Array.from(failed.values()).filter((deploy): deploy is Deploy => deploy != null) };
+  }
 
-          // Pod readiness is observational and must not hold the native mutation
-          // gate. Settle every successful sibling even when another native
-          // mutation failed so no Deploy is left indefinitely at DEPLOYING.
-          const readiness = await Promise.allSettled(
-            kubernetesDeployments.map((deployment) => this.waitForManifestReadiness(deployment))
-          );
-          if (nativeFailure) throw nativeFailure;
-          const readinessFailure = readiness.find(
-            (result): result is PromiseRejectedResult => result.status === 'rejected'
-          );
-          if (readinessFailure) throw readinessFailure.reason;
-          await codefreshDeploy;
-        } catch (error) {
-          if (error instanceof DeploymentSupersededError) {
-            getLogger().info(`Deploy: level ${level} stopped reason=superseded`);
-          }
+  private async launchWhenPrerequisitesDone(
+    deploy: Deploy,
+    level: number,
+    failed: Map<string, Deploy | null>,
+    superseded: Set<string>,
+    outcomeOf: (prerequisite: Deploy) => Promise<ServiceOutcome>
+  ): Promise<ServiceOutcome> {
+    const name = deploy.deployable.name;
+    if (superseded.has(name)) return 'superseded';
+    if (failed.has(name)) return 'failed';
+
+    for (const dependency of this.dependencies.get(name) ?? []) {
+      const inPlan = this.deploys.get(dependency);
+      // A prerequisite outside this run, or one a newer run took, is never waited on: its running version serves.
+      let outcome: ServiceOutcome = 'ready';
+      if (failed.has(dependency)) outcome = 'failed';
+      else if (inPlan && !superseded.has(dependency)) outcome = await outcomeOf(inPlan);
+      this.assertNotAborted();
+      if (outcome !== 'failed') continue;
+      if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
+      const statusMessage = `Not deployed: ${dependency} failed.`;
+      getLogger().warn(`Deploy: ${name} skipped — ${statusMessage}`);
+      await this.tryPatchDeploy(deploy, { status: DeployStatus.DEPLOY_FAILED, statusMessage });
+      failed.set(name, deploy);
+      return 'failed';
+    }
+
+    this.assertNotAborted();
+    if (!(await this.claimForLaunch(deploy, superseded))) return 'superseded';
+    await this.launchLevel(level, [deploy], failed, superseded);
+    if (failed.has(name)) return 'failed';
+    if (superseded.has(name)) return 'superseded';
+    return 'ready';
+  }
+
+  /** A newer intent may have taken this row while earlier levels ran; nothing launches for a row we no longer own. */
+  private async claimForLaunch(deploy: Deploy, superseded: Set<string>): Promise<boolean> {
+    if (await this.tryPatchDeploy(deploy, { status: DeployStatus.QUEUED })) return true;
+    superseded.add(deploy.deployable.name);
+    getLogger().info(`Deploy: ${deploy.deployable.name} skipped reason=superseded`);
+    return false;
+  }
+
+  private assertNotAborted(): void {
+    if (this.abort) throw this.abort.error;
+  }
+
+  private async launchLevel(
+    level: number,
+    runnable: Deploy[],
+    failed: Map<string, Deploy | null>,
+    superseded: Set<string>
+  ): Promise<void> {
+    if (runnable.length === 0) return;
+
+    const helmDeploys = runnable.filter((d) => this.shouldDeployWithHelm(d));
+    const githubDeploys = runnable.filter((d) => this.shouldDeployWithKubernetes(d));
+
+    const helmMethods = await Promise.all(
+      helmDeploys.map(async (deploy) => ({ deploy, native: await shouldUseNativeHelm(deploy) }))
+    );
+    await this.assertCurrent();
+
+    const nativeHelmDeploys = helmMethods.filter(({ native }) => native).map(({ deploy }) => deploy);
+    const codefreshHelmDeploys = helmMethods.filter(({ native }) => !native).map(({ deploy }) => deploy);
+
+    const nativeHelmServices = nativeHelmDeploys.map((d) => d.deployable.name).join(',');
+    const codefreshHelmServices = codefreshHelmDeploys.map((d) => d.deployable.name).join(',');
+    const k8sServices = githubDeploys.map((d) => d.deployable.name).join(',');
+    getLogger().info(
+      `Deploy: level ${level} nativeHelm=[${nativeHelmServices}] codefreshHelm=[${codefreshHelmServices}] k8s=[${k8sServices}]`
+    );
+
+    // Codefresh is intentionally not part of native mutation admission. It
+    // may continue in the provider while a newer generation starts. Each
+    // service is launched on its own so one failure is attributed to one row.
+    const codefreshOutcomes = Promise.allSettled(
+      codefreshHelmDeploys.map(async (deploy) => {
+        // Provider launches sit outside the promotion gate; ownership is re-checked right before handing off.
+        const owned = await this.tryPatchDeploy(deploy, { status: DeployStatus.QUEUED }).catch(async (error) => {
+          await this.recordOwnershipCheckFailure(deploy, error);
           throw error;
-        }
-      }
+        });
+        if (!owned) throw new DeploymentSupersededError();
+        return deployHelm([deploy], {
+          providerSubmissionGate: (candidate) => this.tryPatchDeploy(candidate, { status: DeployStatus.DEPLOYING }),
+        });
+      })
+    );
 
-      await this.assertCurrent();
-    }
+    const nativeDeploys = [...nativeHelmDeploys, ...githubDeploys];
+    const nativeOutcomes = await Promise.allSettled([
+      ...nativeHelmDeploys.map((deploy) =>
+        this.runNativeMutation(deploy, async () => {
+          await this.waitForEarlierDeployJobs(deploy);
+          return deployHelm([deploy], { secretMutationGate: this.options.nativeSecretMutationGate });
+        })
+      ),
+      ...githubDeploys.map((deploy) =>
+        this.runNativeMutation(deploy, async () => {
+          await this.waitForEarlierDeployJobs(deploy);
+          return this.applyManifests(deploy);
+        })
+      ),
+    ]);
+    await this.assertCurrent();
+
+    // A lost promotion lease is not a service failure: the apply may have landed, so the run must retry.
+    const lostLease = nativeOutcomes.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === 'rejected' && outcome.reason instanceof AuthorityLockLostError
+    );
+    if (lostLease) throw lostLease.reason;
+
+    const kubernetesDeployments: KubernetesDeploymentContext[] = [];
+    nativeOutcomes.forEach((outcome, index) => {
+      const deploy = nativeDeploys[index];
+      if (outcome.status === 'fulfilled') {
+        if (index >= nativeHelmDeploys.length) kubernetesDeployments.push(outcome.value as KubernetesDeploymentContext);
+        return;
+      }
+      if (outcome.reason instanceof DeploymentSupersededError) {
+        superseded.add(deploy.deployable.name);
+        getLogger().info(`Deploy: ${deploy.deployable.name} stopped reason=superseded`);
+        return;
+      }
+      failed.set(deploy.deployable.name, deploy);
+    });
+
+    // Pod readiness is observational and must not hold a promotion gate.
+    const readiness = await Promise.allSettled(
+      kubernetesDeployments.map((deployment) => this.waitForManifestReadiness(deployment))
+    );
+    readiness.forEach((outcome, index) => {
+      if (outcome.status === 'fulfilled') return;
+      const { deploy } = kubernetesDeployments[index];
+      if (outcome.reason instanceof DeploymentSupersededError) {
+        superseded.add(deploy.deployable.name);
+        getLogger().info(`Deploy: ${deploy.deployable.name} stopped reason=superseded`);
+        return;
+      }
+      failed.set(deploy.deployable.name, deploy);
+    });
+
+    (await codefreshOutcomes).forEach((outcome, index) => {
+      if (outcome.status === 'fulfilled') return;
+      const deploy = codefreshHelmDeploys[index];
+      if (outcome.reason instanceof DeploymentSupersededError) {
+        superseded.add(deploy.deployable.name);
+        getLogger().info(`Deploy: ${deploy.deployable.name} codefresh stopped reason=superseded`);
+        return;
+      }
+      getLogger().error({ error: outcome.reason }, `Deploy: ${deploy.deployable.name} codefresh helm failed`);
+      failed.set(deploy.deployable.name, deploy);
+    });
+
+    await this.assertCurrent();
   }
 
   private async assertCurrent(): Promise<void> {
@@ -274,24 +407,90 @@ export class DeploymentManager {
     }
   }
 
-  private async runNativeMutation<T>(action: () => Promise<T>): Promise<T> {
+  private async runNativeMutation<T>(deploy: Deploy, action: () => Promise<T>): Promise<T> {
     if (!this.options.nativeMutationGate) return action();
 
-    const result = await this.options.nativeMutationGate(action);
+    let actionFailed = false;
+    const result = await this.options
+      .nativeMutationGate(deploy, () =>
+        action().catch((error) => {
+          actionFailed = true;
+          throw error;
+        })
+      )
+      .catch(async (error) => {
+        if (!actionFailed) await this.recordOwnershipCheckFailure(deploy, error);
+        throw error;
+      });
     if (!result.admitted) throw new DeploymentSupersededError();
     return result.value;
   }
 
-  private async patchDeployIfCurrent(deploy: Deploy, patch: Partial<Deploy>): Promise<void> {
+  /** Launch paths record their own failures; a failed ownership check around one must not leave the row looking deployed. */
+  private async recordOwnershipCheckFailure(deploy: Deploy, error: unknown): Promise<void> {
+    if (error instanceof DeploymentSupersededError || error instanceof AuthorityLockLostError) return;
+    getLogger({ error }).warn(`Deploy: ${deploy.deployable.name} ownership check failed`);
+    await new DeployService().recordDeployFailure(deploy, deploy.runUUID, {
+      status: DeployStatus.DEPLOY_FAILED,
+      fallbackMessage: UNSTARTED_DEPLOY_MESSAGE,
+    });
+  }
+
+  /** A deploy Job outlives the worker that started it; killing it cannot prove it stopped, so the next one waits. */
+  private async waitForEarlierDeployJobs(deploy: Deploy): Promise<void> {
+    try {
+      if (!deploy.build) await deploy.$fetchGraph('build');
+      const deadline = Date.now() + EARLIER_DEPLOY_WAIT_MS;
+      let logged = false;
+      for (;;) {
+        const unfinished = await listUnfinishedDeployJobs(deploy, deploy.build.namespace);
+        if (unfinished.length === 0) return;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            'The previous deploy of this service is still running after 45 minutes. Redeploy the service after it stops.'
+          );
+        }
+        if (!logged) {
+          getLogger().info(`Deploy: ${deploy.deployable.name} waiting for earlier jobs=${unfinished.join(',')}`);
+          logged = true;
+        }
+        const statusMessage = 'Waiting for the previous deploy to finish';
+        if (!(await this.tryPatchDeploy(deploy, { status: DeployStatus.DEPLOYING, statusMessage }))) {
+          throw new DeploymentSupersededError();
+        }
+        await new Promise((resolve) => setTimeout(resolve, EARLIER_DEPLOY_POLL_MS));
+      }
+    } catch (error) {
+      if (!(error instanceof DeploymentSupersededError)) {
+        await new DeployService().recordDeployFailure(deploy, deploy.runUUID, {
+          status: DeployStatus.DEPLOY_FAILED,
+          error,
+          fallbackMessage: `Deployment failed for ${deploy.uuid}. Check deploy logs in Console > Deploy tab for details.`,
+        });
+      }
+      throw error;
+    }
+  }
+
+  /** False means another run owns the row now; the caller skips it instead of failing its siblings. */
+  private async tryPatchDeploy(deploy: Deploy, patch: Partial<Deploy>): Promise<boolean> {
     if (deploy.id == null || !deploy.runUUID) {
       getLogger().info(
         `Deploy: status patch skipped reason=missing_run_identity deployUuid=${deploy.uuid || 'unknown'}`
       );
-      return;
+      return true;
     }
 
-    const patched = await deploy.$query().patch(patch).where({ id: deploy.id, runUUID: deploy.runUUID });
-    if (!patched) throw new DeploymentSupersededError();
+    const generation = this.options.expectedGeneration;
+    const patched = await deploy
+      .$query()
+      .patch(patch)
+      .where({
+        id: deploy.id,
+        runUUID: deploy.runUUID,
+        ...(generation != null ? { desiredGeneration: generation } : {}),
+      });
+    return patched > 0;
   }
 
   private shouldDeployWithHelm(deploy: Deploy): boolean {

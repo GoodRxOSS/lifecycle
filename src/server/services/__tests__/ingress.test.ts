@@ -83,6 +83,7 @@ function authorityQuery(result: any) {
   const query: any = {
     findOne: jest.fn(() => query),
     findById: jest.fn(() => query),
+    select: jest.fn(() => query),
     whereNull: jest.fn(() => query),
     where: jest.fn(() => query),
     then: (resolve: (value: any) => void, reject: (reason: unknown) => void) =>
@@ -287,9 +288,8 @@ describe('IngressService', () => {
       data: { buildId: 7, runUUID: 'old-run', expectedGeneration: 4 },
     });
 
-    expect(authority.findOne).toHaveBeenCalledWith({ id: 7, runUUID: 'old-run' });
+    expect(authority.findById).toHaveBeenCalledWith(7);
     expect(authority.whereNull).toHaveBeenCalledWith('deletedAt');
-    expect(authority.where).toHaveBeenCalledWith('desiredGeneration', 4);
     expect(configurationsForBuildId).not.toHaveBeenCalled();
     expect(mockGetAllConfigs).not.toHaveBeenCalled();
     expect(mockLoggerInfo).toHaveBeenCalledWith('Ingress: skipped reason=superseded');
@@ -379,15 +379,21 @@ describe('IngressService', () => {
       ingressAnnotations: {},
       ipWhitelist: [],
     };
+    const configurationsForBuildId = jest.fn().mockResolvedValue([configuration]);
     const gate = jest.fn(async (_buildId, isCurrent, action) => {
       expect(await isCurrent()).toBe(true);
+      // Routes are read only once the lock is held, so a sibling's newer route is never overwritten by a stale snapshot.
+      expect(configurationsForBuildId).not.toHaveBeenCalled();
       return { admitted: true, value: await action() };
     });
     const db = {
-      models: { Build: { query: jest.fn(() => authorityQuery({ id: 7 })) } },
+      models: {
+        Build: { query: jest.fn(() => authorityQuery({ id: 7 })) },
+        Deploy: { query: jest.fn(() => authorityQuery({ id: 11 })) },
+      },
       services: {
         BuildService: {
-          configurationsForBuildId: jest.fn().mockResolvedValue([configuration]),
+          configurationsForBuildId,
           getNamespace: jest.fn().mockResolvedValue('env-test'),
           withCurrentBuildPromotionLock: gate,
         },
@@ -407,7 +413,10 @@ describe('IngressService', () => {
   test('does not apply when authority is lost before promotion admission', async () => {
     const gate = jest.fn().mockResolvedValue({ admitted: false });
     const db = {
-      models: { Build: { query: jest.fn(() => authorityQuery({ id: 7 })) } },
+      models: {
+        Build: { query: jest.fn(() => authorityQuery({ id: 7 })) },
+        Deploy: { query: jest.fn(() => authorityQuery({ id: 11 })) },
+      },
       services: {
         BuildService: {
           configurationsForBuildId: jest.fn().mockResolvedValue([
@@ -435,28 +444,49 @@ describe('IngressService', () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
-  test('fences a late ingress failure note by run token and generation', async () => {
+  test('records a late ingress failure note for a generation-fenced run that still owns a service', async () => {
     const read = authorityQuery({ id: 7, statusMessage: 'deployed' });
     const patch: any = {
       patch: jest.fn(() => patch),
       where: jest.fn(() => patch),
+      whereNull: jest.fn(() => patch),
       then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
         Promise.resolve(1).then(resolve, reject),
     };
     const db = {
-      models: { Build: { query: jest.fn().mockReturnValueOnce(read).mockReturnValueOnce(patch) } },
+      models: {
+        Build: { query: jest.fn().mockReturnValueOnce(read).mockReturnValueOnce(patch) },
+        Deploy: { query: jest.fn(() => authorityQuery({ id: 11 })) },
+      },
       services: {},
     };
     const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
 
     await (service as any).recordIngressFailureOnBuild(7, new Error('bad route'), 'run-c', 3);
 
-    expect(read.where).toHaveBeenCalledWith('runUUID', 'run-c');
-    expect(read.where).toHaveBeenCalledWith('desiredGeneration', 3);
+    expect(read.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(read.where).not.toHaveBeenCalledWith('runUUID', 'run-c');
     expect(patch.patch).toHaveBeenCalledWith({ statusMessage: 'deployed | Ingress apply failed: bad route' });
     expect(patch.where).toHaveBeenCalledWith({ id: 7 });
-    expect(patch.where).toHaveBeenCalledWith('runUUID', 'run-c');
-    expect(patch.where).toHaveBeenCalledWith('desiredGeneration', 3);
+    expect(patch.whereNull).toHaveBeenCalledWith('deletedAt');
+    expect(patch.where).not.toHaveBeenCalledWith('runUUID', 'run-c');
+    expect(patch.where).not.toHaveBeenCalledWith('desiredGeneration', 3);
+  });
+
+  test('drops a late ingress failure note once the run owns no service any more', async () => {
+    const buildQuery = jest.fn();
+    const db = {
+      models: {
+        Build: { query: buildQuery },
+        Deploy: { query: jest.fn(() => authorityQuery(undefined)) },
+      },
+      services: {},
+    };
+    const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
+
+    await (service as any).recordIngressFailureOnBuild(7, new Error('bad route'), 'run-old', 3);
+
+    expect(buildQuery).not.toHaveBeenCalled();
   });
 
   test.each([

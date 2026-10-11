@@ -22,12 +22,29 @@ jest.mock('server/models/Build', () => ({
   },
 }));
 
+const deployStamp: any = {
+  patch: jest.fn(() => deployStamp),
+  where: jest.fn(() => deployStamp),
+  then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
+    Promise.resolve(2).then(resolve, reject),
+};
+
+jest.mock('server/models/Deploy', () => ({
+  __esModule: true,
+  default: {
+    query: jest.fn(() => deployStamp),
+  },
+}));
+
 import Build from 'server/models/Build';
+import Deploy from 'server/models/Deploy';
+import { DeployStatus } from 'shared/constants';
 import {
   acceptDeploymentIntent,
   AcceptedDeploymentRefs,
+  deploymentIntentDeployFilter,
   deploymentIntentScopeKey,
-  dirtyDeploymentIntents,
+  recordIntentConfigFailures,
 } from '../mailbox';
 
 const TRX = { transaction: true } as any;
@@ -67,6 +84,16 @@ describe('deployment intent scope keys', () => {
         sha: 'abc',
       })
     ).toBe('source:123:Feature%2FA%20B');
+    expect(
+      deploymentIntentScopeKey({
+        type: 'source',
+        requestId: 'request-config',
+        target: 'all',
+        githubRepositoryId: 123,
+        branch: 'Feature/A B',
+        sha: 'abc',
+      })
+    ).toBe('source:123:Feature%2FA%20B:all');
     expect(
       deploymentIntentScopeKey({ type: 'repository', requestId: 'request-repository', githubRepositoryId: 123 })
     ).toBe('repository:123');
@@ -141,6 +168,20 @@ describe('acceptDeploymentIntent', () => {
     expect(read.findById).toHaveBeenCalledWith(42);
     expect(read.whereNull).toHaveBeenCalledWith('deletedAt');
     expect(read.forUpdate).toHaveBeenCalledTimes(1);
+    expect(Deploy.query).toHaveBeenCalledWith(TRX);
+    expect(deployStamp.patch).toHaveBeenCalledWith({
+      desiredGeneration: 3,
+      runUUID: null,
+      status: DeployStatus.QUEUED,
+      statusMessage: null,
+    });
+    expect(deployStamp.where).toHaveBeenCalledWith({
+      buildId: 42,
+      active: true,
+      githubRepositoryId: 123,
+      branchName: 'main',
+    });
+    expect(deployStamp.where).toHaveBeenCalledWith('desiredGeneration', '<', 3);
     expect(write.patch).toHaveBeenCalledWith({
       desiredGeneration: 3,
       acceptedRefs: {
@@ -321,6 +362,64 @@ describe('acceptDeploymentIntent', () => {
     });
   });
 
+  it('marks older environment-wide entries observed when a newer environment-wide intent is accepted', async () => {
+    const existing: AcceptedDeploymentRefs = {
+      'source:900:static:all': {
+        type: 'source',
+        requestId: 'request-5',
+        target: 'all',
+        githubRepositoryId: 900,
+        branch: 'static',
+        sha: 'config-sha',
+        gen: 5,
+      },
+      'source:100:main': {
+        type: 'source',
+        requestId: 'request-6',
+        target: 'repository',
+        githubRepositoryId: 100,
+        branch: 'main',
+        sha: 'service-sha',
+        gen: 6,
+      },
+    };
+    const read = readQuery({ desiredGeneration: 6, acceptedRefs: existing });
+    const write = writeQuery();
+    (Build.query as jest.Mock).mockReturnValueOnce(read).mockReturnValueOnce(write);
+
+    await expect(acceptDeploymentIntent(42, { type: 'all', requestId: 'request-7' })).resolves.toEqual({
+      accepted: true,
+      generation: 7,
+      scopeKey: 'all',
+    });
+
+    expect(write.patch).toHaveBeenCalledWith({
+      desiredGeneration: 7,
+      acceptedRefs: {
+        'source:900:static:all': { ...existing['source:900:static:all'], observedGen: 5 },
+        'source:100:main': existing['source:100:main'],
+        all: { type: 'all', requestId: 'request-7', gen: 7 },
+      },
+    });
+  });
+
+  it('leaves an older environment-wide entry pending when a service-scoped intent is accepted', async () => {
+    const existing: AcceptedDeploymentRefs = { all: { type: 'all', requestId: 'request-5', gen: 5 } };
+    const read = readQuery({ desiredGeneration: 5, acceptedRefs: existing });
+    const write = writeQuery();
+    (Build.query as jest.Mock).mockReturnValueOnce(read).mockReturnValueOnce(write);
+
+    await acceptDeploymentIntent(42, { type: 'repository', requestId: 'request-6', githubRepositoryId: 100 });
+
+    expect(write.patch).toHaveBeenCalledWith({
+      desiredGeneration: 6,
+      acceptedRefs: {
+        ...existing,
+        'repository:100': { type: 'repository', requestId: 'request-6', githubRepositoryId: 100, gen: 6 },
+      },
+    });
+  });
+
   it('returns null without writing when the Build does not exist', async () => {
     (Build.query as jest.Mock).mockReturnValueOnce(readQuery(undefined));
 
@@ -365,52 +464,107 @@ describe('acceptDeploymentIntent', () => {
   });
 });
 
-describe('dirtyDeploymentIntents', () => {
-  it('extracts only unobserved latest intents in generation order', () => {
-    const acceptedRefs: AcceptedDeploymentRefs = {
-      all: { type: 'all', requestId: 'request-5', gen: 5 },
-      'source:123:main': {
+describe('deploymentIntentDeployFilter', () => {
+  it('selects one repository and branch for a tracked push', () => {
+    expect(
+      deploymentIntentDeployFilter({
         type: 'source',
-        requestId: 'request-2',
+        requestId: 'r',
         target: 'repository',
         githubRepositoryId: 123,
         branch: 'main',
-        sha: 'old',
-        gen: 2,
+        sha: 'c',
+      })
+    ).toEqual({ githubRepositoryId: 123, branchName: 'main' });
+  });
+
+  it('selects every active row for a config-repo push and for a full redeploy', () => {
+    expect(
+      deploymentIntentDeployFilter({
+        type: 'source',
+        requestId: 'r',
+        target: 'all',
+        githubRepositoryId: 900,
+        branch: 'static',
+        sha: 'z',
+      })
+    ).toEqual({});
+    expect(deploymentIntentDeployFilter({ type: 'all', requestId: 'r' })).toEqual({});
+  });
+
+  it('selects every branch of one repository for a repository redeploy', () => {
+    expect(deploymentIntentDeployFilter({ type: 'repository', requestId: 'r', githubRepositoryId: 9 })).toEqual({
+      githubRepositoryId: 9,
+    });
+  });
+});
+
+describe('acceptDeploymentIntent row stamping', () => {
+  it('does not touch Deploy rows when a redelivery is deduplicated', async () => {
+    const existing: AcceptedDeploymentRefs = {
+      'source:123:main': {
+        type: 'source',
+        requestId: 'request-1',
+        target: 'repository',
+        githubRepositoryId: 123,
+        branch: 'main',
+        sha: 'commit-a',
+        gen: 1,
       },
-      'repository:456': { type: 'repository', requestId: 'request-3', githubRepositoryId: 456, gen: 3 },
     };
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery({ desiredGeneration: '1', acceptedRefs: existing }));
 
-    expect(dirtyDeploymentIntents(acceptedRefs, 2)).toEqual([
-      { scopeKey: 'repository:456', intent: acceptedRefs['repository:456'] },
-      { scopeKey: 'all', intent: acceptedRefs.all },
-    ]);
+    await expect(
+      acceptDeploymentIntent(42, {
+        type: 'source',
+        requestId: 'request-redelivery',
+        target: 'repository',
+        githubRepositoryId: 123,
+        branch: 'main',
+        sha: 'commit-a',
+      })
+    ).resolves.toEqual({ accepted: false, generation: 1, scopeKey: 'source:123:main' });
+
+    expect(Deploy.query).not.toHaveBeenCalled();
   });
+});
 
-  it('treats an absent mailbox as having no dirty intents', () => {
-    expect(dirtyDeploymentIntents(null, 0)).toEqual([]);
-    expect(dirtyDeploymentIntents(undefined, 0)).toEqual([]);
-  });
-
-  it('ignores malformed persisted entries', () => {
-    const validIntent = { type: 'all' as const, requestId: 'request-2', gen: 2 };
-    const acceptedRefs = {
-      malformed: null,
-      all: validIntent,
-    } as unknown as AcceptedDeploymentRefs;
-
-    expect(dirtyDeploymentIntents(acceptedRefs, 0)).toEqual([{ scopeKey: 'all', intent: validIntent }]);
-  });
-
-  it('uses the scope key as a deterministic tie-breaker for equal generations', () => {
-    const acceptedRefs: AcceptedDeploymentRefs = {
-      'repository:456': { type: 'repository', requestId: 'request-repository', githubRepositoryId: 456, gen: 3 },
-      all: { type: 'all', requestId: 'request-all', gen: 3 },
+describe('recordIntentConfigFailures', () => {
+  it('stores the failures on the entry accepted at that generation', async () => {
+    const existing: AcceptedDeploymentRefs = {
+      all: { type: 'all', requestId: 'request-3', gen: 3 },
+      'repository:9': { type: 'repository', requestId: 'request-2', githubRepositoryId: 9, gen: 2 },
     };
+    const read = readQuery({ id: 42, acceptedRefs: existing });
+    const write = writeQuery();
+    (Build.query as jest.Mock).mockReturnValueOnce(read).mockReturnValueOnce(write);
 
-    expect(dirtyDeploymentIntents(acceptedRefs, 0)).toEqual([
-      { scopeKey: 'all', intent: acceptedRefs.all },
-      { scopeKey: 'repository:456', intent: acceptedRefs['repository:456'] },
-    ]);
+    await expect(recordIntentConfigFailures(42, 3, { billing: 'billing lifecycle.yaml is invalid' })).resolves.toBe(
+      true
+    );
+
+    expect(write.patch).toHaveBeenCalledWith({
+      acceptedRefs: {
+        ...existing,
+        all: { ...existing.all, configFailures: { billing: 'billing lifecycle.yaml is invalid' } },
+      },
+    });
+  });
+
+  it('writes nothing when no entry carries that generation', async () => {
+    const read = readQuery({ id: 42, acceptedRefs: { all: { type: 'all', requestId: 'request-3', gen: 3 } } });
+    (Build.query as jest.Mock).mockReturnValueOnce(read);
+
+    await expect(recordIntentConfigFailures(42, 9, {})).resolves.toBe(false);
+    expect(Build.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns false for a missing build or a malformed mailbox', async () => {
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery(undefined));
+    await expect(recordIntentConfigFailures(42, 3, {})).resolves.toBe(false);
+
+    (Build.query as jest.Mock).mockReturnValueOnce(readQuery({ id: 42, acceptedRefs: 'broken' }));
+    await expect(recordIntentConfigFailures(42, 3, {})).resolves.toBe(false);
+    expect(Build.query).toHaveBeenCalledTimes(2);
   });
 });

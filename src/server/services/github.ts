@@ -563,17 +563,17 @@ export default class GithubService extends Service {
         getLogger({ error, githubRepositoryId, branchName }).error('Push: API auto-track processing failed');
       });
 
-      if (!allDeploys.length) {
-        // additional check for static env branch
-        await this.handlePushForStaticEnv({
-          githubRepositoryId,
-          branchName,
-          headCommit: deployTriggerRef ?? null,
-          beforeCommit: !this.isVoidCommit(previousCommit) ? previousCommit : null,
-        });
-        return;
-      }
+      // A config-repo push redeploys every static environment rooted at it, even when that repo also owns
+      // services; those environments are excluded from the repository-targeted path below.
+      const rootStaticBuildIds = await this.handlePushForStaticEnv({
+        githubRepositoryId,
+        branchName,
+        headCommit: deployTriggerRef ?? null,
+        beforeCommit: !this.isVoidCommit(previousCommit) ? previousCommit : null,
+      });
+      if (!allDeploys.length) return;
       const deploysToRebuild = allDeploys.filter((deploy) => {
+        if (rootStaticBuildIds.has(Number(deploy.buildId))) return false;
         if (!deploy?.build) return false;
         if (deploy.devMode) {
           getLogger().info(`Push: skipping dev mode service deployId=${deploy.id} service=${deploy.deployable?.name}`);
@@ -756,9 +756,10 @@ export default class GithubService extends Service {
     branchName: string;
     headCommit?: string | null;
     beforeCommit?: string | null;
-  }): Promise<void> => {
+  }): Promise<Set<number>> => {
+    const enqueued = new Set<number>();
     try {
-      const build = await this.db.models.Build.query()
+      const builds = await this.db.models.Build.query()
         .whereIn('pullRequestId', (prBuilder) => {
           prBuilder
             .from(this.db.models.PullRequest.tableName)
@@ -773,24 +774,31 @@ export default class GithubService extends Service {
         })
         .andWhere('isStatic', true)
         .andWhere('trackDefaultBranches', true)
-        .first();
+        .whereNull('deletedAt');
 
-      if (!build) return;
-
-      getLogger().info(`Push: redeploying reason=staticEnv`);
-      await this.db.services.BuildService.enqueueResolveAndDeployBuild({
-        buildId: build?.id,
-        ...(headCommit ? { sourceRef: headCommit } : {}),
-        ...(beforeCommit ? { sourceBeforeRef: beforeCommit } : {}),
-        sourceGithubRepositoryId: githubRepositoryId,
-        sourceBranch: branchName,
-      });
+      for (const build of builds) {
+        // A root build is claimed here even when its enqueue fails: a repository-scoped intent is the wrong shape for it.
+        enqueued.add(Number(build.id));
+        getLogger({ buildId: build.id }).info(`Push: redeploying reason=staticEnv`);
+        try {
+          await this.db.services.BuildService.enqueueResolveAndDeployBuild({
+            buildId: build.id,
+            ...(headCommit ? { sourceRef: headCommit } : {}),
+            ...(beforeCommit ? { sourceBeforeRef: beforeCommit } : {}),
+            sourceGithubRepositoryId: githubRepositoryId,
+            sourceBranch: branchName,
+          });
+        } catch (error) {
+          getLogger({ buildId: build.id }).error({ error }, 'Push: static env redeploy enqueue failed');
+        }
+      }
     } catch (error) {
       getLogger({}).error(
         { error },
         `Push: static env webhook failed branch=${branchName} repositoryId=${githubRepositoryId}`
       );
     }
+    return enqueued;
   };
 
   dispatchWebhook = async (req: NextApiRequest) => {

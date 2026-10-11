@@ -152,6 +152,38 @@ export async function createKubernetesApplyJob({
   return createdJob.body;
 }
 
+/** A deploy Job is done only once it is terminal and the kubelet reports each of its pods stopped. */
+export async function listUnfinishedDeployJobs(deploy: Deploy, namespace: string): Promise<string[]> {
+  const kc = new k8s.KubeConfig();
+  kc.loadFromDefault();
+  const batchApi = kc.makeApiClient(k8s.BatchV1Api);
+  const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+  const selectors = [
+    `app=lifecycle-deploy,type=kubernetes-apply,deploy_uuid=${deploy.uuid}`,
+    `app.kubernetes.io/name=native-helm,deploy-id=${deploy.id}`,
+  ];
+  const unfinished: string[] = [];
+  for (const selector of selectors) {
+    const { body } = await batchApi.listNamespacedJob(namespace, undefined, undefined, undefined, undefined, selector);
+    for (const job of body.items ?? []) {
+      const name = job.metadata?.name;
+      if (!name || hasCondition(job, 'Complete')) continue;
+      if (!hasCondition(job, 'Failed') || (await hasRunningPod(coreApi, namespace, name))) unfinished.push(name);
+    }
+  }
+  return unfinished;
+}
+
+function hasCondition(job: k8s.V1Job, type: 'Complete' | 'Failed'): boolean {
+  return (job.status?.conditions ?? []).some((condition) => condition.type === type && condition.status === 'True');
+}
+
+async function hasRunningPod(coreApi: k8s.CoreV1Api, namespace: string, jobName: string): Promise<boolean> {
+  const selector = `job-name=${jobName}`;
+  const { body } = await coreApi.listNamespacedPod(namespace, undefined, undefined, undefined, undefined, selector);
+  return (body.items ?? []).some((pod) => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed');
+}
+
 async function createManifestConfigMap(deploy: Deploy, configMapName: string, namespace: string): Promise<void> {
   const kc = new k8s.KubeConfig();
   kc.loadFromDefault();

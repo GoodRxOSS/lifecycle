@@ -47,6 +47,8 @@ export default class Deploy extends Model {
   deployable?: Deployable;
 
   runUUID: string;
+  desiredGeneration!: number;
+  observedGeneration!: number;
 
   replicaCount: number;
 

@@ -166,7 +166,7 @@ export default function bootstrapJobs(services: IServices) {
   });
 
   queueManager.registerWorker(
-    QUEUE_NAMES.DEPLOYMENT_RECONCILIATION,
+    QUEUE_NAMES.SERVICE_RECONCILIATION,
     services.BuildService.processDeploymentReconciliationQueue,
     {
       connection: redisClient.getConnection(),

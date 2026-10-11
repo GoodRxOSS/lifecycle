@@ -15,6 +15,7 @@
  */
 
 import { DeploymentManager, DeploymentSupersededError } from '../deploymentManager/deploymentManager';
+import { AuthorityLockLostError } from 'server/lib/authorityLock';
 import { Deploy } from 'server/models';
 import { buildDeployJobName } from '../kubernetes/jobNames';
 import { deployHelm } from '../helm';
@@ -27,6 +28,7 @@ jest.mock('../nativeHelm', () => ({
   shouldUseNativeHelm: jest.fn().mockResolvedValue(false),
 }));
 jest.mock('../kubernetesApply/applyManifest', () => ({
+  listUnfinishedDeployJobs: jest.fn().mockResolvedValue([]),
   createKubernetesApplyJob: jest.fn().mockResolvedValue(void 0),
   monitorKubernetesJob: jest.fn().mockResolvedValue({ success: true, message: 'ok', logs: 'apply logs' }),
 }));
@@ -54,7 +56,11 @@ jest.mock('server/services/deploy', () => {
   }));
 });
 
-import { createKubernetesApplyJob, monitorKubernetesJob } from '../kubernetesApply/applyManifest';
+import {
+  listUnfinishedDeployJobs,
+  createKubernetesApplyJob,
+  monitorKubernetesJob,
+} from '../kubernetesApply/applyManifest';
 import { waitForDeployPodReady } from '../kubernetes';
 import GlobalConfigService from 'server/services/globalConfig';
 import { getLogArchivalService } from 'server/services/logArchival';
@@ -78,6 +84,7 @@ describe('DeploymentManager', () => {
     mockRecordDeployFailure.mockReset().mockResolvedValue(false);
     (deployHelm as jest.Mock).mockReset().mockResolvedValue(undefined);
     (shouldUseNativeHelm as jest.Mock).mockReset().mockResolvedValue(false);
+    (listUnfinishedDeployJobs as jest.Mock).mockReset().mockResolvedValue([]);
     (createKubernetesApplyJob as jest.Mock).mockReset().mockResolvedValue(undefined);
     (monitorKubernetesJob as jest.Mock)
       .mockReset()
@@ -311,12 +318,13 @@ describe('DeploymentManager', () => {
       } as unknown as Deploy;
     }
 
-    it('admits all native siblings for a level together while Codefresh and pod readiness stay outside', async () => {
+    it('admits each native service through its own gate while Codefresh and pod readiness stay outside', async () => {
       const nativeHelm = runnableDeploy('native-chart', 'helm');
       const codefreshHelm = runnableDeploy('codefresh-chart', 'helm');
       const kubernetes = runnableDeploy('web', 'github');
       const events: string[] = [];
       let insideGate = false;
+      let gateDepth = 0;
 
       (shouldUseNativeHelm as jest.Mock).mockImplementation(async (deploy: Deploy) => {
         return deploy.deployable.name === 'native-chart';
@@ -336,12 +344,14 @@ describe('DeploymentManager', () => {
         return { ready: true };
       });
 
-      const nativeMutationGate = jest.fn(async (action: () => Promise<unknown>) => {
+      const nativeMutationGate = jest.fn(async (_deploy: Deploy, action: () => Promise<unknown>) => {
+        gateDepth += 1;
         insideGate = true;
         try {
           return { admitted: true as const, value: await action() };
         } finally {
-          insideGate = false;
+          gateDepth -= 1;
+          insideGate = gateDepth > 0;
         }
       });
       const nativeSecretMutationGate = jest.fn();
@@ -354,25 +364,27 @@ describe('DeploymentManager', () => {
 
       await manager.deploy();
 
-      expect(nativeMutationGate).toHaveBeenCalledTimes(1);
+      expect(nativeMutationGate).toHaveBeenCalledTimes(2);
+      expect(nativeMutationGate).toHaveBeenCalledWith(nativeHelm, expect.any(Function));
+      expect(nativeMutationGate).toHaveBeenCalledWith(kubernetes, expect.any(Function));
       expect(deployHelm).toHaveBeenCalledWith([nativeHelm], {
         secretMutationGate: nativeSecretMutationGate,
       });
+      expect(nativeMutationGate).not.toHaveBeenCalledWith(codefreshHelm, expect.any(Function));
+      expect(deployHelm).toHaveBeenCalledWith(
+        [codefreshHelm],
+        expect.objectContaining({ providerSubmissionGate: expect.any(Function) })
+      );
       expect(events).toEqual(
-        expect.arrayContaining([
-          'codefresh-chart:false',
-          'native-chart:true',
-          'apply:true',
-          'monitor:true',
-          'ready:false',
-        ])
+        expect.arrayContaining(['native-chart:true', 'apply:true', 'monitor:true', 'ready:false'])
       );
     });
 
-    it('keeps the promotion gate until every admitted native sibling is terminal', async () => {
+    it('holds a service gate until its native mutation is terminal, and a failed sibling does not block it', async () => {
       const nativeHelm = runnableDeploy('native-chart', 'helm');
       const kubernetes = runnableDeploy('web', 'github');
       let insideGate = false;
+      let gateDepth = 0;
       let releaseMonitor!: () => void;
       let markMonitorStarted!: () => void;
       const monitorStarted = new Promise<void>((resolve) => {
@@ -389,12 +401,14 @@ describe('DeploymentManager', () => {
         return { success: true, message: 'ok', logs: 'apply logs' };
       });
 
-      const nativeMutationGate = jest.fn(async (action: () => Promise<unknown>) => {
+      const nativeMutationGate = jest.fn(async (_deploy: Deploy, action: () => Promise<unknown>) => {
+        gateDepth += 1;
         insideGate = true;
         try {
           return { admitted: true as const, value: await action() };
         } finally {
-          insideGate = false;
+          gateDepth -= 1;
+          insideGate = gateDepth > 0;
         }
       });
       const manager = new DeploymentManager([nativeHelm, kubernetes], {
@@ -406,31 +420,31 @@ describe('DeploymentManager', () => {
       expect(insideGate).toBe(true);
 
       releaseMonitor();
-      await expect(deployment).rejects.toThrow('helm failed');
+      await expect(deployment).resolves.toEqual({ failed: [nativeHelm] });
       expect(insideGate).toBe(false);
       expect(waitForDeployPodReady).toHaveBeenCalledWith(kubernetes);
     });
 
-    it('treats denied native admission as supersession without creating a job or recording failure', async () => {
+    it('skips a service whose native admission is denied without creating a job or recording failure', async () => {
       const deploy = runnableDeploy('web', 'github');
       const manager = new DeploymentManager([deploy], {
         nativeMutationGate: (async () => ({ admitted: false as const })) as any,
       });
 
-      await expect(manager.deploy()).rejects.toBeInstanceOf(DeploymentSupersededError);
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
 
       expect(createKubernetesApplyJob).not.toHaveBeenCalled();
       expect(monitorKubernetesJob).not.toHaveBeenCalled();
       expect(mockRecordDeployFailure).not.toHaveBeenCalled();
     });
 
-    it('stops as superseded when the run-fenced queued patch affects no row', async () => {
+    it('skips a service as superseded when the run-fenced queued patch affects no row', async () => {
       const deploy = runnableDeploy('web', 'github');
       const where = jest.fn().mockResolvedValue(0);
       deploy.$query = () => ({ patch: jest.fn().mockReturnValue({ where }) } as any);
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toBeInstanceOf(DeploymentSupersededError);
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
 
       expect(where).toHaveBeenCalledWith({ id: deploy.id, runUUID: deploy.runUUID });
       expect(createKubernetesApplyJob).not.toHaveBeenCalled();
@@ -449,7 +463,7 @@ describe('DeploymentManager', () => {
 
       const manager = new DeploymentManager([first, second], {
         isCurrent: async () => current,
-        nativeMutationGate: (async (action: () => Promise<unknown>) => ({
+        nativeMutationGate: (async (_deploy: Deploy, action: () => Promise<unknown>) => ({
           admitted: true as const,
           value: await action(),
         })) as any,
@@ -619,7 +633,7 @@ describe('DeploymentManager', () => {
       return { deploy, patch, where };
     }
 
-    it('removes a self-dependency and surfaces a Codefresh provider failure', async () => {
+    it('removes a self-dependency and records a Codefresh provider failure on the service', async () => {
       const { deploy, patch } = managedDeploy({
         name: 'self-dependent-chart',
         type: 'helm',
@@ -630,13 +644,16 @@ describe('DeploymentManager', () => {
 
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toBe(providerError);
-      expect(deployHelm).toHaveBeenCalledWith([deploy]);
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
+      expect(deployHelm).toHaveBeenCalledWith(
+        [deploy],
+        expect.objectContaining({ providerSubmissionGate: expect.any(Function) })
+      );
       expect(patch).toHaveBeenCalledWith({ status: DeployStatus.QUEUED });
       expect(createKubernetesApplyJob).not.toHaveBeenCalled();
     });
 
-    it('surfaces an aggregated readiness failure from deploy()', async () => {
+    it('records a readiness failure on the service and returns it from deploy()', async () => {
       const { deploy } = managedDeploy({ name: 'unready-service' });
       (waitForDeployPodReady as jest.Mock).mockResolvedValueOnce({
         ready: false,
@@ -645,13 +662,16 @@ describe('DeploymentManager', () => {
 
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toThrow(
-        'Pods failed to become ready within timeout: container waiting=ImagePullBackOff'
-      );
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
       expect(mockRecordDeployFailure).toHaveBeenCalledWith(
         deploy,
         deploy.runUUID,
-        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+        expect.objectContaining({
+          status: DeployStatus.DEPLOY_FAILED,
+          error: expect.objectContaining({
+            message: 'Pods failed to become ready within timeout: container waiting=ImagePullBackOff',
+          }),
+        })
       );
       expect(deployHelm).not.toHaveBeenCalled();
     });
@@ -693,11 +713,14 @@ describe('DeploymentManager', () => {
       (waitForDeployPodReady as jest.Mock).mockResolvedValueOnce({ ready: false });
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toThrow('Pods failed to become ready within timeout');
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
       expect(mockRecordDeployFailure).toHaveBeenCalledWith(
         deploy,
         deploy.runUUID,
-        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+        expect.objectContaining({
+          status: DeployStatus.DEPLOY_FAILED,
+          error: expect.objectContaining({ message: 'Pods failed to become ready within timeout' }),
+        })
       );
     });
 
@@ -720,13 +743,16 @@ describe('DeploymentManager', () => {
       const { deploy } = managedDeploy({ name: 'missing-manifest', manifest: '' });
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toThrow(
-        `Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`
-      );
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
       expect(mockRecordDeployFailure).toHaveBeenCalledWith(
         deploy,
         deploy.runUUID,
-        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+        expect.objectContaining({
+          status: DeployStatus.DEPLOY_FAILED,
+          error: expect.objectContaining({
+            message: `Deploy ${deploy.uuid} has no manifest. Ensure manifests are generated before deployment.`,
+          }),
+        })
       );
       expect(createKubernetesApplyJob).not.toHaveBeenCalled();
       expect(monitorKubernetesJob).not.toHaveBeenCalled();
@@ -742,7 +768,7 @@ describe('DeploymentManager', () => {
       });
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toThrow('Kubernetes apply job failed');
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
       expect(mockArchiveLogs).toHaveBeenCalledWith(
         expect.objectContaining({ status: 'Failed', deployUuid: deploy.uuid }),
         'kubectl error output'
@@ -755,30 +781,452 @@ describe('DeploymentManager', () => {
       expect(waitForDeployPodReady).not.toHaveBeenCalled();
     });
 
-    it('propagates supersession during manifest application without recording a provider failure', async () => {
+    it('skips a service superseded during manifest application without recording a provider failure', async () => {
       const { deploy } = managedDeploy({ name: 'superseded-apply' });
       const superseded = new DeploymentSupersededError();
       mockPatchAndUpdateActivityFeed.mockRejectedValueOnce(superseded);
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toBe(superseded);
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
       expect(mockRecordDeployFailure).not.toHaveBeenCalled();
       expect(createKubernetesApplyJob).not.toHaveBeenCalled();
     });
 
-    it('propagates supersession during readiness without recording a provider failure', async () => {
+    it('skips a service superseded during readiness without recording a provider failure', async () => {
       const { deploy } = managedDeploy({ name: 'superseded-readiness' });
       const superseded = new DeploymentSupersededError();
       (waitForDeployPodReady as jest.Mock).mockRejectedValueOnce(superseded);
       const manager = new DeploymentManager([deploy]);
 
-      await expect(manager.deploy()).rejects.toBe(superseded);
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
       expect(mockRecordDeployFailure).not.toHaveBeenCalled();
       expect(mockPatchAndUpdateActivityFeed).not.toHaveBeenCalledWith(
         deploy,
         expect.objectContaining({ status: DeployStatus.READY }),
         deploy.runUUID
       );
+    });
+
+    it('blocks dependents of a service that failed before rollout and still deploys unrelated services', async () => {
+      const { deploy: db, patch: dbPatch } = managedDeploy({ name: 'db' });
+      const { deploy: api, patch: apiPatch } = managedDeploy({ name: 'api', deploymentDependsOn: ['db'] });
+      const { deploy: web } = managedDeploy({ name: 'web' });
+      const manager = new DeploymentManager([db, api, web], { failedServices: ['db'] });
+
+      const result = await manager.deploy();
+
+      expect(result.failed.map((failed) => failed.deployable.name).sort()).toEqual(['api', 'db']);
+      expect(apiPatch).toHaveBeenCalledWith({
+        status: DeployStatus.DEPLOY_FAILED,
+        statusMessage: 'Not deployed: db failed.',
+      });
+      expect(dbPatch).not.toHaveBeenCalled();
+      expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: web }));
+    });
+
+    it('attributes a Codefresh failure to its own service and lets a healthy sibling finish', async () => {
+      const { deploy: good } = managedDeploy({ name: 'good-chart', type: 'helm' });
+      const { deploy: bad } = managedDeploy({ name: 'bad-chart', type: 'helm' });
+      (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);
+      (deployHelm as jest.Mock).mockImplementation(async (deploys: Deploy[]) => {
+        if (deploys[0].deployable.name === 'bad-chart') throw new Error('Codefresh deploy failed');
+      });
+      const manager = new DeploymentManager([good, bad]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [bad] });
+      expect(deployHelm).toHaveBeenCalledWith(
+        [good],
+        expect.objectContaining({ providerSubmissionGate: expect.any(Function) })
+      );
+      expect(deployHelm).toHaveBeenCalledWith(
+        [bad],
+        expect.objectContaining({ providerSubmissionGate: expect.any(Function) })
+      );
+    });
+
+    it('rethrows a lost promotion lease instead of recording it as a service failure', async () => {
+      const { deploy } = managedDeploy({ name: 'leased' });
+      const lost = new AuthorityLockLostError('deploy-promotion.1');
+      const manager = new DeploymentManager([deploy], {
+        nativeMutationGate: (async () => {
+          throw lost;
+        }) as any,
+      });
+
+      await expect(manager.deploy()).rejects.toBe(lost);
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+      expect(waitForDeployPodReady).not.toHaveBeenCalled();
+    });
+
+    it('records a service failed when its ownership check fails before the launch', async () => {
+      const { deploy } = managedDeploy({ name: 'checked' });
+      const manager = new DeploymentManager([deploy], {
+        nativeMutationGate: (async () => {
+          throw new Error('connection reset');
+        }) as any,
+      });
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+      expect(mockRecordDeployFailure).toHaveBeenCalledTimes(1);
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(deploy, 'run-checked', {
+        status: DeployStatus.DEPLOY_FAILED,
+        fallbackMessage: 'Deployment failed. Redeploy the service to try again.',
+      });
+    });
+
+    it('records a Codefresh service failed when its ownership check fails before the launch', async () => {
+      const { deploy, patch } = managedDeploy({ name: 'chart', type: 'helm' });
+      let queuedPatches = 0;
+      patch.mockImplementation(() => ({
+        where: jest.fn(async () => {
+          queuedPatches += 1;
+          if (queuedPatches === 3) throw new Error('connection reset');
+          return 1;
+        }),
+      }));
+      (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
+      expect(deployHelm).not.toHaveBeenCalled();
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(deploy, 'run-chart', {
+        status: DeployStatus.DEPLOY_FAILED,
+        fallbackMessage: 'Deployment failed. Redeploy the service to try again.',
+      });
+    });
+
+    it('records a failed apply once, with its own message', async () => {
+      const { deploy } = managedDeploy({ name: 'broken' });
+      (createKubernetesApplyJob as jest.Mock).mockRejectedValueOnce(new Error('apply failed'));
+      const manager = new DeploymentManager([deploy], {
+        nativeMutationGate: (async (_deploy: Deploy, action: () => Promise<unknown>) => ({
+          admitted: true,
+          value: await action(),
+        })) as any,
+      });
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
+      expect(mockRecordDeployFailure).toHaveBeenCalledTimes(1);
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        'run-broken',
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED, error: expect.any(Error) })
+      );
+    });
+
+    it('lets launched siblings finish and launches nothing more once a promotion lease is lost', async () => {
+      const { deploy: leased } = managedDeploy({ name: 'leased' });
+      const { deploy: slow } = managedDeploy({ name: 'slow' });
+      const { deploy: dependent, patch: dependentPatch } = managedDeploy({
+        name: 'dependent',
+        deploymentDependsOn: ['slow'],
+      });
+      const lost = new AuthorityLockLostError('deploy-promotion.1');
+      const events: string[] = [];
+      let finishSlow!: () => void;
+      const slowApply = new Promise<void>((resolve) => {
+        finishSlow = resolve;
+      });
+      (createKubernetesApplyJob as jest.Mock).mockImplementation(async ({ deploy }: { deploy: Deploy }) => {
+        if (deploy !== slow) return;
+        await slowApply;
+        events.push('slow applied');
+      });
+      const manager = new DeploymentManager([leased, slow, dependent], {
+        nativeMutationGate: (async (deploy: Deploy, action: () => Promise<unknown>) => {
+          if (deploy === leased) throw lost;
+          return { admitted: true, value: await action() };
+        }) as any,
+      });
+
+      try {
+        const outcome = manager.deploy().catch((error) => {
+          events.push('rejected');
+          throw error;
+        });
+        for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+        expect(events).toEqual([]);
+
+        finishSlow();
+        await expect(outcome).rejects.toBe(lost);
+        expect(events).toEqual(['slow applied', 'rejected']);
+        expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+        expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: slow }));
+        expect(dependentPatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+        );
+        expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+      } finally {
+        (createKubernetesApplyJob as jest.Mock).mockResolvedValue(undefined);
+      }
+    });
+
+    it('waits for an earlier deploy job of the service to finish before creating a new one', async () => {
+      jest.useFakeTimers();
+      try {
+        const { deploy, patch } = managedDeploy({ name: 'svc' });
+        (listUnfinishedDeployJobs as jest.Mock).mockResolvedValueOnce(['svc-deploy-old']).mockResolvedValue([]);
+        const manager = new DeploymentManager([deploy]);
+
+        const deployment = manager.deploy();
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        await expect(deployment).resolves.toEqual({ failed: [] });
+        expect(listUnfinishedDeployJobs).toHaveBeenCalledWith(deploy, 'testns');
+        expect(patch).toHaveBeenCalledWith({
+          status: DeployStatus.DEPLOYING,
+          statusMessage: 'Waiting for the previous deploy to finish',
+        });
+        expect((listUnfinishedDeployJobs as jest.Mock).mock.invocationCallOrder[1]).toBeLessThan(
+          (createKubernetesApplyJob as jest.Mock).mock.invocationCallOrder[0]
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('waits for an earlier deploy job of the service before a native Helm deploy', async () => {
+      jest.useFakeTimers();
+      try {
+        const { deploy } = managedDeploy({ name: 'chart', type: 'helm' });
+        (shouldUseNativeHelm as jest.Mock).mockResolvedValue(true);
+        (listUnfinishedDeployJobs as jest.Mock).mockResolvedValueOnce(['chart-deploy-old']).mockResolvedValue([]);
+        const manager = new DeploymentManager([deploy]);
+
+        const deployment = manager.deploy();
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        await expect(deployment).resolves.toEqual({ failed: [] });
+        expect((listUnfinishedDeployJobs as jest.Mock).mock.invocationCallOrder[1]).toBeLessThan(
+          (deployHelm as jest.Mock).mock.invocationCallOrder[0]
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('fails the service, without applying, when an earlier deploy job is still running after 45 minutes', async () => {
+      jest.useFakeTimers();
+      try {
+        const { deploy } = managedDeploy({ name: 'svc' });
+        (listUnfinishedDeployJobs as jest.Mock).mockResolvedValue(['svc-deploy-old']);
+        const manager = new DeploymentManager([deploy]);
+
+        const deployment = manager.deploy();
+        await jest.advanceTimersByTimeAsync(45 * 60_000 + 5_000);
+
+        await expect(deployment).resolves.toEqual({ failed: [deploy] });
+        expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+        expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+          deploy,
+          deploy.runUUID,
+          expect.objectContaining({
+            status: DeployStatus.DEPLOY_FAILED,
+            error: new Error(
+              'The previous deploy of this service is still running after 45 minutes. Redeploy the service after it stops.'
+            ),
+          })
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('stops waiting, without failing, once a newer run takes the service from this run', async () => {
+      const { deploy, where } = managedDeploy({ name: 'svc' });
+      (listUnfinishedDeployJobs as jest.Mock).mockResolvedValue(['svc-deploy-old']);
+      where.mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValue(0);
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+    });
+
+    it('does not apply and records a failure when earlier deploy jobs cannot be checked', async () => {
+      const { deploy } = managedDeploy({ name: 'svc' });
+      (listUnfinishedDeployJobs as jest.Mock).mockRejectedValueOnce(new Error('jobs.batch is forbidden'));
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [deploy] });
+      expect(createKubernetesApplyJob).not.toHaveBeenCalled();
+      expect(mockRecordDeployFailure).toHaveBeenCalledWith(
+        deploy,
+        deploy.runUUID,
+        expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED })
+      );
+    });
+
+    it('deploys a service whose prerequisite is outside this run without waiting, and its dependents after it', async () => {
+      const { deploy: api } = managedDeploy({ name: 'api', deploymentDependsOn: ['db'] });
+      const { deploy: web } = managedDeploy({ name: 'web', deploymentDependsOn: ['api'] });
+      const { deploy: worker } = managedDeploy({ name: 'worker' });
+      const manager = new DeploymentManager([api, web, worker]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      const applied = (createKubernetesApplyJob as jest.Mock).mock.calls.map(([{ deploy }]) => deploy);
+      expect(applied).toHaveLength(3);
+      expect(applied.indexOf(api)).toBeLessThan(applied.indexOf(web));
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+    });
+
+    it('skips a service another run took while an earlier level was still deploying', async () => {
+      const { deploy: first } = managedDeploy({ name: 'first' });
+      const { deploy: second, where } = managedDeploy({ name: 'second', deploymentDependsOn: ['first'] });
+      where.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      const manager = new DeploymentManager([first, second]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+      expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: first }));
+    });
+
+    it('blocks a dependent of a failed prerequisite that never reaches the manager, such as a Codefresh service', async () => {
+      const { deploy: api, patch: apiPatch } = managedDeploy({ name: 'api', deploymentDependsOn: ['migrations'] });
+      const { deploy: web } = managedDeploy({ name: 'web' });
+      const manager = new DeploymentManager([api, web], { failedServices: ['migrations'] });
+
+      const result = await manager.deploy();
+
+      expect(result.failed).toEqual([api]);
+      expect(apiPatch).toHaveBeenCalledWith({
+        status: DeployStatus.DEPLOY_FAILED,
+        statusMessage: 'Not deployed: migrations failed.',
+      });
+      expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: web }));
+    });
+
+    it('does not hand a Codefresh service to the provider once another run owns its row', async () => {
+      const { deploy, where } = managedDeploy({ name: 'chart', type: 'helm' });
+      (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);
+      where.mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+      expect(deployHelm).not.toHaveBeenCalled();
+    });
+
+    it('hands the provider a submission gate that denies a row another run took during command generation', async () => {
+      const { deploy, where } = managedDeploy({ name: 'chart', type: 'helm' });
+      (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);
+      where.mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      (deployHelm as jest.Mock).mockImplementation(async (_deploys: Deploy[], options: any) => {
+        if (!(await options.providerSubmissionGate(deploy))) throw new DeploymentSupersededError();
+      });
+      const manager = new DeploymentManager([deploy]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+      expect(mockRecordDeployFailure).not.toHaveBeenCalled();
+    });
+
+    it('deploys a dependent without waiting when a newer run took its prerequisite from this run', async () => {
+      const { deploy: a, where: whereA } = managedDeploy({ name: 'a' });
+      const { deploy: b } = managedDeploy({ name: 'b', deploymentDependsOn: ['a'] });
+      whereA.mockResolvedValue(0);
+      const manager = new DeploymentManager([a, b]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: b }));
+    });
+
+    it('deploys a dependent without waiting when its prerequisite loses admission to a newer run', async () => {
+      const { deploy: a } = managedDeploy({ name: 'a' });
+      const { deploy: b } = managedDeploy({ name: 'b', deploymentDependsOn: ['a'] });
+      const manager = new DeploymentManager([a, b], {
+        nativeMutationGate: (async (deploy: Deploy, action: () => Promise<unknown>) =>
+          deploy === a ? { admitted: false as const } : { admitted: true as const, value: await action() }) as any,
+      });
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      expect(createKubernetesApplyJob).toHaveBeenCalledTimes(1);
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: b }));
+    });
+
+    it('deploys a service whose declared prerequisite is outside this run without consulting it', async () => {
+      const { deploy: b, patch } = managedDeploy({ name: 'b', deploymentDependsOn: ['a'] });
+      const manager = new DeploymentManager([b]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      expect(createKubernetesApplyJob).toHaveBeenCalledWith(expect.objectContaining({ deploy: b }));
+      expect(patch).not.toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.DEPLOY_FAILED }));
+    });
+
+    it('deploys a prerequisite this run owns before its dependent', async () => {
+      const { deploy: a } = managedDeploy({ name: 'a' });
+      const { deploy: b } = managedDeploy({ name: 'b', deploymentDependsOn: ['a'] });
+      const manager = new DeploymentManager([a, b]);
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      const applied = (createKubernetesApplyJob as jest.Mock).mock.calls.map(([{ deploy }]) => deploy);
+      expect(applied).toEqual([a, b]);
+    });
+
+    it('launches a service whose prerequisite is absent without waiting for its level mates to finish', async () => {
+      const { deploy: a } = managedDeploy({ name: 'a' });
+      const { deploy: b } = managedDeploy({ name: 'b', deploymentDependsOn: ['absent'] });
+      let releaseA!: () => void;
+      const dependentLaunched = new Promise<void>((resolve) => {
+        releaseA = resolve;
+      });
+      (createKubernetesApplyJob as jest.Mock).mockImplementation(async ({ deploy }: { deploy: Deploy }) => {
+        if (deploy === b) releaseA();
+        if (deploy === a) await dependentLaunched;
+      });
+      const manager = new DeploymentManager([a, b]);
+
+      try {
+        await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+        expect(createKubernetesApplyJob).toHaveBeenCalledTimes(2);
+      } finally {
+        (createKubernetesApplyJob as jest.Mock).mockResolvedValue(undefined);
+      }
+    });
+
+    it('starts a service as soon as its own prerequisite is done while an unrelated slow service is still applying', async () => {
+      const { deploy: slow } = managedDeploy({ name: 'slow' });
+      const { deploy: x } = managedDeploy({ name: 'x' });
+      const { deploy: z } = managedDeploy({ name: 'z', deploymentDependsOn: ['x'] });
+      let releaseSlow!: () => void;
+      const zApplied = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      (createKubernetesApplyJob as jest.Mock).mockImplementation(async ({ deploy }: { deploy: Deploy }) => {
+        if (deploy === z) releaseSlow();
+        if (deploy === slow) await zApplied;
+      });
+      const manager = new DeploymentManager([slow, x, z]);
+
+      try {
+        await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+        expect(createKubernetesApplyJob).toHaveBeenCalledTimes(3);
+      } finally {
+        (createKubernetesApplyJob as jest.Mock).mockResolvedValue(undefined);
+      }
+    });
+
+    it('fences every ownership patch on the generation it was handed', async () => {
+      const { deploy, where } = managedDeploy({ name: 'chart', type: 'helm' });
+      (shouldUseNativeHelm as jest.Mock).mockResolvedValue(false);
+      (deployHelm as jest.Mock).mockImplementation(async (_deploys: Deploy[], options: any) => {
+        await options.providerSubmissionGate(deploy);
+      });
+      const manager = new DeploymentManager([deploy], { expectedGeneration: 4 });
+
+      await expect(manager.deploy()).resolves.toEqual({ failed: [] });
+
+      expect(where).toHaveBeenCalled();
+      for (const [criteria] of where.mock.calls) {
+        expect(criteria).toEqual({ id: deploy.id, runUUID: deploy.runUUID, desiredGeneration: 4 });
+      }
     });
 
     it('claims a persisted deploy whose nullable run identity has not been assigned yet', async () => {

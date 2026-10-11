@@ -214,6 +214,78 @@ describe('deployable source seam (PR vs API build)', () => {
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha');
   });
 
+  it('reads the root config at the newest accepted push to the root branch when the delivered source is a dependency', async () => {
+    const service = makeService();
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({
+          whereNull: jest.fn().mockResolvedValue({ githubRepositoryId: 99, fullName: 'org/dependency' }),
+        })),
+      })),
+    };
+    const repository = { githubRepositoryId: 42, fullName: 'org/repo' };
+    const pullRequest: any = {
+      branchName: 'feature-1',
+      repository,
+      build: { deploys: [], environment: { id: 5 } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    mockFetchLifecycleConfigByRepository.mockResolvedValue(null);
+
+    await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      1,
+      'uuid-1',
+      pullRequest,
+      { id: 1 },
+      99,
+      'dependency-push-sha',
+      'main',
+      99,
+      new Set(),
+      new Set(),
+      new Map(),
+      { '42:feature-1': 'root-accepted-sha', '99:main': 'dependency-push-sha' }
+    );
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-accepted-sha');
+  });
+
+  it('keeps an explicitly pinned config SHA ahead of any accepted root floor', async () => {
+    const service = makeService();
+    const repository = { githubRepositoryId: 42, fullName: 'org/repo' };
+    mockRepositoryWhereNull.mockResolvedValue(repository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValue(null);
+    const build: any = {
+      id: 9,
+      triggerType: 'api',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Set(),
+      new Set(),
+      new Map(),
+      { '42:main': 'accepted-later' }
+    );
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha');
+  });
+
   it('fetches a targeted dependency config at the same pushed SHA used for its code', async () => {
     const service = makeService();
     const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
@@ -1113,6 +1185,7 @@ describe('deployable source seam (PR vs API build)', () => {
     expect(result).toEqual({
       deployables: [persistedDeployable],
       canReconcile: true,
+      configFailures: {},
       filterGithubRepositoryId: 42,
       unresolvedServiceNames: ['unresolved-api'],
       unresolvedRepositoryIds: [99],
