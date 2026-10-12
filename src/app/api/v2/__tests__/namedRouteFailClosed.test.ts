@@ -175,7 +175,6 @@ import { GET as aiConfigEffectiveGET } from 'src/app/api/v2/ai/config/agent-sess
 import { GET as aiConfigMcpPresetsGET } from 'src/app/api/v2/ai/config/mcp-presets/route';
 import { GET as runtimeConfigReposGET } from 'src/app/api/v2/ai/agent/runtime-config/repos/route';
 import { POST as telemetryEventsPOST } from 'src/app/api/v2/telemetry/events/route';
-import { GET as telemetryStatsGET } from 'src/app/api/v2/telemetry/stats/route';
 
 const verifyToken = ApiTokenService.verifyToken as jest.Mock;
 const verifyAuthMock = verifyAuth as jest.Mock;
@@ -390,7 +389,6 @@ const CASES: readonly RouteCase[] = [
     scope: null,
   },
   { path: '/api/v2/telemetry/events', method: 'POST', run: telemetryEventsPOST, policy: 'session', scope: null },
-  { path: '/api/v2/telemetry/stats', method: 'GET', run: telemetryStatsGET, policy: 'session', scope: null },
 ];
 
 const DESTRUCTIVE_CASES: readonly DestructiveCase[] = [
@@ -510,10 +508,10 @@ afterAll(() => {
   else process.env.ENABLE_AUTH = originalEnableAuth;
 });
 
-describe('coverage of the 25 unwrapped-legacy v2 route files', () => {
+describe('coverage of the 24 unwrapped-legacy v2 route files', () => {
   it('exercises every listed file and method exactly once', () => {
-    expect(CASES).toHaveLength(29);
-    expect(new Set(CASES.map((c) => c.path)).size).toBe(25);
+    expect(CASES).toHaveLength(28);
+    expect(new Set(CASES.map((c) => c.path)).size).toBe(24);
     expect(DESTRUCTIVE_CASES).toHaveLength(6);
   });
 });

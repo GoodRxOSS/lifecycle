@@ -5541,7 +5541,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
-         * @description The resolved query range echoed back by GET /telemetry/stats.
+         * @description The resolved query range echoed back by GET /admin/analytics/telemetry.
          */
         TelemetryStatsRange: {
           type: 'object',
@@ -5555,7 +5555,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
-         * @description The specific success response for the GET /telemetry/stats endpoint.
+         * @description The specific success response for the GET /admin/analytics/telemetry endpoint.
          */
         GetTelemetryStatsSuccessResponse: {
           allOf: [

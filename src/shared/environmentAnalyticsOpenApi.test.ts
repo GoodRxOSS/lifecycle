@@ -24,6 +24,17 @@ describe('Admin environment analytics OpenAPI contract', () => {
     expect(operation.responses['403'].description).toContain('Administrator');
   });
 
+  it('documents CLI telemetry stats as an administrator-only endpoint', () => {
+    const operation = spec.paths['/api/v2/admin/analytics/telemetry'].get;
+    expect(operation.operationId).toBe('getTelemetryStats');
+    expect(operation.responses['200'].content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/GetTelemetryStatsSuccessResponse',
+    });
+    expect(operation.security ?? spec.security).toEqual([{ BearerAuth: [] }]);
+    expect(operation.responses['403'].description).toContain('Administrator');
+    expect(spec.paths['/api/v2/telemetry/stats']).toBeUndefined();
+  });
+
   it('preserves current-only phases and nullable history availability metadata', () => {
     const operation = spec.paths['/api/v2/admin/analytics/environments/records'].get;
     expect(operation.parameters.find((param: any) => param.name === 'phase').description).toContain('current');

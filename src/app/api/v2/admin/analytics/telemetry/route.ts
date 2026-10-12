@@ -16,7 +16,7 @@
 
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
-import { errorResponse, successResponse } from 'server/lib/response';
+import { errorResponse, successResponse, withNoStore } from 'server/lib/response';
 import TelemetryService, { TelemetryStatsInterval, TelemetryStatsQuery } from 'server/services/telemetry';
 import type { TelemetrySource } from 'server/models/TelemetryEvent';
 
@@ -68,12 +68,11 @@ function parseStatsQuery(searchParams: URLSearchParams): { query?: TelemetryStat
 
 /**
  * @openapi
- * /api/v2/telemetry/stats:
+ * /api/v2/admin/analytics/telemetry:
  *   get:
  *     summary: Get telemetry statistics
- *     description: Returns aggregated telemetry statistics (usage over time, top events, active clients, versions, and platforms) for one source over the requested time range.
- *     tags:
- *       - Telemetry
+ *     description: Returns aggregated telemetry statistics (usage over time, top events, active clients, versions, and platforms) for one source over the requested time range. Administrator-only.
+ *     tags: [Admin Analytics]
  *     operationId: getTelemetryStats
  *     parameters:
  *       - name: source
@@ -118,12 +117,8 @@ function parseStatsQuery(searchParams: URLSearchParams): { query?: TelemetryStat
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
- *       '401':
- *         description: Unauthorized
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '401': { description: Authentication required, content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
+ *       '403': { description: Administrator role required, content: { application/json: { schema: { $ref: '#/components/schemas/ApiErrorResponse' } } } }
  */
 const getHandler = async (req: NextRequest) => {
   const { query, error } = parseStatsQuery(req.nextUrl.searchParams);
@@ -134,19 +129,21 @@ const getHandler = async (req: NextRequest) => {
   const service = new TelemetryService();
   const stats = await service.getStats(query);
 
-  return successResponse(
-    {
-      range: {
-        source: query.source,
-        from: query.from.toISOString(),
-        to: query.to.toISOString(),
-        interval: query.interval,
+  return withNoStore(
+    successResponse(
+      {
+        range: {
+          source: query.source,
+          from: query.from.toISOString(),
+          to: query.to.toISOString(),
+          interval: query.interval,
+        },
+        stats,
       },
-      stats,
-    },
-    { status: 200 },
-    req
+      { status: 200 },
+      req
+    )
   );
 };
 
-export const GET = createApiHandler(getHandler, { auth: 'session' });
+export const GET = createApiHandler(getHandler, { auth: 'session', roles: ['admin'] });
