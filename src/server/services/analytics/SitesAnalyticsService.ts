@@ -359,7 +359,6 @@ export default class SitesAnalyticsService {
     });
   }
 
-  /** Window events: site creations and every later version upload, bucketed like the other calendar views. */
   private eventsSql(query: SitesAnalyticsQuery, range: ResolvedAnalyticsRange, bind: Bindings): string {
     const start = range.previous?.fromUtc ?? range.fromUtc;
     return `WITH ${scopedSites(query, bind)},
