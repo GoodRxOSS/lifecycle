@@ -16,8 +16,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { errorResponse, successResponse } from 'server/lib/response';
-import { SitesServiceError } from 'server/services/sites';
-import type { ListSitesFilters } from 'server/services/sites';
+import { SITE_LIST_SORTS, SitesServiceError } from 'server/services/sites';
+import type { ListSitesFilters, SiteListOrder, SiteListSort } from 'server/services/sites';
 
 export function readSiteVisibility(value: unknown): 'private' | 'public' {
   if (value !== 'private' && value !== 'public')
@@ -112,11 +112,18 @@ export function readSitesListFilters(searchParams: URLSearchParams): ListSitesFi
   const page = readSiteRevision(searchParams.get('page'));
   const limit = readSiteRevision(searchParams.get('limit'));
   if (limit && limit > 100) throw new SitesServiceError('limit must be at most 100.', 400);
+  const sort = searchParams.get('sort') || undefined;
+  if (sort && !(SITE_LIST_SORTS as readonly string[]).includes(sort))
+    throw new SitesServiceError(`sort must be one of: ${SITE_LIST_SORTS.join(', ')}.`, 400);
+  const order = searchParams.get('order') || undefined;
+  if (order && order !== 'asc' && order !== 'desc') throw new SitesServiceError('order must be asc or desc.', 400);
   return {
     ...(view ? { view: view as 'mine' | 'public' | 'all' | 'deleted' } : {}),
     ...(q ? { q } : {}),
     ...(page === undefined ? {} : { page }),
     ...(limit === undefined ? {} : { limit }),
+    ...(sort ? { sort: sort as SiteListSort } : {}),
+    ...(order ? { order: order as SiteListOrder } : {}),
   };
 }
 

@@ -61,6 +61,16 @@ export const runtime = 'nodejs';
  *           default: 25
  *           minimum: 1
  *           maximum: 100
+ *       - name: sort
+ *         in: query
+ *         required: false
+ *         description: Field to order sites by. Ignored for view=deleted, which orders by deletion time.
+ *         schema: { type: string, enum: [updated, created, name], default: created }
+ *       - name: order
+ *         in: query
+ *         required: false
+ *         description: Sort direction. Defaults to asc for name and desc otherwise.
+ *         schema: { type: string, enum: [asc, desc] }
  *     responses:
  *       '200':
  *         description: Hosted static sites.
