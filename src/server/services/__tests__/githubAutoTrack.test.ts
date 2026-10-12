@@ -119,7 +119,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       { registerQueue: jest.fn(() => ({ add: jest.fn(), on: jest.fn() })) } as any
     );
     const autoTrack = jest.spyOn(service as any, 'enqueueAutoTrackedApiBuilds').mockResolvedValue(undefined);
-    jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(undefined);
+    jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(new Set());
 
     await service.handlePushWebhook({
       ref: 'refs/heads/main',
@@ -156,7 +156,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       { registerQueue: jest.fn(() => ({ add: jest.fn(), on: jest.fn() })) } as any
     );
     jest.spyOn(service as any, 'enqueueAutoTrackedApiBuilds').mockResolvedValue(undefined);
-    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(undefined);
+    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(new Set());
 
     await service.handlePushWebhook({
       ref: 'refs/heads/main',
@@ -207,7 +207,7 @@ describe('handlePushWebhook auto-track wiring', () => {
       { registerQueue: jest.fn(() => ({ add: jest.fn(), on: jest.fn() })) } as any
     );
     jest.spyOn(service as any, 'enqueueAutoTrackedApiBuilds').mockResolvedValue(undefined);
-    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(undefined);
+    const staticFallback = jest.spyOn(service, 'handlePushForStaticEnv').mockResolvedValue(new Set());
 
     await service.handlePushWebhook({
       ref: 'refs/heads/main',
@@ -217,7 +217,10 @@ describe('handlePushWebhook auto-track wiring', () => {
       repository: { id: 42, full_name: 'org/repo' },
     } as any);
 
-    expect(staticFallback).not.toHaveBeenCalled();
+    // Static environments rooted at the pushed repo are always looked up, even when the repo also owns services.
+    expect(staticFallback).toHaveBeenCalledWith(
+      expect.objectContaining({ githubRepositoryId: 42, branchName: 'main', headCommit: 'sha123' })
+    );
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith(
       expect.objectContaining({ buildId: 7, sourceGithubRepositoryId: 42, sourceBranch: 'main' })
     );

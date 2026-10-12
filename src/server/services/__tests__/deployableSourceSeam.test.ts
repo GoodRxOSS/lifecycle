@@ -68,6 +68,7 @@ jest.mock('server/services/globalConfig', () => ({
 }));
 
 import DeployableService from '../deployable';
+import { ParsingError } from 'server/lib/yamlConfigParser';
 
 const makeService = () => {
   const db = { models: {}, services: { PullRequest: { updatePullRequestBranchName: jest.fn() } } };
@@ -209,6 +210,78 @@ describe('deployable source seam (PR vs API build)', () => {
       99,
       'dependency-push-sha',
       'main'
+    );
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha');
+  });
+
+  it('reads the root config at the newest accepted push to the root branch when the delivered source is a dependency', async () => {
+    const service = makeService();
+    (service as any).db.models.Repository = {
+      query: jest.fn(() => ({
+        findOne: jest.fn(() => ({
+          whereNull: jest.fn().mockResolvedValue({ githubRepositoryId: 99, fullName: 'org/dependency' }),
+        })),
+      })),
+    };
+    const repository = { githubRepositoryId: 42, fullName: 'org/repo' };
+    const pullRequest: any = {
+      branchName: 'feature-1',
+      repository,
+      build: { deploys: [], environment: { id: 5 } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    mockFetchLifecycleConfigByRepository.mockResolvedValue(null);
+
+    await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      1,
+      'uuid-1',
+      pullRequest,
+      { id: 1 },
+      99,
+      'dependency-push-sha',
+      'main',
+      99,
+      new Set(),
+      new Set(),
+      new Map(),
+      { '42:feature-1': 'root-accepted-sha', '99:main': 'dependency-push-sha' }
+    );
+
+    expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-accepted-sha');
+  });
+
+  it('keeps an explicitly pinned config SHA ahead of any accepted root floor', async () => {
+    const service = makeService();
+    const repository = { githubRepositoryId: 42, fullName: 'org/repo' };
+    mockRepositoryWhereNull.mockResolvedValue(repository);
+    mockFetchLifecycleConfigByRepository.mockResolvedValue(null);
+    const build: any = {
+      id: 9,
+      triggerType: 'api',
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-config-sha',
+      deploys: [],
+      environment: { id: 5 },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Set(),
+      new Set(),
+      new Map(),
+      { '42:main': 'accepted-later' }
     );
 
     expect(mockFetchLifecycleConfigByRepository).toHaveBeenCalledWith(repository, 'root-config-sha');
@@ -1113,6 +1186,7 @@ describe('deployable source seam (PR vs API build)', () => {
     expect(result).toEqual({
       deployables: [persistedDeployable],
       canReconcile: true,
+      configFailures: {},
       filterGithubRepositoryId: 42,
       unresolvedServiceNames: ['unresolved-api'],
       unresolvedRepositoryIds: [99],
@@ -1184,5 +1258,97 @@ describe('deployable source seam (PR vs API build)', () => {
 
     await expect((service as any).upsertDeployablesWithDatabase('uuid-9', 9, [])).resolves.toEqual([]);
     expect(query).toHaveBeenCalledTimes(4);
+  });
+
+  it('a service whose lifecycle.yaml does not parse fails alone, without protecting its repository or failing the import', async () => {
+    const service = makeService();
+    const rootRepository = { githubRepositoryId: 42, fullName: 'org/root' };
+    const brokenRepository = { githubRepositoryId: 99, fullName: 'org/broken' };
+    mockRepositoryWhereNull.mockResolvedValue(rootRepository);
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'broken-api', repository: 'org/broken', branch: 'main' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockRejectedValueOnce(new ParsingError('bad indentation of a mapping entry'));
+    mockResolveRepository.mockResolvedValueOnce(brokenRepository);
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [{ uuid: 'deploy-1', deployable: { name: 'broken-api' } }],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const unresolvedServiceNames = new Set<string>();
+    const unresolvedRepositoryIds = new Set<number>();
+    const configFailures = new Map<string, string>();
+
+    const result = await (service as any).updateOrCreateDeployableUsingYamlConfig(
+      new Map(),
+      9,
+      'uuid-9',
+      null,
+      build,
+      undefined,
+      null,
+      null,
+      undefined,
+      unresolvedServiceNames,
+      unresolvedRepositoryIds,
+      configFailures
+    );
+
+    expect(result).toBe(true);
+    expect(configFailures.get('broken-api')).toContain('bad indentation of a mapping entry');
+    expect(Array.from(unresolvedServiceNames)).toEqual(['broken-api']);
+    expect(Array.from(unresolvedRepositoryIds)).toEqual([]);
+    expect(mockResolveExactEnvironmentService).not.toHaveBeenCalled();
+  });
+
+  it('an error that is not a configuration error still fails the whole import', async () => {
+    const service = makeService();
+    mockRepositoryWhereNull.mockResolvedValue({ githubRepositoryId: 42, fullName: 'org/root' });
+    mockFetchLifecycleConfigByRepository
+      .mockResolvedValueOnce({
+        environment: {
+          defaultServices: [{ name: 'broken-api', repository: 'org/broken', branch: 'main' }],
+          optionalServices: [],
+        },
+        services: [],
+      })
+      .mockRejectedValueOnce(new Error('GitHub unavailable'));
+    mockResolveRepository.mockResolvedValueOnce({ githubRepositoryId: 99, fullName: 'org/broken' });
+    const build: any = {
+      id: 9,
+      githubRepositoryId: 42,
+      branchName: 'main',
+      configSha: 'root-sha',
+      deploys: [{ uuid: 'deploy-1', deployable: { name: 'broken-api' } }],
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const configFailures = new Map<string, string>();
+
+    await expect(
+      (service as any).updateOrCreateDeployableUsingYamlConfig(
+        new Map(),
+        9,
+        'uuid-9',
+        null,
+        build,
+        undefined,
+        null,
+        null,
+        undefined,
+        new Set<string>(),
+        new Set<number>(),
+        configFailures
+      )
+    ).rejects.toThrow('GitHub unavailable');
+
+    expect(configFailures.size).toBe(0);
   });
 });

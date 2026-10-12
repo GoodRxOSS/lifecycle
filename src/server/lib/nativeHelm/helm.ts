@@ -66,6 +66,8 @@ export type HelmSecretMutationGate = <T>(deploy: Deploy, action: () => Promise<T
 
 export interface HelmDeploymentExecutionOptions {
   secretMutationGate?: HelmSecretMutationGate;
+  /** Re-checks that the run still owns the row immediately before a provider submission it cannot fence. */
+  providerSubmissionGate?: (deploy: Deploy) => Promise<boolean>;
 }
 
 export interface JobResult {
@@ -466,7 +468,12 @@ export async function deployNativeHelm(deploy: Deploy, options: HelmDeploymentEx
   }
 }
 
-async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService, runUUID: string): Promise<void> {
+async function deployCodefreshHelm(
+  deploy: Deploy,
+  deployService: DeployService,
+  runUUID: string,
+  options: HelmDeploymentExecutionOptions = {}
+): Promise<void> {
   const deployable = requireDeployable(deploy);
   const { build } = deploy;
 
@@ -474,8 +481,16 @@ async function deployCodefreshHelm(deploy: Deploy, deployService: DeployService,
   const { getCodefreshPipelineIdFromOutput } = await import('server/lib/codefresh/utils');
   const { checkPipelineStatus } = await import('server/lib/codefresh');
 
-  const codefreshRunCommand = await generateCodefreshRunCommand(deploy);
-  const output = await shellPromise(codefreshRunCommand);
+  const { command: codefreshRunCommand, configPath } = await generateCodefreshRunCommand(deploy);
+  let output = '';
+  try {
+    if (options.providerSubmissionGate && !(await options.providerSubmissionGate(deploy))) {
+      throw new DeploymentSupersededError();
+    }
+    output = await shellPromise(codefreshRunCommand);
+  } finally {
+    if (configPath) await fs.promises.unlink(configPath).catch(() => undefined);
+  }
   const deployPipelineId = getCodefreshPipelineIdFromOutput(output);
 
   const statusMessage = 'Starting deployment via Helm';
@@ -545,7 +560,7 @@ export async function deployHelm(deploys: Deploy[], options: HelmDeploymentExecu
               if (useNative) {
                 await deployNativeHelm(deploy, options);
               } else {
-                await deployCodefreshHelm(deploy, deployService, runUUID);
+                await deployCodefreshHelm(deploy, deployService, runUUID, options);
               }
 
               await deployService.patchAndUpdateActivityFeed(

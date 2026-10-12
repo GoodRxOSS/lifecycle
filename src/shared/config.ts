@@ -110,6 +110,7 @@ export const QUEUE_NAMES = {
   RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   DEPLOYMENT_RECONCILIATION: `deployment_reconciliation_${JOB_VERSION}`,
+  SERVICE_RECONCILIATION: `service_reconciliation_${JOB_VERSION}`,
   GITHUB_DEPLOYMENT: `github_deployment_${JOB_VERSION}`,
   DEPLOY_CLEANUP: `deploy_cleanup_${JOB_VERSION}`,
   LABEL: `label_${JOB_VERSION}`,

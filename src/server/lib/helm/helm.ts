@@ -16,10 +16,10 @@
 
 import yaml from 'js-yaml';
 import fs from 'fs';
+import { nanoid } from 'nanoid';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { TMP_PATH } from 'shared/config';
-import { DeployStatus } from 'shared/constants';
 import { getLogger } from 'server/lib/logger';
 import { getBuildSource, resolveBuildSourceRepository } from 'server/lib/buildSource';
 import { shellPromise } from 'server/lib/shell';
@@ -270,7 +270,7 @@ export async function deployHelm(
  * @param {Deploy} deploy - The deploy object containing deployment details.
  * @returns {Promise<string>} A promise that resolves to the generated Codefresh command.
  */
-export async function generateCodefreshRunCommand(deploy: Deploy): Promise<string> {
+export async function generateCodefreshRunCommand(deploy: Deploy): Promise<{ command: string; configPath: string }> {
   const hasValueFiles = deploy?.deployable?.helm?.chart?.valueFiles?.length > 0;
   await deploy.$fetchGraph('build');
   const yamlContent = hasValueFiles
@@ -278,7 +278,8 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<strin
     : await generateHelmCodefreshYamlNoCheckout(deploy);
 
   const generatedYaml = yaml.dump(yamlContent);
-  const configPath = `${CODEFRESH_PATH}/helm-deploy-${deploy.uuid}.yaml`;
+  // One file per submission: a superseded run preparing the same service must not overwrite a newer run's YAML.
+  const configPath = `${CODEFRESH_PATH}/helm-deploy-${deploy.uuid}-${nanoid(10)}.yaml`;
 
   try {
     await fs.promises.mkdir(CODEFRESH_PATH, { recursive: true });
@@ -290,7 +291,7 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<strin
   const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
   const command = `codefresh run ${lifecycleDefaults.helmDeployPipeline} -b "${deploy.branchName}" -y ${configPath} -v ENV=lfc -d`;
 
-  return command;
+  return { command, configPath };
 }
 
 /**
@@ -422,7 +423,7 @@ export async function uninstallHelmReleases(build: Build) {
     const helmDeploys = deploys.filter((d) => d.deployable.helm && Object.keys(d.deployable.helm).length > 0);
 
     for (const deploy of helmDeploys) {
-      if (!deploy.active || deploy.status === DeployStatus.QUEUED) continue;
+      if (!deploy.active) continue;
 
       try {
         await shellPromise(`helm uninstall ${deploy.uuid} --namespace ${build.namespace}`);

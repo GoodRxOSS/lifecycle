@@ -24,6 +24,8 @@ import { CAPACITY_TYPE, DeployTypes } from 'shared/constants';
 
 import { Builder, Helm } from 'server/models/yaml';
 import GlobalConfigService from './globalConfig';
+import { ParsingError } from 'server/lib/yamlConfigParser';
+import { ValidationError } from 'server/lib/yamlConfigValidator';
 
 export type DeployableConfigSource = 'yaml';
 
@@ -44,6 +46,8 @@ export interface DeployableReconciliationResult {
   unresolvedServiceNames: string[];
   /** Repositories whose YAML could not be read; their deployables are never reaped as stale. */
   unresolvedRepositoryIds: number[];
+  /** Services whose own lifecycle.yaml failed to parse or validate, by service name. */
+  configFailures: Record<string, string>;
 }
 
 export interface DeployableAttributes {
@@ -444,7 +448,9 @@ export default class DeployableService extends BaseService {
     sourceBranch?: string | null,
     sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId,
     unresolvedServiceNames: Set<string> = new Set(),
-    unresolvedRepositoryIds: Set<number> = new Set()
+    unresolvedRepositoryIds: Set<number> = new Set(),
+    configFailures: Map<string, string> = new Map(),
+    acceptedSourcePins?: Record<string, string>
   ): Promise<boolean> {
     try {
       let sourceRepository: Repository | null = null;
@@ -571,7 +577,10 @@ export default class DeployableService extends BaseService {
                   }
                   if (filterGithubRepositoryId != null && sourceBranch != null) targetAttributionResolved = true;
 
-                  const dependencyConfigRef = sourceRefTargetsDependency ? sourceRef : branchName;
+                  // A full pass reads each service's YAML at the same accepted revision its image is built from.
+                  const dependencyConfigRef = sourceRefTargetsDependency
+                    ? sourceRef
+                    : acceptedSourcePins?.[`${repository.githubRepositoryId}:${branchName}`] ?? branchName;
                   dependencyYamlConfig = await YamlService.fetchLifecycleConfigByRepository(
                     repository,
                     dependencyConfigRef
@@ -641,6 +650,12 @@ export default class DeployableService extends BaseService {
                   service: yamlEnvService.name,
                   error,
                 }).error('Deployable: create/update from yaml failed');
+                // A broken service lifecycle.yaml fails that service alone; only the root config fails the environment.
+                if (error instanceof ParsingError || error instanceof ValidationError) {
+                  configFailures.set(yamlEnvService.name, (error as Error).message);
+                  markUnresolved(yamlEnvService.name, undefined);
+                  return;
+                }
                 throw error;
               }
             })
@@ -671,7 +686,12 @@ export default class DeployableService extends BaseService {
         rootBaseConfigRef != null
       ) {
         const sourceRefTargetsRoot = sourceRef != null && matchesDeliveredSource(sourceRepository, rootBranch);
-        const rootConfigRef = sourceRefTargetsRoot ? sourceRef : rootBaseConfigRef;
+        // A branch-named root ref honours the newest accepted push to that branch; a pinned config SHA stays as is.
+        const rootPin =
+          rootBaseConfigRef === rootBranch
+            ? acceptedSourcePins?.[`${sourceRepository.githubRepositoryId}:${rootBranch}`]
+            : undefined;
+        const rootConfigRef = sourceRefTargetsRoot ? sourceRef : rootPin ?? rootBaseConfigRef;
         const yamlConfig: YamlService.LifecycleConfig = await YamlService.fetchLifecycleConfigByRepository(
           sourceRepository,
           rootConfigRef
@@ -770,7 +790,8 @@ export default class DeployableService extends BaseService {
     filterGithubRepositoryId?: number,
     sourceRef?: string | null,
     sourceBranch?: string | null,
-    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId
+    sourceGithubRepositoryId: number | null | undefined = filterGithubRepositoryId,
+    acceptedSourcePins?: Record<string, string>
   ): Promise<DeployableReconciliationResult> {
     // We are going to ingest all the database and yaml configuration and process in the memory before writes into the database
     let deployables: Deployable[] = [];
@@ -783,6 +804,7 @@ export default class DeployableService extends BaseService {
     const deployableServices: Map<string, DeployableAttributes> = new Map<string, DeployableAttributes>();
     const unresolvedServiceNames = new Set<string>();
     const unresolvedRepositoryIds = new Set<number>();
+    const configFailures = new Map<string, string>();
     try {
       if (pullRequest != null || hasBuildSource) {
         if (pullRequest != null && pullRequest.branchName == null) {
@@ -801,7 +823,9 @@ export default class DeployableService extends BaseService {
           sourceBranch,
           sourceGithubRepositoryId,
           unresolvedServiceNames,
-          unresolvedRepositoryIds
+          unresolvedRepositoryIds,
+          configFailures,
+          acceptedSourcePins
         );
 
         // Finally, Upsert the deployables into the database
@@ -828,6 +852,7 @@ export default class DeployableService extends BaseService {
       filterGithubRepositoryId: filterGithubRepositoryId ?? null,
       unresolvedServiceNames: Array.from(unresolvedServiceNames),
       unresolvedRepositoryIds: Array.from(unresolvedRepositoryIds),
+      configFailures: Object.fromEntries(configFailures),
       reconcileEligibleDeployables: Array.from(deployableServices.values())
         .filter((deployable) => deployable.reconcileEligible)
         .map((deployable) => ({

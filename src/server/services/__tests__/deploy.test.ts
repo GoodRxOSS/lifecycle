@@ -732,15 +732,10 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       expect(mockBuildWithNative).not.toHaveBeenCalled();
     });
 
-    test('generation check uses buildId before the Build relation is loaded', async () => {
-      const currentBuildWhere = jest.fn().mockResolvedValue({ id: 91 });
-      mockDb.models.Build = {
-        query: jest.fn(() => ({
-          findOne: jest.fn(() => ({
-            whereNull: jest.fn(() => ({ where: currentBuildWhere })),
-          })),
-        })),
-      };
+    test('generation check fences on the Deploy row and the environment block state before the Build relation is loaded', async () => {
+      const authoritySelect = jest.fn().mockResolvedValue({ id: 91, deployEnabled: true });
+      const authorityFindById = jest.fn(() => ({ select: authoritySelect }));
+      mockDb.models.Build = { query: jest.fn(() => ({ findById: authorityFindById })) };
       const patchSpy = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
       const deploy = {
         id: 17,
@@ -755,7 +750,8 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         deployService.buildImage(deploy as any, 0, 'run-c', undefined, undefined, undefined, 7)
       ).resolves.toBe(true);
 
-      expect(currentBuildWhere).toHaveBeenCalledWith('desiredGeneration', 7);
+      expect(currentDeployFindOne).toHaveBeenCalledWith({ id: 17, runUUID: 'run-c', desiredGeneration: 7 });
+      expect(authorityFindById).toHaveBeenCalledWith(91);
       expect(deploy.$fetchGraph).toHaveBeenCalled();
       expect(patchSpy).toHaveBeenCalledWith(
         deploy,
@@ -787,6 +783,15 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
         dockerImage: 'stale-image',
       });
       expect(deploy.$fetchGraph).not.toHaveBeenCalled();
+    });
+
+    test('patchDeployForRun fences on the generation it was handed', async () => {
+      const deploy = { id: 17, uuid: 'sample-service-build', runUUID: 'run-1' };
+
+      await deployService['patchDeployForRun'](deploy as any, 'run-1', { status: DeployStatus.DEPLOYING }, 6);
+
+      expect(conditionalDeployWhere).toHaveBeenCalledWith({ id: 17, runUUID: 'run-1', desiredGeneration: 6 });
+      expect(conditionalDeployPatch).toHaveBeenCalledWith({ status: DeployStatus.DEPLOYING });
     });
 
     test('recordDeployFailure writes a terminal status with the original error message', async () => {
@@ -1785,10 +1790,12 @@ describe('DeployService uncovered public behavior', () => {
     };
     const buildQuery: any = {
       findOne: jest.fn(() => buildQuery),
+      findById: jest.fn(() => buildQuery),
+      select: jest.fn(() => buildQuery),
       whereNull: jest.fn(() => buildQuery),
       where: jest.fn(() => buildQuery),
       then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
-        Promise.resolve({ id: 91 }).then(resolve, reject),
+        Promise.resolve({ id: 91, deployEnabled: true }).then(resolve, reject),
     };
     const githubDeploymentAdd = jest.fn().mockResolvedValue(undefined);
     const updatePullRequestActivityStream = jest.fn().mockResolvedValue(undefined);
@@ -2205,6 +2212,80 @@ describe('DeployService uncovered public behavior', () => {
     expect(mockCliDeploy).not.toHaveBeenCalled();
   });
 
+  test.each([DeployStatus.QUEUED, DeployStatus.ERROR])(
+    'deployAurora keeps a restored endpoint from %s once the check finds its database',
+    async (status) => {
+      const { service, deployPatch } = serviceHarness();
+      mockTaggingGetResources.mockResolvedValue({
+        ResourceTagMappingList: [{ ResourceARN: 'arn:aws:rds:us-west-2:123:db:instance-1' }],
+      });
+      mockRdsDescribeDBInstances.mockResolvedValue({
+        DBInstances: [{ Endpoint: { Address: 'database-env.cluster-abc.us-west-2.rds.amazonaws.com' } }],
+      });
+      const deploy: any = {
+        id: 1,
+        uuid: 'database-env',
+        status,
+        cname: 'database-env.cluster-abc.us-west-2.rds.amazonaws.com',
+        build: { uuid: 'env' },
+        deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+        reload: jest.fn().mockResolvedValue(undefined),
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+      expect(mockCliDeploy).not.toHaveBeenCalled();
+      expect(deployPatch).toHaveBeenCalledTimes(1);
+      expect(deployPatch).toHaveBeenCalledWith({
+        cname: 'database-env.cluster-abc.us-west-2.rds.amazonaws.com',
+        status: DeployStatus.BUILT,
+      });
+    }
+  );
+
+  test('deployAurora keeps a restored endpoint when the database check fails', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockTaggingGetResources.mockRejectedValue(new Error('throttled'));
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.QUEUED,
+      cname: 'database-env.cluster-abc.us-west-2.rds.amazonaws.com',
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockCliDeploy).not.toHaveBeenCalled();
+    expect(deployPatch).toHaveBeenCalledTimes(1);
+    expect(deployPatch).toHaveBeenCalledWith({ status: DeployStatus.BUILT });
+  });
+
+  test('deployAurora restores again when its database is gone, as after a teardown that kept the row', async () => {
+    const { service, deployPatch } = serviceHarness();
+    mockTaggingGetResources.mockResolvedValue({ ResourceTagMappingList: [] });
+    const deploy: any = {
+      id: 1,
+      uuid: 'database-env',
+      status: DeployStatus.QUEUED,
+      cname: 'database-env.cluster-abc.us-west-2.rds.amazonaws.com',
+      build: { uuid: 'env' },
+      deployable: { name: 'database', type: DeployTypes.AURORA_RESTORE },
+      reload: jest.fn().mockResolvedValue(undefined),
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(service.deployAurora(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockCliDeploy).toHaveBeenCalledWith(deploy);
+    expect(deployPatch).toHaveBeenCalledWith(expect.objectContaining({ status: DeployStatus.BUILDING }));
+    expect(deployPatch).toHaveBeenLastCalledWith({ status: DeployStatus.BUILT });
+  });
+
   test.each([
     DeployStatus.QUEUED,
     DeployStatus.BUILDING,
@@ -2366,7 +2447,7 @@ describe('DeployService uncovered public behavior', () => {
     await expect(service.deployCLI({ deployable: null } as any, 'run-4')).resolves.toBeUndefined();
 
     expect(aurora).toHaveBeenCalledWith(auroraDeploy, 'run-1');
-    expect(codefresh).toHaveBeenCalledWith(codefreshDeployable, 'run-2', 'sha', 42, 'main');
+    expect(codefresh).toHaveBeenCalledWith(codefreshDeployable, 'run-2', 'sha', 42, 'main', undefined, undefined);
   });
 
   test('hostForDeployableDeploy and acmARNForDeploy expose the stable routing fallbacks', () => {
@@ -2576,6 +2657,7 @@ describe('DeployService uncovered public behavior', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       undefined
     );
   });
@@ -2767,6 +2849,18 @@ describe('DeployService uncovered public behavior', () => {
 
     await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
 
+    expect(mockCodefreshDeploy).not.toHaveBeenCalled();
+    expect(mockWaitForCodefresh).not.toHaveBeenCalled();
+  });
+
+  test('deployCodefresh stops before pipeline invocation when the deploying fence finds the row taken', async () => {
+    const { service, deployPatch } = serviceHarness();
+    deployPatch.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
+
+    expect(deployPatch).toHaveBeenCalledTimes(2);
     expect(mockCodefreshDeploy).not.toHaveBeenCalled();
     expect(mockWaitForCodefresh).not.toHaveBeenCalled();
   });

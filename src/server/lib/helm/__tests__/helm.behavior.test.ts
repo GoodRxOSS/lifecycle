@@ -614,21 +614,26 @@ describe('Codefresh Helm YAML generation', () => {
     const deploy = makePublicDeploy();
     deploy.deployable.helm.chart.valueFiles = ['helm/preview.yaml'];
 
-    const command = await generateCodefreshRunCommand(deploy);
+    const { command, configPath } = await generateCodefreshRunCommand(deploy);
 
     expect(deploy.$fetchGraph).toHaveBeenCalledWith('build');
     expect(mockMkdir).toHaveBeenCalledWith('/tmp/lifecycle/codefresh', { recursive: true });
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      '/tmp/lifecycle/codefresh/helm-deploy-Preview-ABC.yaml',
-      expect.any(String),
-      'utf8'
-    );
+    expect(configPath).toMatch(/^\/tmp\/lifecycle\/codefresh\/helm-deploy-Preview-ABC-[\w-]{10}\.yaml$/);
+    expect(mockWriteFile).toHaveBeenCalledWith(configPath, expect.any(String), 'utf8');
     const writtenYaml = yaml.load(mockWriteFile.mock.calls[0][1] as string) as any;
     expect(writtenYaml.steps.clone.type).toBe('parallel');
     expect(writtenYaml.steps.deploy.arguments.custom_value_files).toEqual(['helm/preview.yaml']);
-    expect(command).toBe(
-      'codefresh run goodrx/helm-deploy -b "feature/helm-preview" -y /tmp/lifecycle/codefresh/helm-deploy-Preview-ABC.yaml -v ENV=lfc -d'
-    );
+    expect(command).toBe(`codefresh run goodrx/helm-deploy -b "feature/helm-preview" -y ${configPath} -v ENV=lfc -d`);
+  });
+
+  test('writes a separate file for every submission of the same service', async () => {
+    const deploy = makePublicDeploy();
+
+    const first = await generateCodefreshRunCommand(deploy);
+    const second = await generateCodefreshRunCommand(deploy);
+
+    expect(first.configPath).not.toBe(second.configPath);
+    expect(mockWriteFile).toHaveBeenCalledTimes(2);
   });
 
   test('logs and preserves a YAML write failure without constructing a command', async () => {
@@ -653,8 +658,9 @@ describe('image metadata and teardown', () => {
     expect(mockRandomAlphanumeric).toHaveBeenCalledWith(4);
   });
 
-  test('uninstalls only active, non-queued Helm releases and records successful cleanup', async () => {
+  test('uninstalls every active Helm release, also one queued for a new deploy, and records the cleanup', async () => {
     const successfulPatch = jest.fn().mockResolvedValue(undefined);
+    const queuedPatch = jest.fn().mockResolvedValue(undefined);
     const skippedPatch = jest.fn().mockResolvedValue(undefined);
     const activeDeploy = {
       uuid: 'active-release',
@@ -675,7 +681,7 @@ describe('image metadata and teardown', () => {
       active: true,
       status: 'queued',
       deployable: { helm: { chart: { name: 'public-chart' } } },
-      $query: jest.fn(() => ({ patch: skippedPatch })),
+      $query: jest.fn(() => ({ patch: queuedPatch })),
     };
     const nonHelmDeploy = {
       uuid: 'not-a-helm-release',
@@ -690,9 +696,11 @@ describe('image metadata and teardown', () => {
 
     await uninstallHelmReleases({ id: 42, namespace: 'env-build-123' } as any);
 
-    expect(mockShellPromise).toHaveBeenCalledTimes(1);
+    expect(mockShellPromise).toHaveBeenCalledTimes(2);
     expect(mockShellPromise).toHaveBeenCalledWith('helm uninstall active-release --namespace env-build-123');
+    expect(mockShellPromise).toHaveBeenCalledWith('helm uninstall queued-release --namespace env-build-123');
     expect(successfulPatch).toHaveBeenCalledWith({ statusMessage: 'Uninstalled via Helm' });
+    expect(queuedPatch).toHaveBeenCalledWith({ statusMessage: 'Uninstalled via Helm' });
     expect(skippedPatch).not.toHaveBeenCalled();
     expect(mockLoggerDebug).toHaveBeenCalledWith('Helm: releases uninstalled');
   });

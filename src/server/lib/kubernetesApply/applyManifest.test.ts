@@ -16,6 +16,10 @@
 
 var mockCreateNamespacedConfigMap: jest.Mock;
 var mockCreateNamespacedJob: jest.Mock;
+var mockListNamespacedJob: jest.Mock;
+var mockDeleteNamespacedJob: jest.Mock;
+var mockListNamespacedPod: jest.Mock;
+var mockDeleteNamespacedPod: jest.Mock;
 var mockGetAllConfigs: jest.Mock;
 var mockWaitForJobAndGetLogs: jest.Mock;
 var mockGetLogger: jest.Mock;
@@ -26,11 +30,19 @@ jest.mock('@kubernetes/client-node', () => {
   const actual = jest.requireActual('@kubernetes/client-node');
   mockCreateNamespacedConfigMap = jest.fn();
   mockCreateNamespacedJob = jest.fn();
+  mockListNamespacedJob = jest.fn();
+  mockDeleteNamespacedJob = jest.fn();
+  mockListNamespacedPod = jest.fn();
+  mockDeleteNamespacedPod = jest.fn();
   const coreApi = {
     createNamespacedConfigMap: (...args: unknown[]) => mockCreateNamespacedConfigMap(...args),
+    listNamespacedPod: (...args: unknown[]) => mockListNamespacedPod(...args),
+    deleteNamespacedPod: (...args: unknown[]) => mockDeleteNamespacedPod(...args),
   };
   const batchApi = {
     createNamespacedJob: (...args: unknown[]) => mockCreateNamespacedJob(...args),
+    listNamespacedJob: (...args: unknown[]) => mockListNamespacedJob(...args),
+    deleteNamespacedJob: (...args: unknown[]) => mockDeleteNamespacedJob(...args),
   };
 
   return {
@@ -71,7 +83,12 @@ jest.mock('server/lib/logger', () => {
 });
 
 import { HttpError } from '@kubernetes/client-node';
-import { createKubernetesApplyJob, getKubernetesApplyJobName, monitorKubernetesJob } from './applyManifest';
+import {
+  createKubernetesApplyJob,
+  getKubernetesApplyJobName,
+  listUnfinishedDeployJobs,
+  monitorKubernetesJob,
+} from './applyManifest';
 
 function deploy(overrides: Record<string, unknown> = {}) {
   return {
@@ -281,5 +298,76 @@ describe('Kubernetes apply jobs', () => {
     await expect(monitorKubernetesJob('apply-job', 'env-build')).rejects.toBe(failure);
     expect(mockGetLogger).toHaveBeenCalledWith({ error: failure });
     expect(mockError).toHaveBeenCalledWith('Job: monitor failed name=apply-job');
+  });
+});
+
+describe('listUnfinishedDeployJobs', () => {
+  const applySelector = 'app=lifecycle-deploy,type=kubernetes-apply,deploy_uuid=catalog-deploy-uuid';
+  const helmSelector = 'app.kubernetes.io/name=native-helm,deploy-id=37';
+  const job = (name: string, condition?: 'Complete' | 'Failed') => ({
+    metadata: { name },
+    status: condition ? { conditions: [{ type: condition, status: 'True' }] } : { active: 1 },
+  });
+  const podsOf = (phase: string, extra: Record<string, unknown> = {}) => ({
+    body: { items: [{ metadata: { name: 'pod', ...extra }, status: { phase } }] },
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockListNamespacedJob.mockResolvedValue({ body: { items: [] } });
+    mockListNamespacedPod.mockResolvedValue({ body: { items: [] } });
+  });
+
+  it('reports apply and native Helm jobs of the service that can still write, and never deletes anything', async () => {
+    mockListNamespacedJob.mockImplementation(async (_namespace: string, ...args: unknown[]) =>
+      args[4] === applySelector
+        ? {
+            body: {
+              items: [
+                job('apply-running'),
+                job('apply-done', 'Complete'),
+                job('apply-failed', 'Failed'),
+                job('apply-deadline', 'Failed'),
+              ],
+            },
+          }
+        : { body: { items: [job('helm-running')] } }
+    );
+    mockListNamespacedPod.mockImplementation(async (_namespace: string, ...args: unknown[]) =>
+      args[4] === 'job-name=apply-deadline'
+        ? podsOf('Running', { deletionTimestamp: '2026-10-11T00:00:00Z' })
+        : podsOf('Failed')
+    );
+
+    await expect(listUnfinishedDeployJobs(deploy(), 'env-build')).resolves.toEqual([
+      'apply-running',
+      'apply-deadline',
+      'helm-running',
+    ]);
+    expect(mockListNamespacedJob).toHaveBeenCalledWith(
+      'env-build',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      applySelector
+    );
+    expect(mockListNamespacedJob).toHaveBeenCalledWith(
+      'env-build',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      helmSelector
+    );
+    expect(mockDeleteNamespacedJob).not.toHaveBeenCalled();
+    expect(mockDeleteNamespacedPod).not.toHaveBeenCalled();
+  });
+
+  it('reports nothing once every earlier job is terminal and its pods have stopped', async () => {
+    mockListNamespacedJob.mockResolvedValue({ body: { items: [job('old', 'Failed'), job('older', 'Complete')] } });
+    mockListNamespacedPod.mockResolvedValue(podsOf('Succeeded'));
+
+    await expect(listUnfinishedDeployJobs(deploy(), 'env-build')).resolves.toEqual([]);
   });
 });
