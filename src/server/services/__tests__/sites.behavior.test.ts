@@ -943,6 +943,55 @@ describe('SitesService behavior', () => {
     });
   });
 
+  describe('renameSite', () => {
+    it('trims and persists the name without changing the id, url, or revisions', async () => {
+      addSite(state, { name: 'old' });
+
+      const result = await service.renameSite('site-1', '  New name  ', principal);
+
+      expect(result.name).toBe('New name');
+      expect(result.id).toBe('site-1');
+      expect(state.sites[0].name).toBe('New name');
+      expect(state.sites[0].accessRevision).toBe(1);
+      expect(mockAudit).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          event: 'sites.renamed',
+          meta: expect.objectContaining({ siteId: 'site-1', from: 'old', to: 'New name' }),
+        })
+      );
+    });
+
+    it('is a no-op without an audit entry when the name is unchanged', async () => {
+      addSite(state, { name: 'same' });
+      mockAudit.mockClear();
+
+      await expect(service.renameSite('site-1', ' same ', principal)).resolves.toMatchObject({ name: 'same' });
+      expect(mockAudit).not.toHaveBeenCalled();
+    });
+
+    it('rejects empty, blank, and oversized names', async () => {
+      addSite(state);
+
+      for (const name of ['', '   ', 'x'.repeat(256)]) {
+        await expect(service.renameSite('site-1', name, principal)).rejects.toMatchObject({ statusCode: 400 });
+      }
+    });
+
+    it('rejects a stale access revision and a non-owner', async () => {
+      addSite(state, { name: 'old' });
+      const stranger = { ...principal, userId: 'stranger', actor: 'stranger' } as Principal;
+
+      await expect(service.renameSite('site-1', 'new', principal, 99)).rejects.toMatchObject({ httpStatus: 409 });
+      await expect(service.renameSite('site-1', 'new', stranger)).rejects.toMatchObject({ httpStatus: 403 });
+      expect(state.sites[0].name).toBe('old');
+    });
+
+    it('returns not found for a missing site', async () => {
+      await expect(service.renameSite('missing', 'new', principal)).rejects.toMatchObject({ statusCode: 404 });
+    });
+  });
+
   describe('deleteSite', () => {
     it('tombstones the site and keeps its content restorable', async () => {
       addSite(state);

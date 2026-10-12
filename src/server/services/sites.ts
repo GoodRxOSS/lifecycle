@@ -73,6 +73,8 @@ export type CreateOrReplaceSiteInput = {
   expectedContentRevision?: number;
 };
 
+export const SITE_NAME_MAX_LENGTH = 255;
+
 export const SITE_LIST_SORTS = ['updated', 'created', 'name'] as const;
 export type SiteListSort = (typeof SITE_LIST_SORTS)[number];
 export type SiteListOrder = 'asc' | 'desc';
@@ -597,6 +599,32 @@ export default class SitesService extends Service {
       const updated = await site.$query(trx).patchAndFetch({
         visibility,
         accessRevision: site.accessRevision + 1,
+      });
+      return this.serialize(updated as Site, config, principal);
+    });
+  }
+
+  async renameSite(
+    siteId: string,
+    name: string,
+    principal: Principal,
+    expectedAccessRevision?: number
+  ): Promise<SiteResponse> {
+    await assertSitesPrincipal(principal, 'write');
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed || trimmed.length > SITE_NAME_MAX_LENGTH) {
+      throw new SitesServiceError(`name must be 1-${SITE_NAME_MAX_LENGTH} characters.`, 400);
+    }
+    return this.db.models.Site.transact(async (trx) => {
+      const { site, config } = await this.getActiveSite(siteId, trx);
+      await assertSitesPrincipal(principal, 'write', trx);
+      assertSiteOwner(site, principal);
+      this.checkRevision(site, expectedAccessRevision);
+      if (site.name === trimmed) return this.serialize(site, config, principal);
+      await this.audit(trx, 'renamed', siteId, principal, { from: site.name, to: trimmed });
+      const updated = await site.$query(trx).patchAndFetch({
+        name: trimmed,
+        updatedBy: principal.identity?.email || null,
       });
       return this.serialize(updated as Site, config, principal);
     });

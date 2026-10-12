@@ -14,6 +14,7 @@ const mockExtendSite = jest.fn();
 const mockRestoreSite = jest.fn();
 const mockGetCapabilities = jest.fn();
 const mockSetVisibility = jest.fn();
+const mockRenameSite = jest.fn();
 const mockLogger = { error: jest.fn(), info: jest.fn() };
 
 jest.mock('server/lib/principal', () => ({
@@ -48,6 +49,7 @@ jest.mock('server/services/sites', () => {
     default: jest.fn(() => ({
       getCapabilities: (...args: unknown[]) => mockGetCapabilities(...args),
       setVisibility: (...args: unknown[]) => mockSetVisibility(...args),
+      renameSite: (...args: unknown[]) => mockRenameSite(...args),
       listSites: (...args: unknown[]) => mockListSites(...args),
       createSite: (...args: unknown[]) => mockCreateSite(...args),
       getSite: (...args: unknown[]) => mockGetSite(...args),
@@ -61,7 +63,7 @@ jest.mock('server/services/sites', () => {
 
 import { SitesServiceError } from 'server/services/sites';
 import { GET as listSites, POST as createSite } from './route';
-import { DELETE as deleteSite, GET as getSite } from './[siteId]/route';
+import { DELETE as deleteSite, GET as getSite, PATCH as renameSite } from './[siteId]/route';
 import { PUT as replaceContent } from './[siteId]/content/route';
 import { POST as extendSite } from './[siteId]/extend/route';
 import { POST as restoreSite } from './[siteId]/restore/route';
@@ -168,6 +170,7 @@ describe('hosted sites API routes', () => {
       upload: { maxUploadBytes: 1024, maxExtractedBytes: 1024, maxFiles: 10, allowedExtensions: ['html', 'zip'] },
     });
     mockSetVisibility.mockResolvedValue(site);
+    mockRenameSite.mockResolvedValue({ ...site, name: 'Renamed' });
     mockCreateSite.mockResolvedValue(site);
     mockGetSite.mockResolvedValue(site);
     mockDeleteSite.mockResolvedValue({ ...site, deletedAt: '2026-08-27T00:00:00.000Z' });
@@ -439,6 +442,37 @@ describe('hosted sites API routes', () => {
     );
     expect(res.status).toBe(200);
     expect(mockSetVisibility).toHaveBeenCalledWith('docs-abc123', 'private', sessionPrincipal, 7);
+  });
+  it.each([{}, { name: 123 }, { name: 'x', ownerSubject: 'attacker' }, { name: 'x', expectedAccessRevision: 0 }])(
+    'rejects invalid rename body %p before the service',
+    async (body) => {
+      const res = await renameSite(
+        request('http://localhost/api/v2/sites/docs-abc123', { method: 'PATCH', body }),
+        context()
+      );
+      expect(res.status).toBe(400);
+      expect(mockRenameSite).not.toHaveBeenCalled();
+    }
+  );
+  it('renames a site with the optional revision and the verified principal', async () => {
+    const res = await renameSite(
+      request('http://localhost/api/v2/sites/docs-abc123', {
+        method: 'PATCH',
+        body: { name: 'Renamed', expectedAccessRevision: 4 },
+      }),
+      context()
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).data.site.name).toBe('Renamed');
+    expect(mockRenameSite).toHaveBeenCalledWith('docs-abc123', 'Renamed', sessionPrincipal, 4);
+  });
+  it('maps a rename service failure through the sites error contract', async () => {
+    mockRenameSite.mockRejectedValueOnce(new SitesServiceError('name must be 1-255 characters.', 400));
+    const res = await renameSite(
+      request('http://localhost/api/v2/sites/docs-abc123', { method: 'PATCH', body: { name: ' ' } }),
+      context()
+    );
+    expect(res.status).toBe(400);
   });
   it('passes deletion revision and rejects malformed revisions', async () => {
     expect(
