@@ -214,7 +214,7 @@ import BuildService, {
   assertIdempotentReplayAllowed,
   assertEnvironmentDestroyAllowed,
 } from '../build';
-import { BuildKind, BuildStatus, DeployStatus, DeployTypes } from 'shared/constants';
+import { BuildKind, BuildStatus, DeployStatus, DeployTypes, PullRequestStatus } from 'shared/constants';
 import * as github from 'server/lib/github';
 import { ingressBannerSnippet } from 'server/lib/helm/utils';
 import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
@@ -1764,6 +1764,102 @@ describe('BuildService deployment reconciliation', () => {
       head: 'commit-d',
     });
   });
+
+  test.each([
+    [
+      'the branch head lookup fails',
+      () => (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('rate limited')),
+    ],
+    [
+      'the commit comparison fails',
+      () => {
+        (github.getSHAForBranch as jest.Mock).mockResolvedValue('commit-d');
+        (github.compareCommits as jest.Mock).mockRejectedValue(new Error('rate limited'));
+      },
+    ],
+  ])('keeps the accepted SHA as the floor when %s', async (_name, arrange) => {
+    const repositoryQuery: any = {
+      findOne: jest.fn(() => repositoryQuery),
+      whereNull: jest.fn().mockResolvedValue({ fullName: 'org/service' }),
+    };
+    const service = new BuildService(
+      { models: { Repository: { query: jest.fn(() => repositoryQuery) } } } as any,
+      {} as any,
+      {} as any,
+      queueManager() as any
+    );
+    arrange();
+
+    await expect(
+      (service as any).resolveCurrentSourceRef({
+        githubRepositoryId: 42,
+        sourceGithubRepositoryId: 42,
+        sourceBranch: 'main',
+        sourceRef: 'commit-c',
+      })
+    ).resolves.toBe('commit-c');
+  });
+
+  test('a rollout error of a current run is recorded on its rows and the scope still returns its summary', async () => {
+    const executionError = new Error('kubectl apply exited 1');
+    const service = new BuildService({ models: {} } as any, {} as any, {} as any, queueManager() as any);
+    const build = createBuild({ id: 1, runUUID: 'run-current', namespace: 'env-sample' });
+    jest.spyOn(service, 'buildImages').mockResolvedValue(undefined as any);
+    jest.spyOn(service, 'deployCLIServices').mockResolvedValue(true);
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    jest.spyOn(service as any, 'publishDerivedBuildStatus').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'generateAndApplyManifests').mockRejectedValue(executionError);
+    const recordFailure = jest.spyOn(service as any, 'recordFailureOnOwnedDeploys').mockResolvedValue(undefined);
+    const summary = { deployed: false };
+    jest.spyOn(service as any, 'summarizeIntentDeploys').mockResolvedValue(summary);
+
+    await expect(
+      (service as any).executeDeploymentScope(
+        {
+          build,
+          runUUID: 'run-current',
+          githubRepositoryId: 100,
+          sourceGithubRepositoryId: 100,
+          sourceRef: 'commit-a',
+          sourceBranch: 'main',
+        },
+        7
+      )
+    ).resolves.toBe(summary);
+
+    expect(recordFailure).toHaveBeenCalledWith(1, 'run-current', 7, executionError, 'Deployment failed.');
+  });
+
+  test('a rollout error of a run that lost its rows meanwhile is dropped without recording anything', async () => {
+    const service = new BuildService({ models: {} } as any, {} as any, {} as any, queueManager() as any);
+    const build = createBuild({ id: 1, runUUID: 'run-old', namespace: 'env-sample' });
+    jest.spyOn(service, 'buildImages').mockResolvedValue(undefined as any);
+    jest.spyOn(service, 'deployCLIServices').mockResolvedValue(true);
+    jest
+      .spyOn(service as any, 'isDeploymentRunCurrent')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    jest.spyOn(service as any, 'publishDerivedBuildStatus').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'generateAndApplyManifests').mockRejectedValue(new Error('kubectl apply exited 1'));
+    const recordFailure = jest.spyOn(service as any, 'recordFailureOnOwnedDeploys').mockResolvedValue(undefined);
+
+    await expect(
+      (service as any).executeDeploymentScope(
+        {
+          build,
+          runUUID: 'run-old',
+          githubRepositoryId: 100,
+          sourceGithubRepositoryId: 100,
+          sourceRef: 'a',
+          sourceBranch: 'main',
+        },
+        7
+      )
+    ).resolves.toBeNull();
+
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
 });
 
 describe('idempotency digest + replay authorization (D12)', () => {
@@ -2103,6 +2199,20 @@ describe('BuildService focused changed-line coverage', () => {
     const build = { id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) };
 
     await expect(service.deployCLIServices(build as any, 'run-c', 42, 'sha-c', 'main')).resolves.toBe(true);
+  });
+
+  test('a CLI deploy that reports failure is recorded on its row as a phase failure', async () => {
+    const deploy = { id: 5, uuid: 'aurora-1', active: true, deployable: { type: DeployTypes.AURORA_RESTORE } };
+    mockDeployQuery.mockReturnValue(deployQuery([deploy]));
+    const deployCLI = jest.fn().mockResolvedValue(false);
+    const service = serviceWith({ services: { Deploy: { deployCLI } } });
+    const recordPhaseFailure = jest.spyOn(service as any, 'recordPhaseFailure').mockResolvedValue(undefined);
+    const build = { id: 4, $fetchGraph: jest.fn().mockResolvedValue(undefined) };
+
+    await expect(service.deployCLIServices(build as any, 'run-c', 42, 'sha-c', 'main', 42, 3)).resolves.toBe(false);
+
+    expect(deployCLI).toHaveBeenCalledWith(deploy, 'run-c', 'sha-c', 42, 'main', undefined, 3);
+    expect(recordPhaseFailure).toHaveBeenCalledWith(deploy, 'run-c', DeployStatus.ERROR, 'CLI deploy failed.', 3);
   });
 
   test('an aborted rollout does not fail a service whose prerequisite is outside the run', async () => {
@@ -5515,6 +5625,262 @@ describe('BuildService uncovered public behavior', () => {
 
     expect(BuildModel.query).toHaveBeenCalledTimes(1);
     expect(mockQueueAdd).not.toHaveBeenCalled();
+  });
+
+  test('claimDeploymentIntent ignores a generation that was replaced or already finished, and adopts only a live one', async () => {
+    const refs = {
+      'source:1:main': {
+        type: 'source',
+        requestId: 'newer',
+        target: 'repository',
+        githubRepositoryId: 1,
+        branch: 'main',
+        sha: 'b',
+        gen: 4,
+      },
+      all: { type: 'all', requestId: 'done', gen: 2, observedGen: 2 },
+    };
+    const buildQuery = lookupQuery({ id: 7, acceptedRefs: refs });
+    const service = serviceWith({ models: { Build: { query: jest.fn(() => buildQuery) } } });
+    const adopt = jest.spyOn(service as any, 'adoptDeploysForIntent').mockResolvedValue(undefined);
+
+    await expect((service as any).claimDeploymentIntent(7, 3)).resolves.toBeNull();
+    await expect((service as any).claimDeploymentIntent(7, 2)).resolves.toBeNull();
+    expect(adopt).not.toHaveBeenCalled();
+    await expect((service as any).claimDeploymentIntent(7, 4)).resolves.toMatchObject({
+      generation: 4,
+      token: 'newer',
+    });
+    expect(adopt).toHaveBeenCalledTimes(1);
+  });
+
+  describe('processDeploymentReconciliationQueue failure policy', () => {
+    const run = (error: Error, options: { current: boolean; attemptsMade?: number }) => {
+      const service = serviceWith({ models: {} });
+      jest
+        .spyOn(service as any, 'tryWithDeploymentGenerationLock')
+        .mockImplementation((_buildId: unknown, _generation: unknown, action: any) => action());
+      jest.spyOn(service as any, 'claimDeploymentIntent').mockResolvedValue({
+        generation: 3,
+        token: 'run-t',
+        intent: { type: 'all', requestId: 'run-t', gen: 3 },
+        acceptedSourcePins: {},
+      });
+      jest.spyOn(service as any, 'withCurrentBuildDeploymentLock').mockRejectedValue(error);
+      jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(options.current);
+      const spies = {
+        takeIntentDeploys: jest.spyOn(service as any, 'takeIntentDeploys').mockResolvedValue(undefined),
+        observeIntentDeploys: jest.spyOn(service as any, 'observeIntentDeploys').mockResolvedValue(0),
+        finishIntent: jest.spyOn(service as any, 'finishIntent').mockResolvedValue(undefined),
+        recordFinalFailure: jest
+          .spyOn(service as any, 'recordFinalDeploymentReconciliationFailure')
+          .mockResolvedValue(undefined),
+      };
+      const job: any = {
+        data: { buildId: 7, generation: 3 },
+        attemptsMade: options.attemptsMade ?? 0,
+        opts: { attempts: 10 },
+      };
+      return { outcome: service.processDeploymentReconciliationQueue(job), spies };
+    };
+
+    test('a configuration error that escapes the configuration step takes and observes the rows and finishes the intent', async () => {
+      const { outcome, spies } = run(new ValidationError('services must be a list'), { current: true });
+
+      await expect(outcome).resolves.toBeUndefined();
+      expect(spies.takeIntentDeploys).toHaveBeenCalledWith(7, 3, 'run-t');
+      expect(spies.observeIntentDeploys).toHaveBeenCalledWith(7, 3);
+      expect(spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(spies.recordFinalFailure).not.toHaveBeenCalled();
+    });
+
+    test('an error after the run lost its rows is ignored: no retry, no record, no finish', async () => {
+      const { outcome, spies } = run(new Error('database connection reset'), { current: false });
+
+      await expect(outcome).resolves.toBeUndefined();
+      expect(spies.takeIntentDeploys).not.toHaveBeenCalled();
+      expect(spies.finishIntent).not.toHaveBeenCalled();
+      expect(spies.recordFinalFailure).not.toHaveBeenCalled();
+    });
+
+    test('a transient error of a current run is rethrown for the queue retry until the final attempt records it', async () => {
+      const error = new Error('database connection reset');
+      const first = run(error, { current: true, attemptsMade: 0 });
+      await expect(first.outcome).rejects.toBe(error);
+      expect(first.spies.recordFinalFailure).not.toHaveBeenCalled();
+
+      const last = run(error, { current: true, attemptsMade: 9 });
+      await expect(last.outcome).resolves.toBeUndefined();
+      expect(last.spies.recordFinalFailure).toHaveBeenCalledWith(7, expect.objectContaining({ generation: 3 }), error);
+      expect(last.spies.finishIntent).not.toHaveBeenCalled();
+    });
+
+    test('a lost mutation lock of a current run is rethrown so the retry resumes the rows it owns', async () => {
+      const error = new AuthorityLockLostError('build-reconcile.7.3');
+      const { outcome, spies } = run(error, { current: true });
+
+      await expect(outcome).rejects.toBe(error);
+      expect(spies.recordFinalFailure).not.toHaveBeenCalled();
+    });
+
+    test('an environment-wide intent whose run claim fails leaves its generation pending instead of consuming it', async () => {
+      const service = serviceWith({ models: {} });
+      jest
+        .spyOn(service as any, 'tryWithDeploymentGenerationLock')
+        .mockImplementation((_buildId: unknown, _generation: unknown, action: any) => action());
+      jest.spyOn(service as any, 'claimDeploymentIntent').mockResolvedValue({
+        generation: 3,
+        token: 'run-t',
+        intent: { type: 'all', requestId: 'run-t', gen: 3 },
+        acceptedSourcePins: {},
+      });
+      jest
+        .spyOn(service as any, 'withCurrentBuildDeploymentLock')
+        .mockImplementation(async (_buildId: unknown, _isPending: unknown, action: any) => ({
+          admitted: true,
+          value: await action(),
+        }));
+      jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue({
+        id: 7,
+        status: BuildStatus.DEPLOYED,
+        deployEnabled: true,
+        deletedAt: null,
+        pullRequestId: null,
+      });
+      const claimRun = jest.spyOn(service as any, 'claimDeploymentRun').mockResolvedValue(null);
+      const observe = jest.spyOn(service as any, 'observeIntentDeploys').mockResolvedValue(0);
+      const finish = jest.spyOn(service as any, 'finishIntent').mockResolvedValue(undefined);
+      const importYaml = jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined);
+
+      await expect(
+        service.processDeploymentReconciliationQueue({
+          data: { buildId: 7, generation: 3 },
+          attemptsMade: 0,
+          opts: { attempts: 10 },
+        } as any)
+      ).resolves.toBeUndefined();
+
+      expect(claimRun).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }), 'run-t', 3);
+      expect(importYaml).not.toHaveBeenCalled();
+      expect(observe).not.toHaveBeenCalled();
+      expect(finish).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('isDeploymentRunCurrent', () => {
+    const check = (
+      authority: Record<string, unknown> | null,
+      ownedRow: unknown,
+      refs: Record<string, unknown> = {}
+    ) => {
+      const build = authority
+        ? { acceptedRefs: refs, $fetchGraph: jest.fn().mockResolvedValue(undefined), ...authority }
+        : null;
+      const service = serviceWith({
+        models: {
+          Build: { query: jest.fn(() => lookupQuery(build)) },
+          Deploy: { query: jest.fn(() => lookupQuery(ownedRow)) },
+        },
+      });
+      return (service as any).isDeploymentRunCurrent(7, 'run-t', 3) as Promise<boolean>;
+    };
+    const open = { id: 7, status: BuildStatus.DEPLOYING, deployEnabled: true, deletedAt: null, pullRequestId: null };
+
+    test('is false while the environment is blocked, even for a run that still owns a row', async () => {
+      await expect(check({ ...open, status: BuildStatus.TEARING_DOWN }, { id: 11 })).resolves.toBe(false);
+      await expect(check({ ...open, deployEnabled: false }, { id: 11 })).resolves.toBe(false);
+      await expect(
+        check(
+          { ...open, pullRequestId: 5, pullRequest: { status: PullRequestStatus.CLOSED, deployOnUpdate: true } },
+          { id: 11 }
+        )
+      ).resolves.toBe(false);
+      await expect(check(null, { id: 11 })).resolves.toBe(false);
+    });
+
+    test('is true for an owned row, or for an accepted intent that is still unfinished, and false otherwise', async () => {
+      await expect(check(open, { id: 11 })).resolves.toBe(true);
+      await expect(check(open, undefined, { all: { type: 'all', requestId: 'run-t', gen: 3 } })).resolves.toBe(true);
+      await expect(
+        check(open, undefined, { all: { type: 'all', requestId: 'run-t', gen: 3, observedGen: 3 } })
+      ).resolves.toBe(false);
+      await expect(check(open, undefined, { all: { type: 'all', requestId: 'other', gen: 3 } })).resolves.toBe(false);
+    });
+
+    test('a run without a generation is current while the environment carries its token', async () => {
+      const service = serviceWith({
+        models: { Build: { query: jest.fn(() => lookupQuery({ ...open, runUUID: 'run-legacy' })) } },
+      });
+      await expect((service as any).isDeploymentRunCurrent(7, 'run-legacy')).resolves.toBe(true);
+      await expect((service as any).isDeploymentRunCurrent(7, 'run-other')).resolves.toBe(false);
+    });
+  });
+
+  describe('publishDerivedBuildStatusUnlocked', () => {
+    const row = (overrides: Record<string, unknown>) => ({
+      active: true,
+      desiredGeneration: 3,
+      observedGeneration: 3,
+      status: DeployStatus.READY,
+      statusMessage: '',
+      deployable: { name: 'svc' },
+      ...overrides,
+    });
+    const derive = async (build: Record<string, unknown>, options: Record<string, boolean> = {}) => {
+      const loaded: any = {
+        id: 7,
+        statusMessage: '',
+        deployEnabled: true,
+        pullRequest: null,
+        acceptedRefs: {},
+        deploys: [],
+        ...build,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      };
+      const service = serviceWith({ models: { Build: { query: jest.fn(() => lookupQuery(loaded)) } } });
+      const publish = jest.spyOn(service as any, 'publishBuildStatus').mockResolvedValue(undefined);
+      await (service as any).publishDerivedBuildStatusUnlocked(7, options);
+      return publish;
+    };
+
+    test('keeps a tearing-down or torn-down environment and a standing config error', async () => {
+      expect(await derive({ status: BuildStatus.TEARING_DOWN })).not.toHaveBeenCalled();
+      expect(await derive({ status: BuildStatus.TORN_DOWN })).not.toHaveBeenCalled();
+      expect(await derive({ status: BuildStatus.CONFIG_ERROR })).not.toHaveBeenCalled();
+      const cleared = await derive({ status: BuildStatus.CONFIG_ERROR }, { clearConfigError: true });
+      expect(cleared).toHaveBeenCalledWith(expect.anything(), BuildStatus.DEPLOYED, expect.anything());
+    });
+
+    test('a pending row outranks a failed one, a failed row outranks success, and an unchanged status is not rewritten', async () => {
+      const pendingAndFailed = await derive({
+        status: BuildStatus.ERROR,
+        deploys: [
+          row({ desiredGeneration: 4, status: DeployStatus.BUILDING }),
+          row({ status: DeployStatus.DEPLOY_FAILED }),
+        ],
+      });
+      expect(pendingAndFailed).toHaveBeenCalledWith(expect.anything(), BuildStatus.BUILDING, expect.anything());
+
+      const rolling = await derive({
+        status: BuildStatus.BUILDING,
+        deploys: [row({ desiredGeneration: 4, status: DeployStatus.DEPLOYING })],
+      });
+      expect(rolling).toHaveBeenCalledWith(expect.anything(), BuildStatus.DEPLOYING, expect.anything());
+
+      const failed = await derive({
+        status: BuildStatus.DEPLOYED,
+        deploys: [row({ status: DeployStatus.DEPLOY_FAILED, statusMessage: 'Not deployed: db failed.' })],
+      });
+      expect(failed).toHaveBeenCalledWith(expect.anything(), BuildStatus.ERROR, expect.anything());
+
+      expect(await derive({ status: BuildStatus.DEPLOYED, deploys: [row({})] })).not.toHaveBeenCalled();
+
+      const inactiveFailure = await derive({
+        status: BuildStatus.BUILDING,
+        deploys: [row({}), row({ active: false, status: DeployStatus.DEPLOY_FAILED })],
+      });
+      expect(inactiveFailure).toHaveBeenCalledWith(expect.anything(), BuildStatus.DEPLOYED, expect.anything());
+    });
   });
 
   test('createApiEnvironment does not retry a generated name after a non-unique insert failure', async () => {

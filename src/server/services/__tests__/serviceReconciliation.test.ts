@@ -846,6 +846,23 @@ describe('service-independent reconciliation', () => {
     expect(world.settled()).toBe(true);
   });
 
+  test('an error inside a superseded run is ignored, not retried, and the newer run still lands', async () => {
+    const world = createWorld(SPECS);
+    await world.merge('A');
+    await jest.advanceTimersByTimeAsync(5 * MIN);
+    const second = await world.merge('A');
+    sim.failPatchOnce = (patch: any, table: string) => table === 'deploy' && 'observedGeneration' in patch;
+    await jest.advanceTimersByTimeAsync(40 * MIN);
+
+    expect(logs.some((line) => line.includes('stale failure ignored'))).toBe(true);
+    expect(world.queue.attempts.filter((attempt) => attempt.startsWith(`reconcile-${BUILD_ID}-1#`))).toEqual([
+      `reconcile-${BUILD_ID}-1#0`,
+    ]);
+    expect(world.live.get('A')).toBe(`A@${second}`);
+    expect(world.row('A').observedGeneration).toBe(2);
+    expect(world.settled()).toBe(true);
+  });
+
   test('a config error in C fails only C; A and B still ship and C recovers on its next merge', async () => {
     const world = createWorld(SPECS);
     const aSha = await world.merge('A');

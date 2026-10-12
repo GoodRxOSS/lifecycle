@@ -2853,6 +2853,18 @@ describe('DeployService uncovered public behavior', () => {
     expect(mockWaitForCodefresh).not.toHaveBeenCalled();
   });
 
+  test('deployCodefresh stops before pipeline invocation when the deploying fence finds the row taken', async () => {
+    const { service, deployPatch } = serviceHarness();
+    deployPatch.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+    const deploy = codefreshDeploy();
+
+    await expect(service.deployCodefresh(deploy as any, 'run-1')).resolves.toBe(true);
+
+    expect(deployPatch).toHaveBeenCalledTimes(2);
+    expect(mockCodefreshDeploy).not.toHaveBeenCalled();
+    expect(mockWaitForCodefresh).not.toHaveBeenCalled();
+  });
+
   test('deployCodefresh records a source-resolution failure before invoking the pipeline', async () => {
     const { service } = serviceHarness();
     const deploy = codefreshDeploy({ branchName: null });

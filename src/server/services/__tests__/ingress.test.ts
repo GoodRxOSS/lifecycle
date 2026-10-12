@@ -410,6 +410,48 @@ describe('IngressService', () => {
     expect(apply).toHaveBeenCalledWith(expect.any(String), '7-0-nginx', 'env-test', 7, 'run-c', 3);
   });
 
+  test('a clean generation-fenced apply clears a stale ingress failure note; a failed apply keeps it', async () => {
+    const configuration = {
+      deployUUID: 'deploy-a',
+      host: 'a.example.test',
+      pathPortMapping: { '/': 8080 },
+      serviceHost: 'service-a',
+      ingressAnnotations: {},
+      ipWhitelist: [],
+    };
+    const publishDerivedBuildStatus = jest.fn().mockResolvedValue(undefined);
+    const db = {
+      models: {
+        Build: { query: jest.fn(() => authorityQuery({ id: 7 })) },
+        Deploy: { query: jest.fn(() => authorityQuery({ id: 11 })) },
+      },
+      services: {
+        BuildService: {
+          configurationsForBuildId: jest.fn().mockResolvedValue([configuration]),
+          getNamespace: jest.fn().mockResolvedValue('env-test'),
+          withCurrentBuildPromotionLock: jest.fn(async (_buildId, _isCurrent, action) => ({
+            admitted: true,
+            value: await action(),
+          })),
+          publishDerivedBuildStatus,
+        },
+      },
+    };
+    const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
+    jest
+      .spyOn(service as any, 'applyManifests')
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const job = { data: { buildId: 7, runUUID: 'run-c', expectedGeneration: 3 } };
+
+    await service.createOrUpdateIngressForBuild(job);
+    expect(publishDerivedBuildStatus).toHaveBeenCalledWith(7, { clearStatusMessage: true });
+
+    publishDerivedBuildStatus.mockClear();
+    await service.createOrUpdateIngressForBuild(job);
+    expect(publishDerivedBuildStatus).not.toHaveBeenCalled();
+  });
+
   test('does not apply when authority is lost before promotion admission', async () => {
     const gate = jest.fn().mockResolvedValue({ admitted: false });
     const db = {
