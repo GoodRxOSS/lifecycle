@@ -658,6 +658,21 @@ describe('SitesService behavior', () => {
       now.mockRestore();
     });
 
+    it('rejects an unsafe or oversized name before any storage call', async () => {
+      for (const name of ['bad\u001b[31mname', 'two\nlines', 'spoof\u202Eexe', 'x'.repeat(256)]) {
+        await expect(
+          service.createSite({
+            principal,
+            visibility: 'public',
+            fileName: 'index.html',
+            content: Buffer.from('site'),
+            name,
+          })
+        ).rejects.toMatchObject({ statusCode: 400 });
+      }
+      expect(mockPutFiles).not.toHaveBeenCalled();
+    });
+
     it('uses the generated default name and no expiry or actor when TTL is disabled', async () => {
       enabledConfig({ ttl: { enabled: false } });
 
@@ -960,6 +975,17 @@ describe('SitesService behavior', () => {
           meta: expect.objectContaining({ siteId: 'site-1', from: 'old', to: 'New name' }),
         })
       );
+    });
+
+    it('rejects control and text-direction characters but allows emoji joiners', async () => {
+      addSite(state, { name: 'old' });
+
+      for (const name of ['two\nlines', 'tab\there', 'esc\u001b[0m', 'spoof\u202Eexe']) {
+        await expect(service.renameSite('site-1', name, principal)).rejects.toMatchObject({ statusCode: 400 });
+      }
+      await expect(service.renameSite('site-1', '\u{1F469}\u200D\u{1F4BB} docs', principal)).resolves.toMatchObject({
+        name: '\u{1F469}\u200D\u{1F4BB} docs',
+      });
     });
 
     it('is a no-op without an audit entry when the name is unchanged', async () => {
