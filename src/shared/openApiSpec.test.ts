@@ -192,7 +192,7 @@ describe('OpenAPI v2 environment contract', () => {
 });
 
 describe('OpenAPI v2 sites contract', () => {
-  it('documents sites list filters and pagination', () => {
+  it('documents sites list filters, pagination, and sorting', () => {
     expect(getOperation('/api/v2/sites', 'get')?.parameters).toEqual([
       {
         name: 'view',
@@ -223,6 +223,20 @@ describe('OpenAPI v2 sites contract', () => {
           minimum: 1,
           maximum: 100,
         },
+      },
+      {
+        name: 'sort',
+        in: 'query',
+        required: false,
+        description: 'Field to order sites by. Ignored for view=deleted, which orders by deletion time.',
+        schema: { type: 'string', enum: ['updated', 'created', 'name'], default: 'created' },
+      },
+      {
+        name: 'order',
+        in: 'query',
+        required: false,
+        description: 'Sort direction. Defaults to asc for name and desc otherwise.',
+        schema: { type: 'string', enum: ['asc', 'desc'] },
       },
     ]);
   });
