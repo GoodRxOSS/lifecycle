@@ -142,6 +142,7 @@ function filterValue(params: URLSearchParams, name: string, limit: number): stri
   const value = params.get(name)?.trim();
   if (!value) return undefined;
   if (value.length > limit) throw new BadRequestError(`${name} must be at most ${limit} characters.`, 'invalid_query');
+  if (value.includes('\u0000')) throw new BadRequestError(`${name} must not contain NUL characters.`, 'invalid_query');
   return value;
 }
 
@@ -465,7 +466,8 @@ export default class SitesAnalyticsService {
       SELECT *,
         CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at <= ${asOf()} THEN 'expired' ELSE status END AS state,
         CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at <= ${asOf()} THEN expires_at
-          WHEN status IN ('expired', 'deleted', 'purged') THEN COALESCE(deleted_at, expires_at) END AS ended_at
+          WHEN status = 'expired' THEN COALESCE(expires_at, deleted_at)
+          WHEN status IN ('deleted', 'purged') THEN COALESCE(deleted_at, expires_at) END AS ended_at
       FROM scoped
     ), measured AS (
       SELECT *, state = 'active' AND deleted_at IS NULL AS live,
@@ -477,7 +479,7 @@ export default class SitesAnalyticsService {
           ) AS restorable,
         CASE WHEN ended_at IS NOT NULL AND ${inWindow(
           'ended_at'
-        )} THEN EXTRACT(EPOCH FROM ended_at - created_at) END AS lifetime
+        )} THEN GREATEST(EXTRACT(EPOCH FROM ended_at - created_at), 0) END AS lifetime
       FROM effective
     )`;
     const bins = SITES_LIFETIME_BINS.map((bin) => {

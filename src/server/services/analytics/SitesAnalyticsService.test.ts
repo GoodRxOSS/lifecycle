@@ -77,6 +77,7 @@ describe('parseSitesAnalyticsQuery', () => {
     ['owner=someone', 'owner'],
     [`owner=user:${'x'.repeat(2400)}`, 'owner'],
     ['interval=month', 'interval'],
+    ['owner=user:%00x', 'owner'],
   ])('rejects %s', (query, name) => {
     expect(() => parseSitesAnalyticsQuery(new URLSearchParams(query))).toThrow(name);
   });
