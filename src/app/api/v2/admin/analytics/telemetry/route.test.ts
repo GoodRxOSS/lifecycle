@@ -17,6 +17,13 @@
 import { NextRequest } from 'next/server';
 
 const mockGetStats = jest.fn();
+const mockGetUser = jest.fn();
+const mockIdentity = jest.fn();
+
+jest.mock('server/lib/get-user', () => ({
+  getUser: (...args: unknown[]) => mockGetUser(...args),
+  getRequestUserIdentity: (...args: unknown[]) => mockIdentity(...args),
+}));
 
 jest.mock('server/services/telemetry', () => ({
   __esModule: true,
@@ -28,7 +35,7 @@ jest.mock('server/services/telemetry', () => ({
 import { GET } from './route';
 
 function makeRequest(params: Record<string, string> = {}): NextRequest {
-  const url = new URL('http://localhost/api/v2/telemetry/stats');
+  const url = new URL('http://localhost/api/v2/admin/analytics/telemetry');
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
@@ -59,10 +66,40 @@ const statsFixture = {
   platforms: [{ platform: 'darwin', count: 3 }],
 };
 
-describe('GET /api/v2/telemetry/stats', () => {
+describe('GET /api/v2/admin/analytics/telemetry', () => {
+  const originalAuth = process.env.ENABLE_AUTH;
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.ENABLE_AUTH = 'true';
+    mockGetUser.mockReturnValue({ sub: 'admin', realm_access: { roles: ['admin'] } });
+    mockIdentity.mockReturnValue({ userId: 'admin', roles: ['admin'] });
     mockGetStats.mockResolvedValue(statsFixture);
+  });
+  afterEach(() => {
+    if (originalAuth === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = originalAuth;
+  });
+
+  it('prevents caching successful responses', async () => {
+    const response = await GET(makeRequest({ source: 'cli' }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+  });
+
+  it('rejects unauthenticated requests before data access', async () => {
+    mockIdentity.mockReturnValue(null);
+
+    expect((await GET(makeRequest({ source: 'cli' }))).status).toBe(401);
+    expect(mockGetStats).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-admin requests before data access', async () => {
+    mockGetUser.mockReturnValue({ sub: 'user', realm_access: { roles: ['user'] } });
+    mockIdentity.mockReturnValue({ userId: 'user', roles: ['user'] });
+
+    expect((await GET(makeRequest({ source: 'cli' }))).status).toBe(403);
+    expect(mockGetStats).not.toHaveBeenCalled();
   });
 
   it('returns stats for a valid query', async () => {
