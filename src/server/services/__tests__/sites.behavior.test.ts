@@ -369,6 +369,13 @@ class SiteQuery {
     return this;
   }
 
+  orderByRaw(sql: string) {
+    const match = /^lower\("(\w+)"\) (asc|desc)$/.exec(sql);
+    if (!match) throw new Error(`Unsupported orderByRaw in fake: ${sql}`);
+    if (!this.sortBy) this.sortBy = { field: match[1] as keyof SiteData, direction: match[2] };
+    return this;
+  }
+
   limit(maximum: number) {
     this.maximum = maximum;
     return this;
@@ -1099,6 +1106,27 @@ describe('SitesService behavior', () => {
       ]);
     });
 
+    it('keeps deletion order for deleted sites even when a sort is requested', async () => {
+      addSite(state, {
+        siteId: 'old',
+        name: 'Alpha',
+        activeVersionId: 'v-o',
+        status: 'deleted',
+        deletedAt: deletedAt(3),
+      });
+      addVersion(state, { siteId: 'old', versionId: 'v-o' });
+      addSite(state, {
+        siteId: 'new',
+        name: 'Zulu',
+        activeVersionId: 'v-n',
+        status: 'deleted',
+        deletedAt: deletedAt(1),
+      });
+      addVersion(state, { siteId: 'new', versionId: 'v-n' });
+      const result = await service.listSites({ view: 'deleted', sort: 'name', order: 'asc' }, principal);
+      expect(result.sites.map((site) => site.id)).toEqual(['new', 'old']);
+    });
+
     it('lists only restorable deleted sites owned by the caller', async () => {
       addSite(state, { siteId: 'restorable', activeVersionId: 'v-r', status: 'deleted', deletedAt: deletedAt(2) });
       addVersion(state, { siteId: 'restorable', versionId: 'v-r' });
@@ -1522,6 +1550,33 @@ describe('SitesService behavior', () => {
       });
       const mine = await service.listSites({ view: 'mine' }, principal);
       expect(mine.sites.map((site) => site.id)).toEqual(['mine']);
+    });
+    it('orders sites by the requested field and direction', async () => {
+      addSite(state, {
+        siteId: 'a',
+        name: 'Bravo',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-03-01T00:00:00Z',
+      });
+      addSite(state, {
+        siteId: 'b',
+        name: 'alpha',
+        createdAt: '2026-02-01T00:00:00Z',
+        updatedAt: '2026-01-15T00:00:00Z',
+      });
+      addSite(state, {
+        siteId: 'c',
+        name: 'Charlie',
+        createdAt: '2026-03-01T00:00:00Z',
+        updatedAt: '2026-02-01T00:00:00Z',
+      });
+      const ids = async (filters: Parameters<SitesService['listSites']>[0]) =>
+        (await service.listSites({ view: 'mine', ...filters }, principal)).sites.map((site) => site.id);
+      await expect(ids({})).resolves.toEqual(['c', 'b', 'a']);
+      await expect(ids({ sort: 'updated' })).resolves.toEqual(['a', 'c', 'b']);
+      await expect(ids({ sort: 'created', order: 'asc' })).resolves.toEqual(['a', 'b', 'c']);
+      await expect(ids({ sort: 'name' })).resolves.toEqual(['b', 'a', 'c']);
+      await expect(ids({ sort: 'name', order: 'desc' })).resolves.toEqual(['c', 'a', 'b']);
     });
     it('denies all nonowner mutations including realm admins before storage', async () => {
       addSite(state, { visibility: 'private' });

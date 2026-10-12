@@ -73,12 +73,23 @@ export type CreateOrReplaceSiteInput = {
   expectedContentRevision?: number;
 };
 
+export const SITE_LIST_SORTS = ['updated', 'created', 'name'] as const;
+export type SiteListSort = (typeof SITE_LIST_SORTS)[number];
+export type SiteListOrder = 'asc' | 'desc';
+
+const SITE_LIST_DATE_COLUMNS = {
+  updated: 'updatedAt',
+  created: 'createdAt',
+} as const satisfies Record<Exclude<SiteListSort, 'name'>, keyof Site>;
+
 export type ListSitesFilters = {
   user?: string;
   view?: 'mine' | 'public' | 'all' | 'deleted';
   q?: string;
   page?: number;
   limit?: number;
+  sort?: SiteListSort;
+  order?: SiteListOrder;
 };
 
 export type ListSitesResult = {
@@ -454,10 +465,13 @@ export default class SitesService extends Service {
         search,
       ]);
     }
-    const result = await query
-      .orderBy(view === 'deleted' ? 'deletedAt' : 'createdAt', 'desc')
-      .orderBy('siteId', 'asc')
-      .page(page - 1, limit);
+    const sort = filters.sort ?? 'created';
+    const order = filters.order ?? (sort === 'name' ? 'asc' : 'desc');
+    if (view === 'deleted') query.orderBy('deletedAt', 'desc');
+    // lower() keeps name order case-insensitive regardless of the database collation.
+    else if (sort === 'name') query.orderByRaw(`lower("name") ${order === 'asc' ? 'asc' : 'desc'}`);
+    else query.orderBy(SITE_LIST_DATE_COLUMNS[sort], order);
+    const result = await query.orderBy('siteId', 'asc').page(page - 1, limit);
     return {
       sites: (result.results as Site[]).map((site) => this.serialize(site, config, principal)),
       pagination: { current: page, total: Math.max(Math.ceil(result.total / limit), 1), items: result.total, limit },

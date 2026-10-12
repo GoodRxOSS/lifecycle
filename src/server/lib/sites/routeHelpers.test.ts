@@ -125,6 +125,13 @@ describe('Sites route helpers', () => {
     it('returns no filters when the query string is empty', () => {
       expect(readSitesListFilters(new URLSearchParams())).toEqual({});
     });
+
+    it('parses sort field and direction', () => {
+      expect(readSitesListFilters(new URLSearchParams('sort=updated&order=asc'))).toEqual({
+        sort: 'updated',
+        order: 'asc',
+      });
+    });
   });
 
   it.each(['2oops', '-1', '0', '1.5', '2147483648', {}, true])('rejects malformed revision %p', (value) => {
@@ -134,9 +141,12 @@ describe('Sites route helpers', () => {
     expect(() => readSiteRevision(undefined, true)).toThrow();
     expect(readSiteRevision('12', true)).toBe(12);
   });
-  it.each(['view=shared', 'page=2oops', 'limit=101'])('rejects invalid filters %s', (query) => {
-    expect(() => readSitesListFilters(new URLSearchParams(query))).toThrow();
-  });
+  it.each(['view=shared', 'page=2oops', 'limit=101', 'sort=size', 'order=up'])(
+    'rejects invalid filters %s',
+    (query) => {
+      expect(() => readSitesListFilters(new URLSearchParams(query))).toThrow();
+    }
+  );
   it('checks upload file size before reading bytes', async () => {
     const file = { name: 'large.zip', size: 50, arrayBuffer: jest.fn() };
     await expect(readUploadFile(uploadRequest({ file }), 10)).rejects.toMatchObject({ statusCode: 400 });
