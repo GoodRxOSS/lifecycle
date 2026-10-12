@@ -91,13 +91,19 @@ type RouteContext = {
  *             schema:
  *               $ref: '#/components/schemas/SiteSuccessResponse'
  *       '400':
- *         description: Invalid name.
+ *         description: Invalid JSON, name, or revision.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ApiErrorResponse'
  *       '403':
  *         description: Only the site owner can rename it.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
  *         content:
  *           application/json:
  *             schema:

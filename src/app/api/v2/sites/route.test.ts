@@ -466,6 +466,13 @@ describe('hosted sites API routes', () => {
     expect((await res.json()).data.site.name).toBe('Renamed');
     expect(mockRenameSite).toHaveBeenCalledWith('docs-abc123', 'Renamed', sessionPrincipal, 4);
   });
+  it('rejects a rename body that is not JSON before the service', async () => {
+    const req = request('http://localhost/api/v2/sites/docs-abc123', { method: 'PATCH' });
+    (req.json as jest.Mock).mockRejectedValue(new SyntaxError('Unexpected token'));
+    const res = await renameSite(req, context());
+    expect(res.status).toBe(400);
+    expect(mockRenameSite).not.toHaveBeenCalled();
+  });
   it('maps a rename service failure through the sites error contract', async () => {
     mockRenameSite.mockRejectedValueOnce(new SitesServiceError('name must be 1-255 characters.', 400));
     const res = await renameSite(
