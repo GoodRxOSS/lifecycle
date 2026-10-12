@@ -45,6 +45,7 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'GET', route: '/api/v2/admin/analytics/lifetimes/scatter', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/admin/analytics/options', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/admin/analytics/services', policy: 'session', roles: ['admin'] },
+  { method: 'GET', route: '/api/v2/admin/analytics/sites', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/admin/analytics/telemetry', policy: 'session', roles: ['admin'] },
   { method: 'GET', route: '/api/v2/ai/admin/agent/capabilities', policy: 'session', roles: ['admin'] },
   { method: 'PUT', route: '/api/v2/ai/admin/agent/capabilities', policy: 'session', roles: ['admin'] },
