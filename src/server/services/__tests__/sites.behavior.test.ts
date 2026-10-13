@@ -658,6 +658,21 @@ describe('SitesService behavior', () => {
       now.mockRestore();
     });
 
+    it('rejects an unsafe or oversized name before any storage call', async () => {
+      for (const name of ['bad\u001b[31mname', 'two\nlines', 'spoof\u202Eexe', 'x'.repeat(256)]) {
+        await expect(
+          service.createSite({
+            principal,
+            visibility: 'public',
+            fileName: 'index.html',
+            content: Buffer.from('site'),
+            name,
+          })
+        ).rejects.toMatchObject({ statusCode: 400 });
+      }
+      expect(mockPutFiles).not.toHaveBeenCalled();
+    });
+
     it('uses the generated default name and no expiry or actor when TTL is disabled', async () => {
       enabledConfig({ ttl: { enabled: false } });
 
@@ -940,6 +955,66 @@ describe('SitesService behavior', () => {
         message: 'TTL is disabled for hosted sites.',
         statusCode: 400,
       });
+    });
+  });
+
+  describe('renameSite', () => {
+    it('trims and persists the name without changing the id, url, or revisions', async () => {
+      addSite(state, { name: 'old' });
+
+      const result = await service.renameSite('site-1', '  New name  ', principal);
+
+      expect(result.name).toBe('New name');
+      expect(result.id).toBe('site-1');
+      expect(state.sites[0].name).toBe('New name');
+      expect(state.sites[0].accessRevision).toBe(1);
+      expect(mockAudit).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          event: 'sites.renamed',
+          meta: expect.objectContaining({ siteId: 'site-1', from: 'old', to: 'New name' }),
+        })
+      );
+    });
+
+    it('rejects control and text-direction characters but allows emoji joiners', async () => {
+      addSite(state, { name: 'old' });
+
+      for (const name of ['two\nlines', 'tab\there', 'esc\u001b[0m', 'spoof\u202Eexe']) {
+        await expect(service.renameSite('site-1', name, principal)).rejects.toMatchObject({ statusCode: 400 });
+      }
+      await expect(service.renameSite('site-1', '\u{1F469}\u200D\u{1F4BB} docs', principal)).resolves.toMatchObject({
+        name: '\u{1F469}\u200D\u{1F4BB} docs',
+      });
+    });
+
+    it('is a no-op without an audit entry when the name is unchanged', async () => {
+      addSite(state, { name: 'same' });
+      mockAudit.mockClear();
+
+      await expect(service.renameSite('site-1', ' same ', principal)).resolves.toMatchObject({ name: 'same' });
+      expect(mockAudit).not.toHaveBeenCalled();
+    });
+
+    it('rejects empty, blank, and oversized names', async () => {
+      addSite(state);
+
+      for (const name of ['', '   ', 'x'.repeat(256)]) {
+        await expect(service.renameSite('site-1', name, principal)).rejects.toMatchObject({ statusCode: 400 });
+      }
+    });
+
+    it('rejects a stale access revision and a non-owner', async () => {
+      addSite(state, { name: 'old' });
+      const stranger = { ...principal, userId: 'stranger', actor: 'stranger' } as Principal;
+
+      await expect(service.renameSite('site-1', 'new', principal, 99)).rejects.toMatchObject({ httpStatus: 409 });
+      await expect(service.renameSite('site-1', 'new', stranger)).rejects.toMatchObject({ httpStatus: 403 });
+      expect(state.sites[0].name).toBe('old');
+    });
+
+    it('returns not found for a missing site', async () => {
+      await expect(service.renameSite('missing', 'new', principal)).rejects.toMatchObject({ statusCode: 404 });
     });
   });
 

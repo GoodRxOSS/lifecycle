@@ -25,6 +25,7 @@ import { getLogger } from 'server/lib/logger';
 import { buildSiteUrl, parseSiteIdFromHost, resolveSitesConfig, ResolvedSitesConfig } from 'server/lib/sites/config';
 import { SitesObjectNotFoundError, SitesStorage } from 'server/lib/sites/storage';
 import {
+  getSiteNameError,
   normalizeGatewayPath,
   SiteUploadValidationError,
   validateSiteUpload,
@@ -392,6 +393,9 @@ export default class SitesService extends Service {
       throw new SitesServiceError('Service-key sites must be public; visibility must be private or public.', 400);
     }
     if (principal.kind !== 'service_key' || visibility === 'private') this.assertPrivateReady(config);
+    const requestedName = input.name?.trim();
+    const nameError = requestedName ? getSiteNameError(requestedName) : null;
+    if (nameError) throw new SitesServiceError(nameError, 400);
     const upload = this.validateUpload(input, config);
     const siteId = createSiteId();
     const site = await this.withUploadRollback(config, async (prefixes) => {
@@ -401,7 +405,7 @@ export default class SitesService extends Service {
         await assertSitesPrincipal(principal, 'write', trx);
         const created = (await this.db.models.Site.query(trx).insert({
           siteId,
-          name: input.name?.trim() || this.defaultSiteName(siteId, config),
+          name: requestedName || this.defaultSiteName(siteId, config),
           status: 'active',
           activeVersionId: null,
           fileCount: upload.fileCount,
@@ -597,6 +601,31 @@ export default class SitesService extends Service {
       const updated = await site.$query(trx).patchAndFetch({
         visibility,
         accessRevision: site.accessRevision + 1,
+      });
+      return this.serialize(updated as Site, config, principal);
+    });
+  }
+
+  async renameSite(
+    siteId: string,
+    name: string,
+    principal: Principal,
+    expectedAccessRevision?: number
+  ): Promise<SiteResponse> {
+    await assertSitesPrincipal(principal, 'write');
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    const nameError = getSiteNameError(trimmed);
+    if (nameError) throw new SitesServiceError(nameError, 400);
+    return this.db.models.Site.transact(async (trx) => {
+      const { site, config } = await this.getActiveSite(siteId, trx);
+      await assertSitesPrincipal(principal, 'write', trx);
+      assertSiteOwner(site, principal);
+      this.checkRevision(site, expectedAccessRevision);
+      if (site.name === trimmed) return this.serialize(site, config, principal);
+      await this.audit(trx, 'renamed', siteId, principal, { from: site.name, to: trimmed });
+      const updated = await site.$query(trx).patchAndFetch({
+        name: trimmed,
+        updatedBy: principal.identity?.email || null,
       });
       return this.serialize(updated as Site, config, principal);
     });

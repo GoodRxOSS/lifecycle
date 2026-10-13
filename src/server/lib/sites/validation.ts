@@ -356,3 +356,13 @@ export function normalizeGatewayPath(pathname: string): string {
   const normalized = normalizeArchivePath(withoutLeadingSlash);
   return normalized.endsWith('/') ? `${normalized}index.html` : normalized;
 }
+
+export const SITE_NAME_MAX_LENGTH = 255;
+
+const UNSAFE_SITE_NAME_CHARACTERS = /[\p{Cc}\u202A-\u202E\u2066-\u2069]/u;
+
+export function getSiteNameError(name: string): string | null {
+  if (!name || name.length > SITE_NAME_MAX_LENGTH) return `name must be 1-${SITE_NAME_MAX_LENGTH} characters.`;
+  if (UNSAFE_SITE_NAME_CHARACTERS.test(name)) return 'name cannot contain control or text-direction characters.';
+  return null;
+}

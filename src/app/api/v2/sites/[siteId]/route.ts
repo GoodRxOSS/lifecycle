@@ -19,7 +19,7 @@ import { createPrincipalApiHandler } from 'server/lib/createApiHandler';
 import type { Principal } from 'server/lib/principal';
 import { sitesSuccessResponse as successResponse } from 'server/lib/sites/routeHelpers';
 import { readSiteRevision, sitesErrorResponse } from 'server/lib/sites/routeHelpers';
-import SitesService from 'server/services/sites';
+import SitesService, { SitesServiceError } from 'server/services/sites';
 
 type RouteContext = {
   params: Promise<{
@@ -53,6 +53,63 @@ type RouteContext = {
  *               $ref: '#/components/schemas/SiteSuccessResponse'
  *       '404':
  *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *   patch:
+ *     summary: Rename a hosted static site
+ *     security:
+ *       - BearerAuth: []
+ *       - LifecycleApiKey: []
+ *     description: Changes the display name only; the Site ID and content URL stay the same.
+ *     tags:
+ *       - Sites
+ *     operationId: renameSite
+ *     parameters:
+ *       - in: path
+ *         name: siteId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             properties:
+ *               name: { type: string, minLength: 1, maxLength: 255 }
+ *               expectedAccessRevision: { type: integer, minimum: 1, maximum: 2147483647 }
+ *             required: [name]
+ *     responses:
+ *       '200':
+ *         description: Hosted static site renamed.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SiteSuccessResponse'
+ *       '400':
+ *         description: Invalid JSON, name, or revision.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '403':
+ *         description: Only the site owner can rename it.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Site not found or sites hosting is disabled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '409':
+ *         description: Access revision changed; refetch before retrying.
  *         content:
  *           application/json:
  *             schema:
@@ -100,6 +157,37 @@ const getHandler = async (req: NextRequest, principal: Principal, { params }: Ro
   }
 };
 
+const patchHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
+  const routeParams = await params;
+  try {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      throw new SitesServiceError('Invalid JSON.', 400);
+    }
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).some((key) => !['name', 'expectedAccessRevision'].includes(key))
+    ) {
+      throw new SitesServiceError('Invalid rename request.', 400);
+    }
+    const input = body as Record<string, unknown>;
+    if (typeof input.name !== 'string') throw new SitesServiceError('name is required.', 400);
+    const site = await new SitesService().renameSite(
+      routeParams.siteId,
+      input.name,
+      principal,
+      readSiteRevision(input.expectedAccessRevision)
+    );
+    return successResponse({ site }, { status: 200 }, req);
+  } catch (error) {
+    return sitesErrorResponse(error, req);
+  }
+};
+
 const deleteHandler = async (req: NextRequest, principal: Principal, { params }: RouteContext) => {
   const routeParams = await params;
   try {
@@ -116,4 +204,5 @@ const deleteHandler = async (req: NextRequest, principal: Principal, { params }:
 };
 
 export const GET = createPrincipalApiHandler({ scope: 'sites:read' }, getHandler);
+export const PATCH = createPrincipalApiHandler({ scope: 'sites:write' }, patchHandler);
 export const DELETE = createPrincipalApiHandler({ scope: 'sites:write' }, deleteHandler);

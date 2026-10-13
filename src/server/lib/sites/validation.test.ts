@@ -15,7 +15,13 @@
  */
 
 import zlib from 'zlib';
-import { normalizeGatewayPath, SiteUploadValidationError, validateSiteUpload } from './validation';
+import {
+  getSiteNameError,
+  normalizeGatewayPath,
+  SITE_NAME_MAX_LENGTH,
+  SiteUploadValidationError,
+  validateSiteUpload,
+} from './validation';
 
 const DEFAULT_OPTIONS = {
   maxUploadBytes: 10 * 1024 * 1024,
@@ -430,4 +436,20 @@ describe('reserved Sites authentication paths', () => {
       expect(() => normalizeGatewayPath(path)).toThrow('reserved for site authentication');
     }
   );
+});
+
+describe('getSiteNameError', () => {
+  it('accepts ordinary names, unicode, and emoji joiners', () => {
+    expect(getSiteNameError('Q3 report')).toBeNull();
+    expect(getSiteNameError('r\u00E9sum\u00E9 \u{1F469}\u200D\u{1F4BB}')).toBeNull();
+    expect(getSiteNameError('x'.repeat(SITE_NAME_MAX_LENGTH))).toBeNull();
+  });
+
+  it('rejects empty, oversized, control, and text-direction characters', () => {
+    expect(getSiteNameError('')).toMatch(/1-255/);
+    expect(getSiteNameError('x'.repeat(SITE_NAME_MAX_LENGTH + 1))).toMatch(/1-255/);
+    for (const name of ['a\nb', 'a\tb', 'a\u001bb', 'a\u007fb', 'a\u202Eb', 'a\u2066b']) {
+      expect(getSiteNameError(name)).toMatch(/control or text-direction/);
+    }
+  });
 });
