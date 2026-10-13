@@ -12,6 +12,7 @@ describe('Admin environment analytics OpenAPI contract', () => {
     ['environments/records', 'getEnvironmentAnalyticsRecords', 'GetEnvironmentAnalyticsRecordsSuccessResponse'],
     ['services', 'getManagedServiceRecords', 'GetManagedServiceRecordsSuccessResponse'],
     ['lifetimes/scatter', 'getEnvironmentLifetimeScatter', 'GetEnvironmentLifetimeScatterSuccessResponse'],
+    ['sites', 'getSitesAnalytics', 'GetSitesAnalyticsSuccessResponse'],
   ])('documents %s with a concrete generated response and session authentication', (path, operationId, response) => {
     const operation = spec.paths[`/api/v2/admin/analytics/${path}`].get;
     expect(operation.operationId).toBe(operationId);
