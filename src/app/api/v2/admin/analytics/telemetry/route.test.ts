@@ -25,7 +25,14 @@ jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockIdentity(...args),
 }));
 
+jest.mock('server/lib/dependencies', () => ({
+  defaultDb: {},
+  defaultRedis: {},
+  defaultRedlock: {},
+  defaultQueueManager: {},
+}));
 jest.mock('server/services/telemetry', () => ({
+  ...jest.requireActual('server/services/telemetry'),
   __esModule: true,
   default: jest.fn(() => ({
     getStats: (...args: unknown[]) => mockGetStats(...args),
@@ -46,24 +53,28 @@ function makeRequest(params: Record<string, string> = {}): NextRequest {
   } as unknown as NextRequest;
 }
 
-const statsFixture = {
-  usageOverTime: [{ bucket: '2026-06-01T00:00:00.000Z', count: 10 }],
-  topEvents: [
-    {
-      event: 'builds list',
-      count: 10,
-      errorCount: 1,
-      errorRate: 0.1,
-      p50DurationMs: 120,
-      p95DurationMs: 900,
+const resultFixture = {
+  source: 'cli',
+  range: { from: '2026-06-01', to: '2026-06-30', timezone: 'UTC', interval: 'week', compare: false },
+  stats: {
+    usageOverTime: [{ bucket: '2026-06-01', count: 10 }],
+    topEvents: [
+      {
+        event: 'builds list',
+        count: 10,
+        errorCount: 1,
+        errorRate: 0.1,
+        p50DurationMs: 120,
+        p95DurationMs: 900,
+      },
+    ],
+    activeClients: {
+      total: 4,
+      overTime: [{ bucket: '2026-06-01', count: 4 }],
     },
-  ],
-  activeClients: {
-    total: 4,
-    overTime: [{ bucket: '2026-06-01T00:00:00.000Z', count: 4 }],
+    versions: [{ clientVersion: '1.2.3', count: 4 }],
+    platforms: [{ platform: 'darwin', count: 3 }],
   },
-  versions: [{ clientVersion: '1.2.3', count: 4 }],
-  platforms: [{ platform: 'darwin', count: 3 }],
 };
 
 describe('GET /api/v2/admin/analytics/telemetry', () => {
@@ -73,7 +84,7 @@ describe('GET /api/v2/admin/analytics/telemetry', () => {
     process.env.ENABLE_AUTH = 'true';
     mockGetUser.mockReturnValue({ sub: 'admin', realm_access: { roles: ['admin'] } });
     mockIdentity.mockReturnValue({ userId: 'admin', roles: ['admin'] });
-    mockGetStats.mockResolvedValue(statsFixture);
+    mockGetStats.mockResolvedValue(resultFixture);
   });
   afterEach(() => {
     if (originalAuth === undefined) delete process.env.ENABLE_AUTH;
@@ -102,12 +113,13 @@ describe('GET /api/v2/admin/analytics/telemetry', () => {
     expect(mockGetStats).not.toHaveBeenCalled();
   });
 
-  it('returns stats for a valid query', async () => {
+  it('passes the calendar window and source through and returns the service result', async () => {
     const response = await GET(
       makeRequest({
         source: 'cli',
-        from: '2026-06-01T00:00:00.000Z',
-        to: '2026-06-30T00:00:00.000Z',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        timezone: 'America/New_York',
         interval: 'week',
       })
     );
@@ -115,45 +127,57 @@ describe('GET /api/v2/admin/analytics/telemetry', () => {
 
     expect(response.status).toBe(200);
     expect(body.error).toBeNull();
-    expect(body.data.range).toEqual({
-      source: 'cli',
-      from: '2026-06-01T00:00:00.000Z',
-      to: '2026-06-30T00:00:00.000Z',
-      interval: 'week',
-    });
-    expect(body.data.stats).toEqual(statsFixture);
+    expect(body.data).toEqual(resultFixture);
     expect(mockGetStats).toHaveBeenCalledWith({
       source: 'cli',
-      from: new Date('2026-06-01T00:00:00.000Z'),
-      to: new Date('2026-06-30T00:00:00.000Z'),
+      from: '2026-06-01',
+      to: '2026-06-30',
+      timezone: 'America/New_York',
       interval: 'week',
+      compare: false,
     });
   });
 
-  it('defaults to the last 30 days with day interval', async () => {
+  it('keeps the calendar day of full timestamps that older clients send', async () => {
+    const response = await GET(
+      makeRequest({ source: 'cli', from: '2026-06-01T00:00:00.000Z', to: '2026-06-30T12:34:56.000Z' })
+    );
+    expect(response.status).toBe(200);
+    expect(mockGetStats).toHaveBeenCalledWith(expect.objectContaining({ from: '2026-06-01', to: '2026-06-30' }));
+  });
+
+  it('leaves the window to the service defaults with day buckets in UTC', async () => {
     const response = await GET(makeRequest({ source: 'ui' }));
 
     expect(response.status).toBe(200);
-    const query = mockGetStats.mock.calls[0][0];
-    expect(query.source).toBe('ui');
-    expect(query.interval).toBe('day');
-    const rangeMs = query.to.getTime() - query.from.getTime();
-    expect(rangeMs).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(mockGetStats).toHaveBeenCalledWith({
+      source: 'ui',
+      from: undefined,
+      to: undefined,
+      timezone: 'UTC',
+      interval: 'day',
+      compare: false,
+    });
   });
 
   it.each([
-    ['missing source', {}],
-    ['invalid source', { source: 'mobile' }],
-    ['invalid from', { source: 'cli', from: 'not-a-date' }],
-    ['invalid to', { source: 'cli', to: 'not-a-date' }],
-    ['from after to', { source: 'cli', from: '2026-06-30T00:00:00.000Z', to: '2026-06-01T00:00:00.000Z' }],
-    ['invalid interval', { source: 'cli', interval: 'month' }],
-  ])('rejects %s with 400', async (_name, params) => {
+    ['missing source', {}, 'source must be cli or ui.'],
+    ['invalid source', { source: 'mobile' }, 'source must be cli or ui.'],
+    ['invalid from', { source: 'cli', from: 'not-a-date' }, 'from must be a calendar date in YYYY-MM-DD format.'],
+    ['invalid to', { source: 'cli', to: 'not-a-date' }, 'to must be a calendar date in YYYY-MM-DD format.'],
+    [
+      'from after to',
+      { source: 'cli', from: '2026-06-30', to: '2026-06-01' },
+      'The date range must contain between 1 and 365 calendar days.',
+    ],
+    ['invalid interval', { source: 'cli', interval: 'month' }, 'interval must be day or week.'],
+    ['unknown timezone', { source: 'cli', timezone: 'Mars/Olympus' }, 'timezone must be a supported IANA timezone.'],
+  ])('rejects %s with 400', async (_name, params, message) => {
     const response = await GET(makeRequest(params as Record<string, string>));
     const body = await response.json();
 
     expect(response.status).toBe(400);
-    expect(body.error.message).toContain('Validation failed');
+    expect(body.error).toMatchObject({ code: 'invalid_query', message });
     expect(mockGetStats).not.toHaveBeenCalled();
   });
 });

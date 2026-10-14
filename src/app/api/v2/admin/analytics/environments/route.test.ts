@@ -6,7 +6,8 @@ const mockIdentity = jest.fn(),
 const mockEnvironments = jest.fn(),
   mockInventory = jest.fn(),
   mockOptions = jest.fn(),
-  mockRecords = jest.fn();
+  mockRecords = jest.fn(),
+  mockPullRequests = jest.fn();
 jest.mock('server/lib/dependencies', () => ({ defaultDb: {} }));
 jest.mock('server/lib/get-user', () => ({
   getRequestUserIdentity: (...args: unknown[]) => mockIdentity(...args),
@@ -20,6 +21,7 @@ jest.mock('server/services/analytics/EnvironmentAnalyticsService', () => ({
     getInventory: mockInventory,
     getOptions: mockOptions,
     getRecords: mockRecords,
+    getPullRequests: mockPullRequests,
   })),
 }));
 
@@ -27,13 +29,16 @@ import { GET as environments } from './route';
 import { GET as inventory } from '../inventory/route';
 import { GET as options } from '../options/route';
 import { GET as records } from './records/route';
+import { GET as pullRequests } from './pull-requests/route';
 
 const handlers = [
   ['environments', environments],
   ['inventory', inventory],
   ['options', options],
   ['records', records],
+  ['pull-requests', pullRequests],
 ] as const;
+const mocks = [mockEnvironments, mockInventory, mockOptions, mockRecords, mockPullRequests];
 function request(query = ''): NextRequest {
   return {
     headers: new Headers([['x-request-id', 'analytics-test']]),
@@ -41,7 +46,7 @@ function request(query = ''): NextRequest {
   } as unknown as NextRequest;
 }
 function expectNoAccess() {
-  for (const mock of [mockEnvironments, mockInventory, mockOptions, mockRecords]) expect(mock).not.toHaveBeenCalled();
+  for (const mock of mocks) expect(mock).not.toHaveBeenCalled();
 }
 
 describe('environment analytics administrator boundaries', () => {
@@ -51,7 +56,7 @@ describe('environment analytics administrator boundaries', () => {
     process.env.ENABLE_AUTH = 'true';
     mockIdentity.mockReturnValue({ userId: 'admin', roles: ['admin'] });
     mockGetUser.mockReturnValue({ sub: 'admin', realm_access: { roles: ['admin'] } });
-    for (const mock of [mockEnvironments, mockInventory, mockOptions, mockRecords]) mock.mockResolvedValue({});
+    for (const mock of mocks) mock.mockResolvedValue({});
   });
   afterEach(() => {
     if (originalAuth === undefined) delete process.env.ENABLE_AUTH;
@@ -78,7 +83,7 @@ describe('environment analytics administrator boundaries', () => {
   it('passes calendar and installation scope and disables response caching', async () => {
     const response = await environments(
       request(
-        '?from=2026-03-08&to=2026-03-10&timezone=America%2FLos_Angeles&repositoryId=4&environmentAuthor=Alice&rankBy=pr_coverage'
+        '?from=2026-03-08&to=2026-03-10&timezone=America%2FLos_Angeles&repositoryId=4&environmentAuthor=Alice&rankBy=deploy_rate'
       )
     );
     expect(response.status).toBe(200);
@@ -89,7 +94,7 @@ describe('environment analytics administrator boundaries', () => {
         timezone: 'America/Los_Angeles',
         repositoryId: 4,
         environmentAuthor: 'Alice',
-        rankBy: 'pr_coverage',
+        rankBy: 'deploy_rate',
         compare: true,
       })
     );
@@ -116,6 +121,46 @@ describe('environment analytics administrator boundaries', () => {
         limit: 100,
       })
     );
+  });
+
+  it('passes the evidence slice to records and pull requests and rejects slices outside each cohort', async () => {
+    expect((await records(request('?cohort=current&evidence=live&phase=ready'))).status).toBe(200);
+    expect(mockRecords).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cohort: 'current',
+        phase: 'ready',
+        slice: { evidence: 'live', date: null, period: 'current' },
+      })
+    );
+    expect((await records(request('?evidence=rolled_out&date=2026-03-09&period=previous'))).status).toBe(200);
+    expect(mockRecords).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cohort: 'first_seen',
+        slice: { evidence: 'rolled_out', date: '2026-03-09', period: 'previous' },
+      })
+    );
+    expect(
+      (
+        await pullRequests(
+          request('?environmentType=ephemeral&evidence=requested&date=2026-03-09&period=previous&page=2&limit=50')
+        )
+      ).status
+    ).toBe(200);
+    expect(mockPullRequests).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environmentType: 'ephemeral',
+        slice: { evidence: 'requested', date: '2026-03-09', period: 'previous' },
+        page: 2,
+        limit: 50,
+      })
+    );
+    mockRecords.mockClear();
+    mockPullRequests.mockClear();
+    for (const query of ['?cohort=current&date=2026-03-09', '?evidence=live', '?period=previous&compare=false'])
+      expect((await records(request(query))).status).toBe(400);
+    for (const query of ['?environmentType=static', '?evidence=live', '?page=1000001'])
+      expect((await pullRequests(request(query))).status).toBe(400);
+    expectNoAccess();
   });
 
   it('adds repository activity to the existing administrator route only when requested', async () => {

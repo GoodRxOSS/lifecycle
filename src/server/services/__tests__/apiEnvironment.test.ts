@@ -2205,6 +2205,7 @@ describe('applyApiEnvironmentPatch', () => {
     expect(enqueue).toHaveBeenCalledWith({
       buildId: 1,
       runUUID: result.deployId,
+      origin: 'api',
     });
   });
 

@@ -18,6 +18,20 @@ const mockRecordAuthAuditEvent = jest.fn();
 const mockLoggerError = jest.fn();
 const mockLoggerWarn = jest.fn();
 
+jest.mock('server/services/keycloak/mcpOauthClients', () => ({
+  __esModule: true,
+  default: {
+    getInstance: () => ({
+      clientName: async (clientId: string) => {
+        if (clientId === 'claude-desktop') return 'Claude Desktop';
+        if (clientId === 'keycloak-down') throw new Error('keycloak unreachable');
+        if (clientId === 'keycloak-slow') return new Promise<string>(() => undefined);
+        return null;
+      },
+    }),
+  },
+}));
+const flushAudit = () => new Promise((resolve) => setImmediate(resolve));
 jest.mock('server/services/authAudit', () => ({
   recordAuthAuditEvent: (...args: unknown[]) => mockRecordAuthAuditEvent(...args),
 }));
@@ -309,6 +323,8 @@ it('audits successful change tools with bounded initial and handler-annotated id
     tool: 'deploy_environment',
     outcome: 'succeeded',
     stage: 'success',
+    readOnly: false,
+    durationMs: expect.any(Number),
     fields: {
       uuid: 'handler_uuid',
       environmentId: 42,
@@ -453,8 +469,113 @@ it('uses the default audit sink for successful change tools', async () => {
       tool: 'deploy_environment',
       stage: 'success',
       credentialKind: 'user',
+      readOnly: false,
+      durationMs: expect.any(Number),
     },
   });
+});
+
+it('audits read-only tools too, with the client application, session and username when known', async () => {
+  const registry = new McpToolRegistry([definition('get_environment', 'understand-environments', 'read')]);
+  const principal = {
+    ...context.principal,
+    oauth: { sessionId: 'sid-1', tokenId: 'jti-1', clientId: 'claude-desktop', expiresAt: 0 },
+    identity: { preferredUsername: 'alice', githubUsername: 'alice-gh' } as never,
+  };
+
+  await registry.callTool('get_environment', {}, { ...context, principal }, enabled);
+  await flushAudit();
+
+  expect(mockRecordAuthAuditEvent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      route: 'MCP get_environment',
+      outcome: 'succeeded',
+      meta: {
+        tool: 'get_environment',
+        stage: 'success',
+        credentialKind: 'user',
+        readOnly: true,
+        durationMs: expect.any(Number),
+        clientId: 'claude-desktop',
+        sessionId: 'sid-1',
+        clientName: 'Claude Desktop',
+        username: 'alice',
+      },
+    })
+  );
+});
+
+it('falls back to the GitHub username and records failed read-only calls', async () => {
+  const registry = new McpToolRegistry([
+    definition('get_environment', 'understand-environments', 'read', async () => {
+      throw new McpExecutionError('env_not_found', 'missing');
+    }),
+  ]);
+  const principal = { ...context.principal, identity: { githubUsername: 'alice-gh' } as never };
+
+  await registry.callTool('get_environment', {}, { ...context, principal }, enabled);
+  await flushAudit();
+
+  expect(mockRecordAuthAuditEvent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      outcome: 'env_not_found',
+      meta: expect.objectContaining({ readOnly: true, stage: 'domain', username: 'alice-gh' }),
+    })
+  );
+  expect(mockRecordAuthAuditEvent.mock.calls[0][0].meta).not.toHaveProperty('clientId');
+});
+
+it('writes the audit row without a client name when the name lookup fails or stalls', async () => {
+  jest.useFakeTimers();
+  try {
+    const registry = new McpToolRegistry([definition('deploy_environment', 'manage-environments', 'change')]);
+    const withClient = (clientId: string) => ({
+      ...context,
+      principal: { ...context.principal, oauth: { sessionId: 'sid', tokenId: 'jti', clientId, expiresAt: 0 } },
+    });
+
+    await registry.callTool('deploy_environment', {}, withClient('keycloak-down'), enabled);
+    expect(mockRecordAuthAuditEvent).toHaveBeenCalledTimes(1);
+    expect(mockRecordAuthAuditEvent.mock.calls[0][0].meta).toMatchObject({ clientId: 'keycloak-down' });
+    expect(mockRecordAuthAuditEvent.mock.calls[0][0].meta).not.toHaveProperty('clientName');
+
+    const stalled = registry.callTool('deploy_environment', {}, withClient('keycloak-slow'), enabled);
+    await (jest as unknown as { advanceTimersByTimeAsync(ms: number): Promise<void> }).advanceTimersByTimeAsync(500);
+    await stalled;
+    expect(mockRecordAuthAuditEvent).toHaveBeenCalledTimes(2);
+    expect(mockRecordAuthAuditEvent.mock.calls[1][0].meta).toMatchObject({ clientId: 'keycloak-slow' });
+    expect(mockRecordAuthAuditEvent.mock.calls[1][0].meta).not.toHaveProperty('clientName');
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+it('waits for the audit row on change tools and returns reads before it is written', async () => {
+  const pending: Array<() => void> = [];
+  const audit = { record: jest.fn(() => new Promise<void>((resolve) => pending.push(resolve))) };
+  const registry = new McpToolRegistry(
+    [
+      definition('get_environment', 'understand-environments', 'read'),
+      definition('deploy_environment', 'manage-environments', 'change'),
+    ],
+    { increment: jest.fn(), timing: jest.fn(), gauge: jest.fn() },
+    audit
+  );
+
+  await expect(registry.callTool('get_environment', {}, context, enabled)).resolves.toBeDefined();
+  expect(pending).toHaveLength(1);
+
+  let settled = false;
+  const change = registry.callTool('deploy_environment', {}, context, enabled).then((result) => {
+    settled = true;
+    return result;
+  });
+  await flushAudit();
+  expect(pending).toHaveLength(2);
+  expect(settled).toBe(false);
+  pending.forEach((release) => release());
+  await expect(change).resolves.toBeDefined();
+  expect(settled).toBe(true);
 });
 
 it('serializes structured content unchanged for text-only MCP clients', async () => {

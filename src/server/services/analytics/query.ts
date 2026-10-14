@@ -189,6 +189,76 @@ export function analyticsBucketDates(range: ResolvedAnalyticsRange): string[] {
   ];
 }
 
+export type AnalyticsSlicePeriod = 'current' | 'previous';
+export type AnalyticsSlice = { date: string | null; period: AnalyticsSlicePeriod };
+export type AnalyticsPagination = { page: number; limit: number };
+export type AnalyticsSort<Key extends string> = { key: Key; descending: boolean };
+
+export function parseAnalyticsSlice(params: URLSearchParams): AnalyticsSlice {
+  const date = params.get('date') ?? undefined;
+  validateDate(date, 'date');
+  const period = params.get('period') ?? 'current';
+  if (period !== 'current' && period !== 'previous') {
+    throw new BadRequestError('period must be current or previous.', 'invalid_query');
+  }
+  return { date: date ?? null, period };
+}
+
+/** The previous period reuses the current bucket dates, so one date addresses both series of a chart. */
+export function analyticsSlicePeriod(range: ResolvedAnalyticsRange, slice: AnalyticsSlice): AnalyticsPeriod {
+  if (slice.period === 'previous' && !range.previous) {
+    throw new BadRequestError('period must be current when compare is false.', 'invalid_query');
+  }
+  if (slice.date && !analyticsBucketDates(range).includes(slice.date)) {
+    throw new BadRequestError('date must be the start of a bucket inside the window.', 'invalid_query');
+  }
+  return slice.period === 'previous' ? range.previous! : range;
+}
+
+/** A scan window that holds the slice's bucket in any time zone, so the exact bucket filter runs over few rows. */
+export function analyticsSliceScan(
+  range: ResolvedAnalyticsRange,
+  slice: AnalyticsSlice
+): { fromUtc: string; toUtc: string } {
+  const period = analyticsSlicePeriod(range, slice);
+  if (!slice.date) return { fromUtc: period.fromUtc, toUtc: period.toUtc };
+  const start = dateTimestamp(slice.date) - (slice.period === 'previous' ? range.calendarDays : 0) * DAY;
+  const length = range.interval === 'week' ? 7 : 1;
+  return {
+    fromUtc: new Date(Math.max(Date.parse(period.fromUtc), start - DAY)).toISOString(),
+    toUtc: new Date(Math.min(Date.parse(period.toUtc), start + (length + 1) * DAY)).toISOString(),
+  };
+}
+
+export function parseAnalyticsPagination(params: URLSearchParams, maxPage = 10_000): AnalyticsPagination {
+  const parse = (name: string, fallback: number, maximum: number) => {
+    const value = params.get(name);
+    if (value == null) return fallback;
+    if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > maximum) {
+      throw new BadRequestError(`${name} must be an integer between 1 and ${maximum}.`, 'invalid_query');
+    }
+    return Number(value);
+  };
+  return { page: parse('page', 1, maxPage), limit: parse('limit', 25, 100) };
+}
+
+export function parseAnalyticsSort<Key extends string>(
+  params: URLSearchParams,
+  keys: readonly Key[],
+  fallback: Key
+): AnalyticsSort<Key> {
+  const value = params.get('sort');
+  if (value == null) return { key: fallback, descending: true };
+  const [key, direction = 'desc'] = value.split(':');
+  if (!keys.includes(key as Key) || (direction !== 'asc' && direction !== 'desc')) {
+    throw new BadRequestError(
+      `sort must be one of ${keys.join(', ')}, with an optional :asc or :desc.`,
+      'invalid_query'
+    );
+  }
+  return { key: key as Key, descending: direction === 'desc' };
+}
+
 export function analyticsBucketExpression(
   knex: Pick<Knex, 'raw'>,
   range: ResolvedAnalyticsRange,

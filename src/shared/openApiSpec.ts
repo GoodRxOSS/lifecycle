@@ -3,6 +3,8 @@ import { environmentAnalyticsSchemas } from './environmentAnalyticsOpenApi';
 import { environmentLifetimeAnalyticsSchemas } from './environmentLifetimeAnalyticsOpenApi';
 import { agentAnalyticsSchemas } from './agentAnalyticsOpenApi';
 import { sitesAnalyticsSchemas } from './sitesAnalyticsOpenApi';
+import { deploymentAnalyticsSchemas } from './deploymentAnalyticsOpenApi';
+import { mcpAnalyticsSchemas } from './mcpAnalyticsOpenApi';
 import { environmentLifetimeScatterSchemas } from '../app/api/v2/admin/analytics/lifetimes/scatter/schemas';
 import {
   AGENT_FEEDBACK_SCOPES,
@@ -178,6 +180,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         ...environmentLifetimeAnalyticsSchemas,
         ...agentAnalyticsSchemas,
         ...sitesAnalyticsSchemas,
+        ...deploymentAnalyticsSchemas,
+        ...mcpAnalyticsSchemas,
         ...environmentLifetimeScatterSchemas,
         SitesBrowserMintRequest: {
           type: 'object',
@@ -1691,6 +1695,8 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             maxTokens: { type: 'integer' },
             inputCostPerMillion: { type: 'number', nullable: true },
             outputCostPerMillion: { type: 'number', nullable: true },
+            cacheReadCostPerMillion: { type: 'number', nullable: true },
+            cacheWriteCostPerMillion: { type: 'number', nullable: true },
           },
           required: ['provider', 'modelId', 'displayName', 'default', 'maxTokens'],
         },
@@ -5469,7 +5475,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         TelemetryBucketCount: {
           type: 'object',
           properties: {
-            bucket: { type: 'string', format: 'date-time' },
+            bucket: { type: 'string', format: 'date', description: 'Local calendar day, or the Monday of the week.' },
             count: { type: 'integer' },
           },
           required: ['bucket', 'count'],
@@ -5543,20 +5549,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
         },
 
         /**
-         * @description The resolved query range echoed back by GET /admin/analytics/telemetry.
-         */
-        TelemetryStatsRange: {
-          type: 'object',
-          properties: {
-            source: { type: 'string', enum: ['cli', 'ui'] },
-            from: { type: 'string', format: 'date-time' },
-            to: { type: 'string', format: 'date-time' },
-            interval: { type: 'string', enum: ['day', 'week'] },
-          },
-          required: ['source', 'from', 'to', 'interval'],
-        },
-
-        /**
          * @description The specific success response for the GET /admin/analytics/telemetry endpoint.
          */
         GetTelemetryStatsSuccessResponse: {
@@ -5568,10 +5560,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 data: {
                   type: 'object',
                   properties: {
-                    range: { $ref: '#/components/schemas/TelemetryStatsRange' },
+                    source: { type: 'string', enum: ['cli', 'ui'] },
+                    range: { $ref: '#/components/schemas/AnalyticsRange' },
                     stats: { $ref: '#/components/schemas/TelemetryStats' },
                   },
-                  required: ['range', 'stats'],
+                  required: ['source', 'range', 'stats'],
                 },
               },
               required: ['data'],
@@ -5731,6 +5724,14 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             outputCostPerMillion: {
               type: 'number',
               description: 'Cost per million output tokens (USD). Used for UI cost display.',
+            },
+            cacheReadCostPerMillion: {
+              type: 'number',
+              description: 'Cost per million cached input tokens read (USD). Defaults to the input rate.',
+            },
+            cacheWriteCostPerMillion: {
+              type: 'number',
+              description: 'Cost per million input tokens written to the cache (USD). Defaults to the input rate.',
             },
           },
           required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],

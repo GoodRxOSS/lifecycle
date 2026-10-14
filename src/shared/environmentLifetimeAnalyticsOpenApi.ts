@@ -30,7 +30,10 @@ const object = (properties: Record<string, object>) => ({
 const success = (name: string) => ({
   allOf: [ref('SuccessApiResponse'), { type: 'object', properties: { data: ref(name) }, required: ['data'] }],
 });
-const method = { type: 'string', enum: ['created_to_deleted', 'created_to_last_update', 'first_record_age'] };
+const method = {
+  type: 'string',
+  enum: ['created_to_deleted', 'created_to_torn_down', 'created_to_last_update', 'first_record_age'],
+};
 const quality = { type: 'string', enum: ['recorded', 'estimated', 'record_age'] };
 const group = { type: 'string', enum: ['api', 'pr', 'other'] };
 const bin = {
@@ -75,32 +78,33 @@ export const environmentLifetimeAnalyticsSchemas = {
     toHours: hours,
     count: integer,
   }),
+  EnvironmentLifetimeRuntimeStats: object({
+    samples: integer,
+    meanHours: hours,
+    medianHours: hours,
+    p90Hours: hours,
+  }),
   EnvironmentLifetimeStats: object({
     method,
     quality,
     eligible: integer,
     samples: integer,
+    recordedSamples: { ...integer, description: 'Measured records whose end time was recorded rather than estimated.' },
     missing: integer,
     invalid: integer,
     meanHours: hours,
     medianHours: hours,
     p90Hours: hours,
+    runtime: ref('EnvironmentLifetimeRuntimeStats'),
     distribution: array(ref('EnvironmentLifetimeDistribution')),
   }),
   EnvironmentLifetimeCompleted: object({ api: ref('EnvironmentLifetimeStats'), pr: ref('EnvironmentLifetimeStats') }),
-  EnvironmentLifetimeBucket: object({
-    date: { type: 'string', format: 'date' },
-    previousDate: { type: 'string', format: 'date', nullable: true },
-    current: ref('EnvironmentLifetimeCompleted'),
-    previous: nullableRef('EnvironmentLifetimeCompleted'),
-  }),
   EnvironmentLifetimeAnalytics: object({
     range: ref('AnalyticsRange'),
     asOf: instant,
     scope: ref('EnvironmentAnalyticsScope'),
     completed: ref('EnvironmentLifetimeCompleted'),
     previousCompleted: nullableRef('EnvironmentLifetimeCompleted'),
-    buckets: array(ref('EnvironmentLifetimeBucket')),
     currentAge: object({
       all: ref('EnvironmentLifetimeStats'),
       api: ref('EnvironmentLifetimeStats'),
@@ -130,6 +134,8 @@ export const environmentLifetimeAnalyticsSchemas = {
     startedAt: nullableInstant,
     measuredUntilAt: nullableInstant,
     durationHours: hours,
+    firstReadyAt: nullableInstant,
+    runtimeHours: hours,
   }),
   EnvironmentLifetimeRecords: object({
     asOf: instant,

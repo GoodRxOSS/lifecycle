@@ -163,6 +163,7 @@ export default class ActivityStream extends BaseService {
           // Same runUuid as the override path, so the two enqueues collapse into one deployment.
           await this.db.services.BuildService.enqueueResolveAndDeployBuild({
             buildId,
+            origin: 'comment',
             runUUID: runUuid,
           });
         }
@@ -210,7 +211,7 @@ export default class ActivityStream extends BaseService {
     };
     const override = new OverrideService(this.db, this.redis, this.redlock, this.queueManager);
 
-    await override.applyBuildOverrides({ build, deploys, pullRequest, overrides, runUuid });
+    await override.applyBuildOverrides({ build, deploys, pullRequest, overrides, runUuid, origin: 'comment' });
   }
 
   private async updateMissionControlComment(

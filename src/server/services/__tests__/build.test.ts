@@ -28,6 +28,8 @@ const mockIsFeatureEnabled = jest.fn();
 const mockQueueAdd = jest.fn();
 const mockCleanupDeploy = jest.fn();
 const mockDeleteServiceRows = jest.fn();
+const mockRecordBuildEvent = jest.fn();
+const mockRecordFirstRollout = jest.fn();
 const mockGetServiceOverrideStates = jest.fn();
 const mockGenerateGraph = jest.fn().mockResolvedValue({});
 const mockWebhookQueueAdd = jest.fn();
@@ -37,6 +39,7 @@ const mockAcceptDeploymentIntent = jest.fn().mockResolvedValue({
   accepted: true,
   generation: 1,
   scopeKey: 'all',
+  replaced: [],
 });
 
 jest.mock('server/lib/dependencies', () => ({
@@ -55,6 +58,12 @@ jest.mock('server/lib/tracer', () => ({
       initialize: jest.fn(),
     })),
   },
+}));
+
+jest.mock('../buildEvents', () => ({
+  ...jest.requireActual('../buildEvents'),
+  recordBuildEvent: (...args: any[]) => mockRecordBuildEvent(...args),
+  recordFirstRollout: (...args: any[]) => mockRecordFirstRollout(...args),
 }));
 
 jest.mock('server/lib/deploymentReconciliation/mailbox', () => {
@@ -1391,7 +1400,34 @@ describe('BuildService deployment reconciliation', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockAcceptDeploymentIntent.mockResolvedValue({ accepted: true, generation: 1, scopeKey: 'all' });
+    mockAcceptDeploymentIntent.mockResolvedValue({ accepted: true, replaced: [], generation: 1, scopeKey: 'all' });
+  });
+
+  test('records the request and every pending request the acceptance replaced', async () => {
+    const { service } = serviceHarness();
+    mockAcceptDeploymentIntent.mockResolvedValueOnce({
+      accepted: true,
+      generation: 2,
+      scopeKey: 'all',
+      replaced: [{ requestId: 'older', generation: 1 }],
+    });
+
+    await service.enqueueResolveAndDeployBuild({ buildId: 1, runUUID: 'newer', origin: 'label' });
+
+    expect(mockRecordBuildEvent).toHaveBeenCalledWith(undefined, {
+      buildId: 1,
+      kind: 'deploy_requested',
+      runUUID: 'newer',
+      origin: 'label',
+      meta: { intent: 'all', generation: 2, scopeKey: 'all' },
+    });
+    expect(mockRecordBuildEvent).toHaveBeenCalledWith(undefined, {
+      buildId: 1,
+      kind: 'run_superseded',
+      runUUID: 'older',
+      reason: 'intent_replaced',
+      meta: { generation: 1 },
+    });
   });
 
   test('signals only the exact durable generation accepted by the mailbox', async () => {
@@ -1405,8 +1441,8 @@ describe('BuildService deployment reconciliation', () => {
   test('uses different queue identities for successive desired generations', async () => {
     const { service, add } = serviceHarness();
     mockAcceptDeploymentIntent
-      .mockResolvedValueOnce({ accepted: true, generation: 8, scopeKey: 'repository:100' })
-      .mockResolvedValueOnce({ accepted: true, generation: 9, scopeKey: 'repository:100' });
+      .mockResolvedValueOnce({ accepted: true, generation: 8, scopeKey: 'repository:100', replaced: [] })
+      .mockResolvedValueOnce({ accepted: true, generation: 9, scopeKey: 'repository:100', replaced: [] });
 
     await service.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
     await service.enqueueResolveAndDeployBuild({ buildId: 1, githubRepositoryId: 100 });
@@ -1464,8 +1500,8 @@ describe('BuildService deployment reconciliation', () => {
   test('uses distinct execution tokens when two source scopes reference the same SHA', async () => {
     const { service } = serviceHarness();
     mockAcceptDeploymentIntent
-      .mockResolvedValueOnce({ accepted: true, generation: 1, scopeKey: 'source:100:main' })
-      .mockResolvedValueOnce({ accepted: true, generation: 2, scopeKey: 'source:100:release' });
+      .mockResolvedValueOnce({ accepted: true, generation: 1, scopeKey: 'source:100:main', replaced: [] })
+      .mockResolvedValueOnce({ accepted: true, generation: 2, scopeKey: 'source:100:release', replaced: [] });
 
     await service.enqueueResolveAndDeployBuild({
       buildId: 1,
@@ -1645,6 +1681,7 @@ describe('BuildService deployment reconciliation', () => {
     jest.spyOn(service, 'deployCLIServices').mockResolvedValue(true);
     const updateStatus = jest.spyOn(service, 'updateStatusAndComment').mockResolvedValue(undefined);
     const applyManifests = jest.spyOn(service, 'generateAndApplyManifests').mockResolvedValue(true);
+    const superseded = jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined);
 
     const result = await (service as any).executeDeploymentScope(
       {
@@ -1662,6 +1699,32 @@ describe('BuildService deployment reconciliation', () => {
     expect(isCurrent).toHaveBeenCalledTimes(2);
     expect(updateStatus).not.toHaveBeenCalled();
     expect(applyManifests).not.toHaveBeenCalled();
+    expect(superseded).toHaveBeenCalledWith(1, 'run-a', 7, 'rollout_skipped');
+  });
+
+  test('a deployment phase stopped by a newer request records the supersession and returns nothing', async () => {
+    const { service } = serviceHarness();
+    const build = createBuild({ id: 1, runUUID: 'run-a' });
+    jest.spyOn(service as any, 'isDeploymentRunCurrent').mockResolvedValue(true);
+    jest.spyOn(service, 'buildImages').mockRejectedValue(new DeploymentSupersededError());
+    jest.spyOn(service, 'deployCLIServices').mockResolvedValue(true);
+    const superseded = jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined);
+
+    await expect(
+      (service as any).executeDeploymentScope(
+        {
+          build,
+          runUUID: 'run-a',
+          githubRepositoryId: 100,
+          sourceGithubRepositoryId: 100,
+          sourceRef: 'a',
+          sourceBranch: 'main',
+        },
+        7
+      )
+    ).resolves.toBeNull();
+
+    expect(superseded).toHaveBeenCalledWith(1, 'run-a', 7, 'phase_superseded');
   });
 
   test('deployment scope fails closed when an execution error cannot be fenced by an authority read', async () => {
@@ -2572,6 +2635,29 @@ describe('BuildService focused changed-line coverage', () => {
     expect(deployUpdate.patch).toHaveBeenCalledWith({ isRunningLatest: true, runningImage: 'image:v1' });
     expect(deployUpdate.where).toHaveBeenCalledWith({ id: 9 });
     expect(deployUpdate.where).toHaveBeenCalledWith('runUUID', 'build-run');
+    expect(mockRecordFirstRollout).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  test('a rollout whose token-fenced patches reach no row does not stamp the first rollout', async () => {
+    const deployUpdate: any = {
+      patch: jest.fn(() => deployUpdate),
+      where: jest.fn(() => deployUpdate),
+      then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
+        Promise.resolve(0).then(resolve, reject),
+    };
+    const service = serviceWith({ models: { Deploy: { query: jest.fn(() => deployUpdate) } } });
+    await (service as any).updateDeploysImageDetails(
+      {
+        id: 3,
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+        deploys: [{ githubRepositoryId: 42, branchName: 'main', dockerImage: 'image:v1', id: 9 }],
+      },
+      'stale-run',
+      42,
+      'main'
+    );
+    expect(deployUpdate.where).toHaveBeenCalledWith('runUUID', 'stale-run');
+    expect(mockRecordFirstRollout).not.toHaveBeenCalled();
   });
 
   test('resolves direct and repository-derived build environments', async () => {
@@ -2594,23 +2680,16 @@ describe('BuildService focused changed-line coverage', () => {
     await expect((service as any).getEnvironmentsToBuild(undefined, 9)).resolves.toEqual(related);
   });
 
-  test('creates missing PR builds with and without a root repository identity', async () => {
-    const createHarness = (repositoryId?: number) => {
+  test('creates missing PR builds storing the GitHub repository id the webhook delivered', async () => {
+    const createHarness = () => {
       const buildQuery: any = {
         where: jest.fn(() => buildQuery),
         whereNull: jest.fn(() => buildQuery),
         first: jest.fn().mockResolvedValue(undefined),
       };
-      const repositoryQuery: any = {
-        findById: jest.fn(() => repositoryQuery),
-        select: jest.fn().mockResolvedValue(repositoryId == null ? undefined : { githubRepositoryId: 42 }),
-      };
       const buildCreate = jest.fn(async (attributes: Record<string, unknown>) => ({ id: 77, ...attributes }));
       const service = serviceWith({
-        models: {
-          Build: { query: jest.fn(() => buildQuery), create: buildCreate },
-          Repository: { query: jest.fn(() => repositoryQuery) },
-        },
+        models: { Build: { query: jest.fn(() => buildQuery), create: buildCreate } },
       });
       return { service, buildCreate };
     };
@@ -2620,16 +2699,16 @@ describe('BuildService focused changed-line coverage', () => {
       repositoryBranchName: 'feature',
       repositoryId: 9,
     };
-    const withRepository = createHarness(9);
+    const withRepository = createHarness();
     const withoutRepository = createHarness();
 
     await expect(
       (withRepository.service as any).findOrCreateBuild(environment, options, {
         environment: { enabledFeatures: ['x'], githubDeployments: true },
       })
-    ).resolves.toMatchObject({ id: 77, githubRepositoryId: 42 });
+    ).resolves.toMatchObject({ id: 77, githubRepositoryId: 9 });
     expect(withRepository.buildCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ githubRepositoryId: 42, githubDeployments: true })
+      expect.objectContaining({ githubRepositoryId: 9, githubDeployments: true })
     );
 
     await expect(
@@ -2812,6 +2891,7 @@ describe('BuildService uncovered public behavior', () => {
       accepted: true,
       generation: 1,
       scopeKey: 'all',
+      replaced: [],
     });
     mockGetAllConfigs.mockReset().mockResolvedValue({ serviceAccount: { name: 'builder' } });
     mockIsFeatureEnabled.mockReset().mockResolvedValue(false);
@@ -5654,6 +5734,402 @@ describe('BuildService uncovered public behavior', () => {
     expect(adopt).toHaveBeenCalledTimes(1);
   });
 
+  describe('run outcome events', () => {
+    const worker = (lockResult: unknown) => {
+      const service = serviceWith({ models: {} });
+      jest
+        .spyOn(service as any, 'tryWithDeploymentGenerationLock')
+        .mockImplementation((_buildId: unknown, _generation: unknown, action: any) => action());
+      jest.spyOn(service as any, 'claimDeploymentIntent').mockResolvedValue({
+        generation: 3,
+        token: 'run-t',
+        intent: { type: 'all', requestId: 'run-t', gen: 3 },
+        acceptedSourcePins: {},
+      });
+      jest.spyOn(service as any, 'withCurrentBuildDeploymentLock').mockResolvedValue(lockResult);
+      const spies = {
+        superseded: jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined),
+        finished: jest.spyOn(service as any, 'recordRunFinished').mockResolvedValue(undefined),
+        takenOver: jest.spyOn(service as any, 'intentTakenOver').mockResolvedValue(true),
+        finishIntent: jest.spyOn(service as any, 'finishIntent').mockResolvedValue(undefined),
+        observe: jest.spyOn(service as any, 'observeIntentDeploys').mockResolvedValue(1),
+        publish: jest.spyOn(service as any, 'publishDerivedBuildStatus').mockResolvedValue(undefined),
+        ingress: jest.spyOn(service as any, 'enqueueIngressManifest').mockResolvedValue(undefined),
+      };
+      const job: any = { data: { buildId: 7, generation: 3 }, attemptsMade: 0, opts: { attempts: 10 } };
+      return { service, spies, run: () => service.processDeploymentReconciliationQueue(job) };
+    };
+    const ready = (owned: number) => ({ admitted: true, value: { kind: 'ready', preparation: { build: {} }, owned } });
+
+    test('a run whose configuration lock was not admitted records that its request was replaced', async () => {
+      const { spies, run } = worker({ admitted: false });
+      await expect(run()).resolves.toBeUndefined();
+      expect(spies.superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'intent_replaced');
+      expect(spies.finishIntent).not.toHaveBeenCalled();
+    });
+
+    test('a run that owns no pending rows still records rows that carry its token, and only an empty run as empty', async () => {
+      const empty = worker(ready(0));
+      jest.spyOn(empty.service as any, 'summarizeIntentDeploys').mockResolvedValue({
+        deployed: 0,
+        failed: 0,
+        services: 0,
+        status: 'succeeded',
+        reason: null,
+      });
+      const order: string[] = [];
+      empty.spies.superseded.mockImplementation(async () => {
+        order.push('outcome');
+      });
+      empty.spies.finishIntent.mockImplementation(async () => {
+        order.push('finish');
+      });
+      await expect(empty.run()).resolves.toBeUndefined();
+      expect(empty.spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(empty.spies.takenOver).toHaveBeenCalledWith(7, expect.objectContaining({ type: 'all' }), 3);
+      expect(empty.spies.superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'rows_taken');
+      expect(empty.spies.finished).not.toHaveBeenCalled();
+      expect(order).toEqual(['outcome', 'finish']);
+
+      const configFailed = worker(ready(0));
+      const summary = { deployed: 0, failed: 1, services: 1, status: 'failed', reason: 'invalid lifecycle.yaml' };
+      jest.spyOn(configFailed.service as any, 'summarizeIntentDeploys').mockResolvedValue(summary);
+      await expect(configFailed.run()).resolves.toBeUndefined();
+      expect(configFailed.spies.finished).toHaveBeenCalledWith(7, 'run-t', 3, summary);
+      expect(configFailed.spies.superseded).not.toHaveBeenCalled();
+    });
+
+    test('a repository run that finds nothing pending records the rows it settled, or a supersession when none carry its token', async () => {
+      const repositoryWorker = (settled: Record<string, unknown>) => {
+        const service = serviceWith({
+          models: { Deploy: { query: () => mockDeployQuery() }, Build: { query: () => lookupQuery(null) } },
+        });
+        jest
+          .spyOn(service as any, 'tryWithDeploymentGenerationLock')
+          .mockImplementation((_buildId: unknown, _generation: unknown, action: any) => action());
+        jest.spyOn(service as any, 'claimDeploymentIntent').mockResolvedValue({
+          generation: 3,
+          token: 'run-t',
+          intent: { type: 'repository', requestId: 'run-t', githubRepositoryId: 100, gen: 3 },
+          acceptedSourcePins: {},
+        });
+        jest
+          .spyOn(service as any, 'withCurrentBuildDeploymentLock')
+          .mockImplementation(async (_buildId: unknown, _isPending: unknown, action: any) => ({
+            admitted: true,
+            value: await action(),
+          }));
+        jest.spyOn(service as any, 'loadBuildDeploymentAuthority').mockResolvedValue({
+          id: 7,
+          status: BuildStatus.DEPLOYED,
+          deployEnabled: true,
+          deletedAt: null,
+          pullRequestId: null,
+        });
+        mockDeployQuery.mockReturnValueOnce(lookupQuery(null));
+        jest.spyOn(service as any, 'summarizeIntentDeploys').mockResolvedValue(settled);
+        jest.spyOn(service as any, 'intentTakenOver').mockResolvedValue(true);
+        const spies = {
+          finished: jest.spyOn(service as any, 'recordRunFinished').mockResolvedValue(undefined),
+          superseded: jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined),
+          finishIntent: jest.spyOn(service as any, 'finishIntent').mockResolvedValue(undefined),
+          importYaml: jest.spyOn(service as any, 'importYamlConfigFile').mockResolvedValue(undefined),
+        };
+        const job: any = { data: { buildId: 7, generation: 3 }, attemptsMade: 0, opts: { attempts: 10 } };
+        return { spies, run: () => service.processDeploymentReconciliationQueue(job) };
+      };
+
+      const observed = { deployed: 1, failed: 0, services: 1, status: 'succeeded', reason: null };
+      const retried = repositoryWorker(observed);
+      await expect(retried.run()).resolves.toBeUndefined();
+      expect(retried.spies.finished).toHaveBeenCalledWith(7, 'run-t', 3, observed);
+      expect(retried.spies.superseded).not.toHaveBeenCalled();
+      expect(retried.spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(retried.spies.importYaml).not.toHaveBeenCalled();
+
+      const taken = repositoryWorker({ deployed: 0, failed: 0, services: 0, status: 'succeeded', reason: null });
+      await expect(taken.run()).resolves.toBeUndefined();
+      expect(taken.spies.superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'rows_taken');
+      expect(taken.spies.finished).not.toHaveBeenCalled();
+    });
+
+    test('a completed run records its summary as the request outcome; a superseded run records nothing more', async () => {
+      const summary = { deployed: 2, failed: 0, services: 2, status: 'succeeded', reason: null };
+      const completed = worker(ready(2));
+      jest.spyOn(completed.service as any, 'executeDeploymentScope').mockResolvedValue(summary);
+      await expect(completed.run()).resolves.toBeUndefined();
+      expect(completed.spies.ingress).toHaveBeenCalledWith(7, 'run-t', 3);
+      expect(completed.spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(completed.spies.finished).toHaveBeenCalledWith(7, 'run-t', 3, { ...summary, rollout: true });
+
+      const superseded = worker(ready(2));
+      jest.spyOn(superseded.service as any, 'executeDeploymentScope').mockResolvedValue(null);
+      await expect(superseded.run()).resolves.toBeUndefined();
+      expect(superseded.spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(superseded.spies.finished).not.toHaveBeenCalled();
+
+      const takenOver = worker(ready(2));
+      jest
+        .spyOn(takenOver.service as any, 'executeDeploymentScope')
+        .mockResolvedValue({ deployed: 0, failed: 0, services: 0, status: 'succeeded', reason: null });
+      await expect(takenOver.run()).resolves.toBeUndefined();
+      expect(takenOver.spies.superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'rows_taken');
+      expect(takenOver.spies.finished).not.toHaveBeenCalled();
+    });
+
+    test('the outcome is recorded before the intent settles, so a retry cannot read a finished run as superseded', async () => {
+      const order: string[] = [];
+      const summary = { deployed: 1, failed: 0, services: 1, status: 'succeeded', reason: null };
+      const { service, spies, run } = worker(ready(1));
+      jest.spyOn(service as any, 'executeDeploymentScope').mockResolvedValue(summary);
+      spies.finished.mockImplementation(async () => {
+        order.push('outcome');
+      });
+      spies.observe.mockImplementation(async () => {
+        order.push('observe');
+        return 1;
+      });
+      spies.finishIntent.mockImplementation(async () => {
+        order.push('finish');
+      });
+      await expect(run()).resolves.toBeUndefined();
+      expect(order).toEqual(['outcome', 'observe', 'finish']);
+    });
+
+    test('summarizeIntentDeploys judges readiness per service type and names the first service that did not finish', async () => {
+      const service = serviceWith({ models: { Deploy: { query: () => mockDeployQuery() } } });
+      mockDeployQuery.mockReturnValueOnce(
+        lookupQuery([
+          { active: true, status: 'built', statusMessage: '', deployable: { type: 'configuration', name: 'config' } },
+          { active: true, status: 'ready', statusMessage: '', deployable: { type: 'github', name: 'api' } },
+        ])
+      );
+      await expect((service as any).summarizeIntentDeploys(7, 'run-t', 3)).resolves.toEqual({
+        deployed: 2,
+        failed: 0,
+        services: 2,
+        status: 'succeeded',
+        reason: null,
+        serviceOutcomes: [
+          { name: 'config', type: 'configuration', status: 'built', outcome: 'ready', message: null },
+          { name: 'api', type: 'github', status: 'ready', outcome: 'ready', message: null },
+        ],
+      });
+
+      mockDeployQuery.mockReturnValueOnce(
+        lookupQuery([{ active: true, status: 'built', statusMessage: '', deployable: { type: 'github', name: 'api' } }])
+      );
+      await expect((service as any).summarizeIntentDeploys(7, 'run-t', 3)).resolves.toEqual({
+        deployed: 1,
+        failed: 0,
+        services: 1,
+        status: 'failed',
+        reason: 'api did not report ready (built)',
+        serviceOutcomes: [{ name: 'api', type: 'github', status: 'built', outcome: 'unfinished', message: null }],
+      });
+
+      mockDeployQuery.mockReturnValueOnce(
+        lookupQuery([
+          {
+            uuid: 'deploy-web',
+            active: true,
+            status: 'error',
+            statusMessage: 'Image build failed for web',
+            deployable: { type: 'github' },
+          },
+          { active: true, status: 'ready', statusMessage: '', deployable: { type: 'github', name: 'api' } },
+        ])
+      );
+      await expect((service as any).summarizeIntentDeploys(7, 'run-t', 3)).resolves.toEqual({
+        deployed: 1,
+        failed: 1,
+        services: 2,
+        status: 'failed',
+        reason: 'Image build failed for web',
+        serviceOutcomes: [
+          {
+            name: 'deploy-web',
+            type: 'github',
+            status: 'error',
+            outcome: 'failed',
+            message: 'Image build failed for web',
+          },
+          { name: 'api', type: 'github', status: 'ready', outcome: 'ready', message: null },
+        ],
+      });
+    });
+
+    test('recordRunOutcome tells rows taken by a newer request apart from a request that selects no services', async () => {
+      const service = serviceWith({ models: { Deploy: { query: () => mockDeployQuery() } } });
+      const superseded = jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined);
+      const finished = jest.spyOn(service as any, 'recordRunFinished').mockResolvedValue(undefined);
+      const selected = (count: number) => {
+        const query: any = { where: jest.fn(() => query), resultSize: jest.fn().mockResolvedValue(count) };
+        return query;
+      };
+      const empty = { deployed: 0, failed: 0, services: 0, status: 'succeeded', reason: null, serviceOutcomes: [] };
+      const repository = { type: 'repository', requestId: 'run-t', githubRepositoryId: 100 };
+
+      const taken = selected(2);
+      mockDeployQuery.mockReturnValueOnce(taken);
+      await (service as any).recordRunOutcome(7, 'run-t', 3, repository, empty, { worker: 'invalid lifecycle.yaml' });
+      expect(taken.where).toHaveBeenCalledWith({ buildId: 7, active: true, githubRepositoryId: 100 });
+      expect(taken.where).toHaveBeenCalledWith('desiredGeneration', '>', 3);
+      expect(superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'rows_taken');
+      expect(finished).not.toHaveBeenCalled();
+
+      mockDeployQuery.mockReturnValueOnce(selected(0));
+      await (service as any).recordRunOutcome(7, 'run-t', 3, { type: 'all', requestId: 'run-t' }, empty);
+      expect(finished).toHaveBeenLastCalledWith(7, 'run-t', 3, empty);
+
+      mockDeployQuery.mockReturnValueOnce(selected(0));
+      await (service as any).recordRunOutcome(7, 'run-t', 3, repository, empty, { worker: 'invalid lifecycle.yaml' });
+      expect(finished).toHaveBeenLastCalledWith(7, 'run-t', 3, {
+        status: 'failed',
+        reason: 'invalid lifecycle.yaml',
+        services: 1,
+        failed: 1,
+        serviceOutcomes: [
+          { name: 'worker', type: null, status: null, outcome: 'failed', message: 'invalid lifecycle.yaml' },
+        ],
+      });
+    });
+
+    test('recordRunSuperseded records the block that stopped the run, and recordRunFinished the outcome', async () => {
+      const service = serviceWith({
+        models: { Build: { query: () => lookupQuery({ id: 7, status: 'tearing_down', pullRequestId: null }) } },
+      });
+      const blockReason = jest.spyOn(service as any, 'deploymentBlockReason').mockReturnValue('tearing_down');
+      await (service as any).recordRunSuperseded(7, 'run-t', 3, 'failure_ignored');
+      expect(blockReason).toHaveBeenCalledWith(expect.objectContaining({ id: 7, status: 'tearing_down' }));
+      expect(mockRecordBuildEvent).toHaveBeenCalledWith(undefined, {
+        buildId: 7,
+        kind: 'run_superseded',
+        runUUID: 'run-t',
+        reason: 'failure_ignored',
+        meta: { generation: 3, blocked: 'tearing_down' },
+      });
+
+      const unreadable = serviceWith({
+        models: {
+          Build: {
+            query: () => {
+              throw new Error('database connection reset');
+            },
+          },
+        },
+      });
+      await (unreadable as any).recordRunSuperseded(7, 'run-t', 3, 'rollout_skipped');
+      expect(mockRecordBuildEvent).toHaveBeenLastCalledWith(undefined, {
+        buildId: 7,
+        kind: 'run_superseded',
+        runUUID: 'run-t',
+        reason: 'rollout_skipped',
+        meta: { generation: 3, blocked: null },
+      });
+
+      await (service as any).recordRunFinished(7, 'run-t', 3, {
+        status: 'failed',
+        reason: 'boom',
+        services: 2,
+        failed: 1,
+      });
+      expect(mockRecordBuildEvent).toHaveBeenCalledWith(undefined, {
+        buildId: 7,
+        kind: 'run_finished',
+        runUUID: 'run-t',
+        status: 'failed',
+        reason: 'boom',
+        meta: { generation: 3, services: 2, failed: 1 },
+      });
+
+      const serviceOutcomes = [{ name: 'api', type: 'github', status: 'error', outcome: 'failed', message: 'boom' }];
+      await (service as any).recordRunFinished(7, 'run-t', 3, {
+        status: 'failed',
+        reason: 'boom',
+        services: 1,
+        failed: 1,
+        serviceOutcomes,
+      });
+      expect(mockRecordBuildEvent).toHaveBeenLastCalledWith(undefined, {
+        buildId: 7,
+        kind: 'run_finished',
+        runUUID: 'run-t',
+        status: 'failed',
+        reason: 'boom',
+        meta: { generation: 3, services: 1, failed: 1, serviceOutcomes },
+      });
+
+      await (service as any).recordRunFinished(7, 'run-t', 3, {
+        status: 'succeeded',
+        services: 0,
+        failed: 0,
+        serviceOutcomes: [],
+      });
+      const emptyRun = mockRecordBuildEvent.mock.calls[mockRecordBuildEvent.mock.calls.length - 1][1];
+      expect(emptyRun.meta).toEqual({ generation: 3, services: 0, failed: 0 });
+      expect(emptyRun.meta).not.toHaveProperty('serviceOutcomes');
+    });
+
+    test('recordFinalDeploymentReconciliationFailure records what the rows say, or the queue error when none carry the token', async () => {
+      const finalAttempt = (settled: Record<string, unknown>, selectsRows = false) => {
+        const service = serviceWith({ models: {} });
+        const order: string[] = [];
+        jest.spyOn(service as any, 'summarizeIntentDeploys').mockResolvedValue(settled);
+        jest.spyOn(service as any, 'intentTakenOver').mockResolvedValue(selectsRows);
+        const spies = {
+          superseded: jest.spyOn(service as any, 'recordRunSuperseded').mockImplementation(async () => {
+            order.push('outcome');
+          }),
+          claim: jest.spyOn(service as any, 'claimIntentDeploys').mockResolvedValue(1),
+          recordFailure: jest.spyOn(service as any, 'recordFailureOnOwnedDeploys').mockResolvedValue(undefined),
+          observe: jest.spyOn(service as any, 'observeIntentDeploys').mockResolvedValue(1),
+          finishIntent: jest.spyOn(service as any, 'finishIntent').mockImplementation(async () => {
+            order.push('finish');
+          }),
+          finished: jest.spyOn(service as any, 'recordRunFinished').mockImplementation(async () => {
+            order.push('outcome');
+          }),
+        };
+        const claim = { generation: 3, token: 'run-t', intent: { type: 'all', requestId: 'run-t', gen: 3 } };
+        return {
+          spies,
+          order,
+          run: () => (service as any).recordFinalDeploymentReconciliationFailure(7, claim, new Error('queue exploded')),
+        };
+      };
+
+      const rowless = finalAttempt({ deployed: 0, failed: 0, services: 0, status: 'succeeded', reason: null });
+      await expect(rowless.run()).resolves.toBe(true);
+      expect(rowless.spies.claim).toHaveBeenCalledWith(7, 3, 'run-t');
+      expect(rowless.spies.recordFailure).toHaveBeenCalledWith(
+        7,
+        'run-t',
+        3,
+        expect.any(Error),
+        'Build queue processing failed.'
+      );
+      expect(rowless.spies.finished).toHaveBeenCalledWith(7, 'run-t', 3, {
+        status: 'failed',
+        reason: 'queue exploded',
+      });
+      expect(rowless.spies.finishIntent).toHaveBeenCalledWith(7, 3);
+      expect(rowless.order).toEqual(['outcome', 'finish']);
+
+      const ready = { deployed: 1, failed: 0, services: 1, status: 'succeeded', reason: null };
+      const settled = finalAttempt(ready);
+      await expect(settled.run()).resolves.toBe(true);
+      expect(settled.spies.finished).toHaveBeenCalledWith(7, 'run-t', 3, ready);
+      expect(settled.order).toEqual(['outcome', 'finish']);
+
+      const takenOver = finalAttempt({ deployed: 0, failed: 0, services: 0, status: 'succeeded', reason: null }, true);
+      await expect(takenOver.run()).resolves.toBe(true);
+      expect(takenOver.spies.superseded).toHaveBeenCalledWith(7, 'run-t', 3, 'rows_taken');
+      expect(takenOver.spies.finished).not.toHaveBeenCalled();
+      expect(takenOver.order).toEqual(['outcome', 'finish']);
+    });
+  });
+
   describe('processDeploymentReconciliationQueue failure policy', () => {
     const run = (error: Error, options: { current: boolean; attemptsMade?: number }) => {
       const service = serviceWith({ models: {} });
@@ -5675,6 +6151,8 @@ describe('BuildService uncovered public behavior', () => {
         recordFinalFailure: jest
           .spyOn(service as any, 'recordFinalDeploymentReconciliationFailure')
           .mockResolvedValue(undefined),
+        recordRunFinished: jest.spyOn(service as any, 'recordRunFinished').mockResolvedValue(undefined),
+        recordRunSuperseded: jest.spyOn(service as any, 'recordRunSuperseded').mockResolvedValue(undefined),
       };
       const job: any = {
         data: { buildId: 7, generation: 3 },
@@ -5692,6 +6170,10 @@ describe('BuildService uncovered public behavior', () => {
       expect(spies.observeIntentDeploys).toHaveBeenCalledWith(7, 3);
       expect(spies.finishIntent).toHaveBeenCalledWith(7, 3);
       expect(spies.recordFinalFailure).not.toHaveBeenCalled();
+      expect(spies.recordRunFinished).toHaveBeenCalledWith(7, 'run-t', 3, {
+        status: 'failed',
+        reason: expect.stringContaining('services must be a list'),
+      });
     });
 
     test('an error after the run lost its rows is ignored: no retry, no record, no finish', async () => {
@@ -5701,6 +6183,7 @@ describe('BuildService uncovered public behavior', () => {
       expect(spies.takeIntentDeploys).not.toHaveBeenCalled();
       expect(spies.finishIntent).not.toHaveBeenCalled();
       expect(spies.recordFinalFailure).not.toHaveBeenCalled();
+      expect(spies.recordRunSuperseded).toHaveBeenCalledWith(7, 'run-t', 3, 'stale_failure_ignored');
     });
 
     test('a transient error of a current run is rethrown for the queue retry until the final attempt records it', async () => {

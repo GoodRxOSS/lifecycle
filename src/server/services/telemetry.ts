@@ -14,9 +14,20 @@
  * limitations under the License.
  */
 
+import type { Knex } from 'knex';
+import { BadRequestError } from 'server/lib/appError';
 import Service from './_service';
 import type TelemetryEvent from 'server/models/TelemetryEvent';
 import type { TelemetryAttributes, TelemetrySource, TelemetryStatus } from 'server/models/TelemetryEvent';
+import { analyticsTransaction } from './analytics/execution';
+import {
+  analyticsBucketDates,
+  analyticsBucketExpression,
+  parseAnalyticsCalendarQuery,
+  resolveAnalyticsRange,
+  type AnalyticsCalendarQuery,
+  type ResolvedAnalyticsRange,
+} from './analytics/query';
 
 const TELEMETRY_EVENTS_TABLE = 'telemetry_events';
 const TOP_EVENTS_LIMIT = 20;
@@ -38,13 +49,28 @@ export type TelemetryEventInput = {
   arch?: string | null;
 };
 
-export type TelemetryStatsInterval = 'day' | 'week';
+export type TelemetryStatsQuery = AnalyticsCalendarQuery & { source: TelemetrySource };
 
-export type TelemetryStatsQuery = {
+const SOURCES: TelemetrySource[] = ['cli', 'ui'];
+
+export function parseTelemetryStatsQuery(params: URLSearchParams): TelemetryStatsQuery {
+  const source = params.get('source') as TelemetrySource | null;
+  if (!source || !SOURCES.includes(source)) {
+    throw new BadRequestError('source must be cli or ui.', 'invalid_query');
+  }
+  // Older clients sent full timestamps; their calendar day is kept.
+  const calendar = new URLSearchParams(params);
+  for (const key of ['from', 'to']) {
+    const value = calendar.get(key);
+    if (value && /^\d{4}-\d{2}-\d{2}T/.test(value)) calendar.set(key, value.slice(0, 10));
+  }
+  return { ...parseAnalyticsCalendarQuery(calendar), compare: false, source };
+}
+
+export type TelemetryStatsResult = {
   source: TelemetrySource;
-  from: Date;
-  to: Date;
-  interval: TelemetryStatsInterval;
+  range: ResolvedAnalyticsRange;
+  stats: TelemetryStats;
 };
 
 export type TelemetryBucketCount = {
@@ -72,10 +98,6 @@ export type TelemetryStats = {
   platforms: Array<{ platform: string | null; count: number }>;
 };
 
-function toBucketString(bucket: unknown): string {
-  return bucket instanceof Date ? bucket.toISOString() : String(bucket);
-}
-
 function toCount(value: unknown): number {
   return Number(value) || 0;
 }
@@ -94,107 +116,96 @@ export default class TelemetryService extends Service {
       .returning('*');
   }
 
-  async getStats({ source, from, to, interval }: TelemetryStatsQuery): Promise<TelemetryStats> {
-    const knex = this.db.knex;
-    const range: [string, string] = [from.toISOString(), to.toISOString()];
+  async getStats(query: TelemetryStatsQuery): Promise<TelemetryStatsResult> {
+    const { source } = query;
+    return analyticsTransaction(this.db.knex, async (trx) => {
+      const range = await resolveAnalyticsRange(trx, { ...query, compare: false });
+      const scoped = (): Knex.QueryBuilder =>
+        trx(TELEMETRY_EVENTS_TABLE)
+          .where('source', source)
+          .where('createdAt', '>=', range.fromUtc)
+          .where('createdAt', '<', range.toUtc);
+      const bucket = () => analyticsBucketExpression(trx, range, 'createdAt').wrap('', ' AS bucket');
 
-    type BucketCountRow = { bucket: Date | string; count: number };
-    type TopEventRow = {
-      event: string;
-      count: number;
-      errorCount: number;
-      p50DurationMs: number | string | null;
-      p95DurationMs: number | string | null;
-    };
-    type VersionRow = { clientVersion: string; count: number };
-    type PlatformRow = { platform: string | null; count: number };
+      type BucketCountRow = { bucket: string; count: number };
+      type TopEventRow = {
+        event: string;
+        count: number;
+        errorCount: number;
+        p50DurationMs: number | string | null;
+        p95DurationMs: number | string | null;
+      };
+      type VersionRow = { clientVersion: string; count: number };
+      type PlatformRow = { platform: string | null; count: number };
 
-    const [usageRows, eventRows, clientTotalRow, clientOverTimeRows, versionRows, platformRows] = (await Promise.all([
-      knex(TELEMETRY_EVENTS_TABLE)
-        .select(knex.raw('date_trunc(?, "createdAt") as bucket', [interval]))
-        .select(knex.raw('count(*)::int as count'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
-        .groupByRaw('1')
-        .orderByRaw('1'),
-      knex(TELEMETRY_EVENTS_TABLE)
+      const usageRows = (await scoped()
+        .select(bucket())
+        .select(trx.raw('count(*)::int as count'))
+        .groupBy('bucket')) as BucketCountRow[];
+      const eventRows = (await scoped()
         .select('event')
-        .select(knex.raw('count(*)::int as count'))
-        .select(knex.raw(`count(*) filter (where status = 'error')::int as "errorCount"`))
-        .select(knex.raw('percentile_cont(0.5) within group (order by "durationMs") as "p50DurationMs"'))
-        .select(knex.raw('percentile_cont(0.95) within group (order by "durationMs") as "p95DurationMs"'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
+        .select(trx.raw('count(*)::int as count'))
+        .select(trx.raw(`count(*) filter (where status = 'error')::int as "errorCount"`))
+        .select(trx.raw('percentile_cont(0.5) within group (order by "durationMs") as "p50DurationMs"'))
+        .select(trx.raw('percentile_cont(0.95) within group (order by "durationMs") as "p95DurationMs"'))
         .groupBy('event')
         .orderBy('count', 'desc')
-        .limit(TOP_EVENTS_LIMIT),
-      knex(TELEMETRY_EVENTS_TABLE)
-        .select(knex.raw('count(distinct "clientId")::int as count'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
-        .first(),
-      knex(TELEMETRY_EVENTS_TABLE)
-        .select(knex.raw('date_trunc(?, "createdAt") as bucket', [interval]))
-        .select(knex.raw('count(distinct "clientId")::int as count'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
-        .groupByRaw('1')
-        .orderByRaw('1'),
-      knex(TELEMETRY_EVENTS_TABLE)
+        .limit(TOP_EVENTS_LIMIT)) as TopEventRow[];
+      const clientTotalRow = (await scoped().select(trx.raw('count(distinct "clientId")::int as count')).first()) as
+        | { count: number }
+        | undefined;
+      const clientOverTimeRows = (await scoped()
+        .select(bucket())
+        .select(trx.raw('count(distinct "clientId")::int as count'))
+        .groupBy('bucket')) as BucketCountRow[];
+      const versionRows = (await scoped()
         .select('clientVersion')
-        .select(knex.raw('count(distinct "clientId")::int as count'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
+        .select(trx.raw('count(distinct "clientId")::int as count'))
         .groupBy('clientVersion')
-        .orderBy('count', 'desc'),
-      knex(TELEMETRY_EVENTS_TABLE)
+        .orderBy('count', 'desc')) as VersionRow[];
+      const platformRows = (await scoped()
         .select('platform')
-        .select(knex.raw('count(distinct "clientId")::int as count'))
-        .where('source', source)
-        .whereBetween('createdAt', range)
+        .select(trx.raw('count(distinct "clientId")::int as count'))
         .groupBy('platform')
-        .orderBy('count', 'desc'),
-    ])) as unknown as [
-      BucketCountRow[],
-      TopEventRow[],
-      { count: number } | undefined,
-      BucketCountRow[],
-      VersionRow[],
-      PlatformRow[]
-    ];
+        .orderBy('count', 'desc')) as PlatformRow[];
 
-    return {
-      usageOverTime: usageRows.map((row) => ({
-        bucket: toBucketString(row.bucket),
-        count: toCount(row.count),
-      })),
-      topEvents: eventRows.map((row) => {
-        const count = toCount(row.count);
-        const errorCount = toCount(row.errorCount);
-        return {
-          event: row.event,
-          count,
-          errorCount,
-          errorRate: count > 0 ? errorCount / count : 0,
-          p50DurationMs: toDurationMs(row.p50DurationMs),
-          p95DurationMs: toDurationMs(row.p95DurationMs),
-        };
-      }),
-      activeClients: {
-        total: toCount(clientTotalRow?.count),
-        overTime: clientOverTimeRows.map((row) => ({
-          bucket: toBucketString(row.bucket),
-          count: toCount(row.count),
-        })),
-      },
-      versions: versionRows.map((row) => ({
-        clientVersion: row.clientVersion,
-        count: toCount(row.count),
-      })),
-      platforms: platformRows.map((row) => ({
-        platform: row.platform ?? null,
-        count: toCount(row.count),
-      })),
-    };
+      const dates = analyticsBucketDates(range);
+      const filled = (rows: BucketCountRow[]): TelemetryBucketCount[] => {
+        const counts = new Map(rows.map((row) => [String(row.bucket), toCount(row.count)]));
+        return dates.map((date) => ({ bucket: date, count: counts.get(date) ?? 0 }));
+      };
+
+      return {
+        source,
+        range,
+        stats: {
+          usageOverTime: filled(usageRows),
+          topEvents: eventRows.map((row) => {
+            const count = toCount(row.count);
+            const errorCount = toCount(row.errorCount);
+            return {
+              event: row.event,
+              count,
+              errorCount,
+              errorRate: count > 0 ? errorCount / count : 0,
+              p50DurationMs: toDurationMs(row.p50DurationMs),
+              p95DurationMs: toDurationMs(row.p95DurationMs),
+            };
+          }),
+          activeClients: {
+            total: toCount(clientTotalRow?.count),
+            overTime: filled(clientOverTimeRows),
+          },
+          versions: versionRows.map((row) => ({
+            clientVersion: row.clientVersion,
+            count: toCount(row.count),
+          })),
+          platforms: platformRows.map((row) => ({
+            platform: row.platform ?? null,
+            count: toCount(row.count),
+          })),
+        },
+      };
+    });
   }
 }

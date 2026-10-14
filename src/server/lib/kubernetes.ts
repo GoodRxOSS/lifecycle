@@ -28,6 +28,7 @@ import { IncomingMessage } from 'http';
 import { APP_ENV, TMP_PATH } from 'shared/config';
 import fs from 'fs';
 import GlobalConfigService from 'server/services/globalConfig';
+import { recordNamespaceCreated } from 'server/services/buildEvents';
 import { staticEnvTolerations } from './helm/constants';
 import { parseSecretRefsFromEnv, SecretRefWithEnvKey } from './secretRefs';
 import { generateSecretName } from './kubernetes/externalSecret';
@@ -374,6 +375,7 @@ export async function createOrUpdateNamespace({
   try {
     await client.createNamespace(namespace);
     getLogger({ namespace: name }).debug('Namespace created');
+    await recordNamespaceCreated(Build.knex(), buildUUID);
   } catch (err) {
     // Deploys in a build create the namespace concurrently; the loser of the race sees AlreadyExists, which is success.
     if (!isNamespaceAlreadyExistsError(err)) {
@@ -592,22 +594,24 @@ export async function probeWorkspacePodPresence(namespace: string, podName: stri
  * Deletes the given namespace
  * @param name namespace to delete
  */
-export async function deleteNamespace(name: string) {
+/** Resolves true only when a namespace was actually deleted. */
+export async function deleteNamespace(name: string): Promise<boolean> {
   if (!name.startsWith('env-') && !name.startsWith('sbx-') && !name.startsWith('prj-') && !name.startsWith('chat-')) {
-    return;
+    return false;
   }
 
   try {
     await shellPromise(`kubectl delete ns ${name} --grace-period 120`);
     getLogger({ namespace: name }).info('Deploy: namespace deleted');
+    return true;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (message.includes('Error from server (NotFound): namespaces')) {
       getLogger({ namespace: name }).info('Deploy: namespace skipped reason=notFound');
-    } else {
-      getLogger({ namespace: name, error: e }).error('Namespace: delete failed');
-      throw e;
+      return false;
     }
+    getLogger({ namespace: name, error: e }).error('Namespace: delete failed');
+    throw e;
   }
 }
 

@@ -28,7 +28,7 @@ export const runtime = 'nodejs';
  *     tags: [Admin Analytics]
  *     operationId: getManagedServiceRecords
  *     parameters:
- *       - { in: query, name: repositoryId, schema: { type: integer, minimum: 1 }, description: Owning environment repository row ID, with installation identity. }
+ *       - { in: query, name: repositoryId, schema: { type: integer, minimum: 1 }, description: 'Owning environment repository row ID, with installation identity.' }
  *       - { in: query, name: unattributed, schema: { type: boolean, default: false }, description: Mutually exclusive with repositoryId. Unresolved identities remain separate by environment. }
  *       - { in: query, name: organization, schema: { type: string, maxLength: 128 } }
  *       - { in: query, name: environmentType, schema: { type: string, enum: [all, ephemeral, static], default: all } }

@@ -119,6 +119,14 @@ function toResolvedModelSelection(model: AgentModelSummary): AgentResolvedModelS
     selection.outputCostPerMillion = model.outputCostPerMillion;
   }
 
+  if (typeof model.cacheReadCostPerMillion === 'number') {
+    selection.cacheReadCostPerMillion = model.cacheReadCostPerMillion;
+  }
+
+  if (typeof model.cacheWriteCostPerMillion === 'number') {
+    selection.cacheWriteCostPerMillion = model.cacheWriteCostPerMillion;
+  }
+
   return selection;
 }
 

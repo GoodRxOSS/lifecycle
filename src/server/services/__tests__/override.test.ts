@@ -219,6 +219,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
   });
 
@@ -395,6 +396,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
   });
 
@@ -425,6 +427,7 @@ describe('OverrideService.applyBuildOverrides', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
     expect(result).toEqual({
       buildUuid: 'current-build',
@@ -876,6 +879,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
     expect(result).toMatchObject({
       uuid: 'current-build',
@@ -907,6 +911,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
     expect(result).toMatchObject({
       uuid: 'current-build',
@@ -1009,6 +1014,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
     expect(result).toMatchObject({
       id: 42,
@@ -1083,6 +1089,7 @@ describe('OverrideService.applyBuildConfigPatch', () => {
     expect(mockFallbackEnqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: 'run-uuid',
+      origin: 'redeploy',
     });
   });
 });

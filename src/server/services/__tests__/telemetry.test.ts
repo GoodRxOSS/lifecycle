@@ -1,5 +1,5 @@
 /**
- * Copyright 2026 Lifecycle contributors
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,32 +14,47 @@
  * limitations under the License.
  */
 
-import TelemetryService, { type TelemetryEventInput } from '../telemetry';
+jest.mock('server/lib/dependencies', () => ({ defaultDb: {} }));
+const mockResolveRange = jest.fn();
+jest.mock('../analytics/query', () => ({
+  ...jest.requireActual('../analytics/query'),
+  resolveAnalyticsRange: (...args: unknown[]) => mockResolveRange(...args),
+}));
 
-type QueryBuilder = Record<string, jest.Mock> & {
-  then: <TResult1 = unknown, TResult2 = never>(
-    onFulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
-    onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-  ) => Promise<TResult1 | TResult2>;
+import knexFactory, { type Knex } from 'knex';
+import TelemetryService, { parseTelemetryStatsQuery, type TelemetryEventInput } from '../telemetry';
+import type { ResolvedAnalyticsRange } from '../analytics/query';
+
+const range: ResolvedAnalyticsRange = {
+  from: '2026-08-01',
+  to: '2026-08-03',
+  timezone: 'America/New_York',
+  fromUtc: '2026-08-01T04:00:00.000Z',
+  toUtc: '2026-08-03T04:00:00.000Z',
+  dates: ['2026-08-01', '2026-08-02'],
+  calendarDays: 2,
+  interval: 'day',
+  compare: false,
+  asOf: '2026-08-03T12:00:00.000Z',
+  previous: null,
 };
 
-function resolvedBuilder(value: unknown): QueryBuilder {
-  const builder = {} as QueryBuilder;
-  for (const method of [
-    'select',
-    'where',
-    'whereBetween',
-    'groupBy',
-    'groupByRaw',
-    'orderBy',
-    'orderByRaw',
-    'limit',
-    'first',
-  ]) {
-    builder[method] = jest.fn().mockReturnValue(builder);
-  }
-  builder.then = (onFulfilled, onRejected) => Promise.resolve(value).then(onFulfilled, onRejected);
-  return builder;
+type Query = { sql: string; bindings: readonly unknown[]; method: string };
+function serviceWithExecutor(execute: (query: Query) => unknown) {
+  const knex = knexFactory({ client: 'pg' });
+  const queries: Query[] = [];
+  jest.spyOn(knex.client, 'runner').mockImplementation(
+    (builder: any) =>
+      ({
+        run: async () => {
+          const query = builder.toSQL();
+          queries.push(query);
+          return execute(query);
+        },
+      } as any)
+  );
+  const transaction = async (work: (trx: Knex) => Promise<unknown>) => work(knex);
+  return { service: new TelemetryService({ knex: { transaction } } as any), queries };
 }
 
 const baseEvent: TelemetryEventInput = {
@@ -51,6 +66,19 @@ const baseEvent: TelemetryEventInput = {
 };
 
 describe('TelemetryService', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveRange.mockResolvedValue(range);
+  });
+
+  it('parses the source with the shared calendar window and never compares periods', () => {
+    expect(
+      parseTelemetryStatsQuery(new URLSearchParams('source=ui&from=2026-08-01&to=2026-08-03&compare=true'))
+    ).toEqual({ source: 'ui', from: '2026-08-01', to: '2026-08-03', timezone: 'UTC', interval: 'day', compare: false });
+    expect(() => parseTelemetryStatsQuery(new URLSearchParams('source=mobile'))).toThrow('source must be cli or ui.');
+    expect(() => parseTelemetryStatsQuery(new URLSearchParams('source=cli&interval=month'))).toThrow();
+  });
+
   it.each([
     ['defaults omitted attributes', baseEvent, {}],
     ['preserves supplied attributes', { ...baseEvent, attributes: { format: 'json' } }, { format: 'json' }],
@@ -66,99 +94,105 @@ describe('TelemetryService', () => {
     expect(returning).toHaveBeenCalledWith('*');
   });
 
-  it('returns normalized usage, error, client, version, and platform statistics', async () => {
-    const from = new Date('2026-08-01T00:00:00.000Z');
-    const to = new Date('2026-08-08T00:00:00.000Z');
-    const bucketDate = new Date('2026-08-01T00:00:00.000Z');
-    const builders = [
-      resolvedBuilder([
-        { bucket: bucketDate, count: '3' },
-        { bucket: '2026-08-02T00:00:00Z', count: 'not-a-number' },
-      ]),
-      resolvedBuilder([
-        { event: 'builds list', count: '4', errorCount: '1', p50DurationMs: '12.5', p95DurationMs: 30 },
-        { event: 'builds get', count: 0, errorCount: undefined, p50DurationMs: null, p95DurationMs: undefined },
-      ]),
-      resolvedBuilder({ count: '2' }),
-      resolvedBuilder([{ bucket: bucketDate, count: 2 }]),
-      resolvedBuilder([{ clientVersion: '1.2.3', count: '2' }]),
-      resolvedBuilder([
-        { platform: 'darwin', count: 2 },
-        { platform: undefined, count: 1 },
-      ]),
-    ];
-    const pendingBuilders = [...builders];
-    const knex = jest.fn(() => pendingBuilders.shift()) as jest.Mock & { raw: jest.Mock };
-    knex.raw = jest.fn((sql: string, bindings?: unknown[]) => ({ sql, bindings }));
-    const service = new TelemetryService({ knex } as any);
-
-    const result = await service.getStats({ source: 'cli', from, to, interval: 'day' });
-
-    expect(result).toEqual({
-      usageOverTime: [
-        { bucket: '2026-08-01T00:00:00.000Z', count: 3 },
-        { bucket: '2026-08-02T00:00:00Z', count: 0 },
-      ],
-      topEvents: [
-        {
-          event: 'builds list',
-          count: 4,
-          errorCount: 1,
-          errorRate: 0.25,
-          p50DurationMs: 12.5,
-          p95DurationMs: 30,
-        },
-        {
-          event: 'builds get',
-          count: 0,
-          errorCount: 0,
-          errorRate: 0,
-          p50DurationMs: null,
-          p95DurationMs: null,
-        },
-      ],
-      activeClients: {
-        total: 2,
-        overTime: [{ bucket: '2026-08-01T00:00:00.000Z', count: 2 }],
-      },
-      versions: [{ clientVersion: '1.2.3', count: 2 }],
-      platforms: [
-        { platform: 'darwin', count: 2 },
-        { platform: null, count: 1 },
-      ],
+  it('aggregates one calendar window in local-day buckets and zero-fills missing days', async () => {
+    const { service, queries } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.sql.includes('"errorCount"'))
+        return [{ event: 'builds list', count: 10, errorCount: '1', p50DurationMs: '120', p95DurationMs: null }];
+      if (query.method === 'first') return { count: 2 };
+      if (query.sql.includes('distinct "clientId")::int as count') && query.sql.includes('AS bucket'))
+        return [{ bucket: '2026-08-02', count: 2 }];
+      if (query.sql.includes('"clientVersion"')) return [{ clientVersion: '1.2.3', count: 2 }];
+      if (query.sql.includes('"platform"'))
+        return [
+          { platform: 'darwin', count: 2 },
+          { platform: null, count: 1 },
+        ];
+      return [{ bucket: '2026-08-02', count: '7' }];
     });
-    expect(knex).toHaveBeenCalledTimes(6);
-    expect(knex).toHaveBeenCalledWith('telemetry_events');
-    for (const builder of builders) {
-      expect(builder.where).toHaveBeenCalledWith('source', 'cli');
-      expect(builder.whereBetween).toHaveBeenCalledWith('createdAt', [from.toISOString(), to.toISOString()]);
+
+    const result = await service.getStats({ source: 'cli', from: '2026-08-01', to: '2026-08-03', interval: 'day' });
+
+    expect(mockResolveRange).toHaveBeenCalledWith(expect.anything(), {
+      source: 'cli',
+      from: '2026-08-01',
+      to: '2026-08-03',
+      interval: 'day',
+      compare: false,
+    });
+    expect(result).toEqual({
+      source: 'cli',
+      range,
+      stats: {
+        usageOverTime: [
+          { bucket: '2026-08-01', count: 0 },
+          { bucket: '2026-08-02', count: 7 },
+        ],
+        topEvents: [
+          {
+            event: 'builds list',
+            count: 10,
+            errorCount: 1,
+            errorRate: 0.1,
+            p50DurationMs: 120,
+            p95DurationMs: null,
+          },
+        ],
+        activeClients: {
+          total: 2,
+          overTime: [
+            { bucket: '2026-08-01', count: 0 },
+            { bucket: '2026-08-02', count: 2 },
+          ],
+        },
+        versions: [{ clientVersion: '1.2.3', count: 2 }],
+        platforms: [
+          { platform: 'darwin', count: 2 },
+          { platform: null, count: 1 },
+        ],
+      },
+    });
+    const scoped = queries.filter((query) => query.sql.includes('"telemetry_events"'));
+    expect(scoped).toHaveLength(6);
+    for (const query of scoped) {
+      expect(query.sql).toContain('"source" = ? and "createdAt" >= ? and "createdAt" < ?');
+      expect(query.bindings).toEqual(expect.arrayContaining(['cli', range.fromUtc, range.toUtc]));
+      expect(query.sql).not.toContain('between');
     }
+    const bucketed = scoped.filter((query) => query.sql.includes('AS bucket'));
+    expect(bucketed).toHaveLength(2);
+    for (const query of bucketed) {
+      expect(query.sql).toContain(
+        `to_char(date_trunc(?, ("createdAt" AT TIME ZONE ?) + (? * interval '1 day')), 'YYYY-MM-DD') AS bucket`
+      );
+      expect(query.bindings.slice(0, 3)).toEqual(['day', 'America/New_York', 0]);
+      expect(query.sql).toContain('group by "bucket"');
+    }
+    expect(scoped.find((query) => query.sql.includes('"errorCount"'))!.sql).toContain('limit ?');
   });
 
-  it('returns empty statistics when the database has no matching rows', async () => {
-    const builders = [
-      resolvedBuilder([]),
-      resolvedBuilder([]),
-      resolvedBuilder(undefined),
-      resolvedBuilder([]),
-      resolvedBuilder([]),
-      resolvedBuilder([]),
-    ];
-    const knex = jest.fn(() => builders.shift()) as jest.Mock & { raw: jest.Mock };
-    knex.raw = jest.fn((sql: string) => sql);
-    const service = new TelemetryService({ knex } as any);
-
-    const result = await service.getStats({
-      source: 'ui',
-      from: new Date('2026-08-01T00:00:00.000Z'),
-      to: new Date('2026-08-02T00:00:00.000Z'),
-      interval: 'week',
+  it('returns zero-filled empty statistics when the window has no rows', async () => {
+    const { service } = serviceWithExecutor((query) => {
+      if (query.sql.startsWith('SET ')) return { rows: [] };
+      if (query.method === 'first') return undefined;
+      return [];
     });
 
-    expect(result).toEqual({
-      usageOverTime: [],
+    const result = await service.getStats({ source: 'ui', interval: 'day' });
+
+    expect(result.stats).toEqual({
+      usageOverTime: [
+        { bucket: '2026-08-01', count: 0 },
+        { bucket: '2026-08-02', count: 0 },
+      ],
       topEvents: [],
-      activeClients: { total: 0, overTime: [] },
+      activeClients: {
+        total: 0,
+        overTime: [
+          { bucket: '2026-08-01', count: 0 },
+          { bucket: '2026-08-02', count: 0 },
+        ],
+      },
       versions: [],
       platforms: [],
     });

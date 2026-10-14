@@ -177,6 +177,23 @@ describe('MCP environment DTO', () => {
     expect(serialized).not.toContain(SECRET);
   });
 
+  it('redacts a private key even when the stored cut dropped its END line', () => {
+    const material = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj'.repeat(20);
+    const stored = `${'a'.repeat(900)} data.tls.key: -----BEGIN PRIVATE KEY----- ${material}`.slice(0, 997) + '...';
+    const whole = `${'a'.repeat(
+      900
+    )} data.tls.key: -----BEGIN PRIVATE KEY----- ${material} -----END PRIVATE KEY----- tail`;
+    for (const statusMessage of [stored, whole]) {
+      const dto = toMcpEnvironmentDto(build({ status: BuildStatus.ERROR, statusMessage, deploys: [deploy('web')] }), {
+        repository: 'org/root',
+        format: 'detailed',
+      });
+      expect(JSON.stringify(dto)).not.toContain('MIIEvQ');
+      expect(dto.statusMessage).toContain('[redacted]');
+      expect(dto.statusMessage!.startsWith('a'.repeat(900))).toBe(true);
+    }
+  });
+
   it('normalizes a Date-backed environment expiry to RFC 3339', () => {
     const expiresAt = new Date('2026-07-28T00:00:00.000Z');
     const dateBackedBuild = build({ expiresAt });

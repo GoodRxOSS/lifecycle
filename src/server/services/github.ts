@@ -251,6 +251,7 @@ export default class GithubService extends Service {
           } else {
             await this.db.services.BuildService.enqueueResolveAndDeployBuild({
               buildId: build.id,
+              origin: 'pr_open',
             });
           }
         } else if (pullRequestState?.deployOnUpdate) {
@@ -374,6 +375,7 @@ export default class GithubService extends Service {
       }
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId,
+        origin: 'label',
       });
     } catch (error) {
       getLogger().error({ error }, `Label: webhook processing failed`);
@@ -693,6 +695,7 @@ export default class GithubService extends Service {
 
         await this.db.services.BuildService.enqueueResolveAndDeployBuild({
           buildId,
+          origin: 'push',
           ...(hasFailedDeploys && build.pullRequest != null ? {} : { githubRepositoryId }),
           ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
           ...(!this.isVoidCommit(previousCommit) ? { sourceBeforeRef: previousCommit } : {}),
@@ -732,6 +735,7 @@ export default class GithubService extends Service {
       getLogger().info(`Push: deploying api environment uuid=${build.uuid} branch=${branchName}`);
       await this.db.services.BuildService.enqueueResolveAndDeployBuild({
         buildId: build.id,
+        origin: 'push',
         ...(deployTriggerRef ? { sourceRef: deployTriggerRef } : {}),
         ...(sourceBeforeRef ? { sourceBeforeRef } : {}),
         sourceGithubRepositoryId: githubRepositoryId,
@@ -783,6 +787,7 @@ export default class GithubService extends Service {
         try {
           await this.db.services.BuildService.enqueueResolveAndDeployBuild({
             buildId: build.id,
+            origin: 'config_push',
             ...(headCommit ? { sourceRef: headCommit } : {}),
             ...(beforeCommit ? { sourceBeforeRef: beforeCommit } : {}),
             sourceGithubRepositoryId: githubRepositoryId,

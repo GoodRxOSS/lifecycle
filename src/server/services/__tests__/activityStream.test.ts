@@ -303,6 +303,7 @@ describe('ActivityStream comment overrides', () => {
       deploys,
       pullRequest,
       runUuid: 'run-uuid',
+      origin: 'comment',
       overrides: {
         serviceOverrides: [
           {
@@ -588,6 +589,7 @@ describe('ActivityStream.updateBuildsAndDeploysFromCommentEdit', () => {
       expect(mockEnqueueResolveAndDeployBuild).toHaveBeenCalledWith({
         buildId: build.id,
         runUUID: 'generated-run-uuid',
+        origin: 'comment',
       });
       expect(mockApplyBuildOverrides).not.toHaveBeenCalled();
       expect(mockFastlyGetServiceId).not.toHaveBeenCalled();
@@ -642,6 +644,7 @@ describe('ActivityStream.updateBuildsAndDeploysFromCommentEdit', () => {
       deploys,
       pullRequest,
       runUuid: 'generated-run-uuid',
+      origin: 'comment',
       overrides: {
         serviceOverrides: [{ active: true, serviceName: 'api', branchOrExternalUrl: 'feature/api' }],
         vanityUrl: null,
@@ -1416,6 +1419,7 @@ describe('ActivityStream comment edit ordering', () => {
     expect(enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
       buildId: 42,
       runUUID: overrideArgs.runUuid,
+      origin: 'comment',
     });
   });
 

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { recordNamespaceDeleted, type BuildEventOrigin } from './buildEvents';
 import BaseService from './_service';
 import { getLogger, updateLogContext } from 'server/lib/logger';
 import { isDeployEnabled } from 'server/lib/buildSource';
@@ -64,6 +65,7 @@ export interface ApplyBuildOverridesArgs {
   pullRequest?: PullRequest | null;
   overrides: BuildOverrideInput;
   runUuid: string;
+  origin?: BuildEventOrigin;
 }
 
 export interface ApplyBuildConfigPatchArgs {
@@ -181,6 +183,7 @@ export default class OverrideService extends BaseService {
     pullRequest,
     overrides,
     runUuid,
+    origin = 'redeploy',
   }: ApplyBuildOverridesArgs): Promise<void> {
     if (!build.id) {
       getLogger().error('Build: missing for comment edit overrides');
@@ -215,7 +218,7 @@ export default class OverrideService extends BaseService {
       await this.updateBuildUuid(build, requestedUuid);
     }
 
-    await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid);
+    await this.enqueueRedeployIfEnabled(build, pullRequest, runUuid, origin);
   }
 
   async applyBuildConfigPatch({
@@ -523,7 +526,8 @@ export default class OverrideService extends BaseService {
   private async enqueueRedeployIfEnabled(
     build: Build,
     pullRequest: PullRequest | null | undefined,
-    runUuid: string
+    runUuid: string,
+    origin: BuildEventOrigin = 'redeploy'
   ): Promise<boolean> {
     if (pullRequest && !build.pullRequest) {
       build.pullRequest = pullRequest;
@@ -538,6 +542,7 @@ export default class OverrideService extends BaseService {
 
     await buildService.enqueueResolveAndDeployBuild({
       buildId: build.id,
+      origin,
       runUUID: runUuid,
     });
     return true;
@@ -631,9 +636,12 @@ export default class OverrideService extends BaseService {
 
         const updatedBuild = await this.db.models.Build.query(trx).findById(build.id);
 
-        k8s.deleteNamespace(oldNamespace).catch((error) => {
-          getLogger().warn({ error }, `Namespace: delete failed name=${oldNamespace}`);
-        });
+        k8s
+          .deleteNamespace(oldNamespace)
+          .then((deleted) => (deleted ? recordNamespaceDeleted(this.db.knex, build.id, null, oldNamespace) : undefined))
+          .catch((error) => {
+            getLogger().warn({ error }, `Namespace: delete failed name=${oldNamespace}`);
+          });
         getLogger().info(`Override: updated oldUuid=${oldUuid} newUuid=${newUuid} deploysUpdated=${deploys.length}`);
 
         return {

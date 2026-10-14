@@ -501,6 +501,45 @@ describe('agent observability helpers', () => {
     expect(applyConfiguredModelCostEstimate(summary, undefined)).toBe(summary);
   });
 
+  it('prices cache reads and writes separately when cache rates are configured', () => {
+    const usage = {
+      inputTokens: 1_000_000,
+      nonCachedInputTokens: 200_000,
+      cacheReadInputTokens: 700_000,
+      cacheCreationInputTokens: 100_000,
+      outputTokens: 0,
+    };
+    const priced = estimateConfiguredModelCostUsd(usage, {
+      inputCostPerMillion: 3,
+      outputCostPerMillion: 15,
+      cacheReadCostPerMillion: 0.3,
+      cacheWriteCostPerMillion: 3.75,
+    });
+    expect(priced.estimatedCostSource).toBe('configured_model_pricing');
+    expect(priced.estimatedCostUsd).toBeCloseTo(1.185, 10);
+    expect(
+      estimateConfiguredModelCostUsd(usage, { inputCostPerMillion: 3, outputCostPerMillion: 15 }).estimatedCostUsd
+    ).toBeCloseTo(3, 10);
+    expect(
+      estimateConfiguredModelCostUsd(
+        { inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 0 },
+        { inputCostPerMillion: 3, outputCostPerMillion: 15, cacheReadCostPerMillion: 0.3 }
+      ).estimatedCostUsd
+    ).toBeCloseTo(1.8 + 0.12, 10);
+    expect(
+      estimateConfiguredModelCostUsd(
+        { inputTokens: 100_000, cacheReadInputTokens: 400_000, outputTokens: 0 },
+        { inputCostPerMillion: 3, outputCostPerMillion: 15, cacheWriteCostPerMillion: 6 }
+      ).estimatedCostUsd
+    ).toBeCloseTo(1.2, 10);
+    expect(
+      estimateConfiguredModelCostUsd(
+        { inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 0 },
+        { inputCostPerMillion: 3, outputCostPerMillion: 15 }
+      ).estimatedCostUsd
+    ).toBeCloseTo(3, 10);
+  });
+
   it('adds configured estimates without replacing provider-reported cost', () => {
     expect(
       applyConfiguredModelCostEstimate(

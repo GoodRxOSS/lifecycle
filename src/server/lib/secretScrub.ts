@@ -30,16 +30,16 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key id
   /\bxox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, // JWT
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, // PEM private keys
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s\\]+(?:\.\.\.|…)?$|(?:\s|\\[rn])*(?:Proc-Type:\s*[^\s\\]+(?:\s|\\[rn])+)?(?:DEK-Info:\s*[^\s\\]+(?:\s|\\[rn])+)?[A-Za-z0-9+/=]{32,}(?:(?:\s|\\[rn])+(?![a-z]{1,15}(?![A-Za-z0-9+/=]))[A-Za-z0-9+/=]+)*(?:\s*(?:\.\.\.|…))?)/g, // PEM private keys: a whole block, a cut block, or a key body with no END line
 ];
 
 // Authorization headers: keep the scheme, redact the credential.
 const AUTH_SCHEME_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/g;
 
 // Keyed assignments (`KEY=value`, `KEY: "value"`): keep the key + operator, redact the value.
-// Covers the Lifecycle gateway token (named + 64-hex value) and aws_secret_access_key.
+// Bounded key lengths keep long runs linear. Covers the gateway token and aws_secret_access_key.
 const ASSIGNMENT_PATTERN =
-  /\b((?=[A-Z0-9_-]*(?:TOKEN|SECRET|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSWORD|PASSWD|CREDENTIALS?))[A-Z][A-Z0-9_-]*)\b(["']?\s*[:=]\s*["']?)([^\s"',;]{8,})/gi;
+  /\b((?=[A-Z0-9_-]{0,96}(?:TOKEN|SECRET|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|PASSWORD|PASSWD|CREDENTIALS?))[A-Z][A-Z0-9_-]{0,127})\b(["']?\s*[:=]\s*["']?)([^\s"',;]{8,})/gi;
 
 /** Replace detected credentials in free text with `[redacted]`. Pure; safe on any string. */
 export function scrubSecretsFromText(text: string): string {

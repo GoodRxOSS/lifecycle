@@ -13,10 +13,9 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, withNoStore } from 'server/lib/response';
-import AgentAnalyticsService, {
-  parseAgentAnalyticsQuery,
-  parseAgentAnalyticsPagination,
-} from 'server/services/analytics/AgentAnalyticsService';
+import { parseAnalyticsPagination } from 'server/services/analytics/query';
+import AgentAnalyticsService, { parseAgentAnalyticsQuery } from 'server/services/analytics/AgentAnalyticsService';
+import { parseAnalyticsSlice } from 'server/services/analytics/query';
 
 /**
  * @openapi
@@ -38,6 +37,8 @@ import AgentAnalyticsService, {
  *       - {in: query, name: agentId, schema: {type: string}}
  *       - {in: query, name: provider, schema: {type: string}}
  *       - {in: query, name: model, schema: {type: string}}
+ *       - {in: query, name: date, schema: {type: string, format: date}, description: Start date of one chart bucket.}
+ *       - {in: query, name: period, schema: {type: string, enum: [current, previous], default: current}, description: Lists the comparison window when previous.}
  *       - {in: query, name: page, schema: {type: integer, minimum: 1, maximum: 10000, default: 1}}
  *       - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
  *     responses:
@@ -65,11 +66,12 @@ import AgentAnalyticsService, {
  */
 export const GET = createApiHandler(
   async (req: NextRequest) => {
-    const { page, limit } = parseAgentAnalyticsPagination(req.nextUrl.searchParams);
+    const { page, limit } = parseAnalyticsPagination(req.nextUrl.searchParams);
     const result = await new AgentAnalyticsService().listSessions(
       parseAgentAnalyticsQuery(req.nextUrl.searchParams),
       page,
-      limit
+      limit,
+      parseAnalyticsSlice(req.nextUrl.searchParams)
     );
     return withNoStore(successResponse(result, { status: 200 }, req));
   },

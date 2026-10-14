@@ -26,6 +26,7 @@ import { getLogger } from 'server/lib/logger';
 import Metrics from 'server/lib/metrics';
 import type { Principal } from 'server/lib/principal';
 import { recordAuthAuditEvent } from 'server/services/authAudit';
+import McpOauthClientService from 'server/services/keycloak/mcpOauthClients';
 import type {
   McpJsonObject,
   McpAdminCapability,
@@ -88,6 +89,8 @@ export interface McpToolCallAuditRecord {
   tool: string;
   outcome: string;
   stage: 'validation' | 'policy' | 'domain' | 'success';
+  readOnly: boolean;
+  durationMs: number;
   fields: McpToolAuditFields;
 }
 
@@ -95,9 +98,29 @@ export interface McpToolCallAuditSink {
   record(record: McpToolCallAuditRecord): void | Promise<void>;
 }
 
+const CLIENT_NAME_LOOKUP_MS = 500;
+/** The audit row is written whatever Keycloak does: the name lookup is bounded and never throws. */
+async function boundedClientName(clientId: string): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      McpOauthClientService.getInstance().clientName(clientId),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CLIENT_NAME_LOOKUP_MS);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const defaultMetrics = new Metrics('mcp', {});
 const defaultAudit: McpToolCallAuditSink = {
-  record: async ({ principal, requestId, tool, outcome, stage, fields }) => {
+  record: async ({ principal, requestId, tool, outcome, stage, readOnly, durationMs, fields }) => {
+    const username = principal.identity?.preferredUsername ?? principal.identity?.githubUsername ?? null;
+    const clientName = principal.oauth ? await boundedClientName(principal.oauth.clientId) : null;
     await recordAuthAuditEvent({
       event: 'mcp.tool_call',
       principalKind: principal.kind,
@@ -111,6 +134,11 @@ const defaultAudit: McpToolCallAuditSink = {
         tool,
         stage,
         credentialKind: principal.kind,
+        readOnly,
+        durationMs,
+        ...(principal.oauth ? { clientId: principal.oauth.clientId, sessionId: principal.oauth.sessionId } : {}),
+        ...(clientName ? { clientName } : {}),
+        ...(username ? { username } : {}),
         ...fields,
       },
     });
@@ -295,7 +323,6 @@ export class McpToolRegistry {
     const metricTags = { tool: compiled.definition.name };
     const metricStartedAt = Date.now();
     this.recordMetric(() => this.metrics.increment('tool.calls', metricTags));
-    const shouldAudit = compiled.definition.annotations.readOnlyHint !== true;
     const auditFields = initialAuditFields(input);
     const auditContext: McpToolAuditContext = {
       annotate: (fields) => Object.assign(auditFields, normalizeAuditFields(fields)),
@@ -348,17 +375,21 @@ export class McpToolRegistry {
       this.recordResponseMetrics(result, metricTags);
       return result;
     } finally {
-      this.recordMetric(() => this.metrics.timing('tool.duration_ms', Date.now() - metricStartedAt, metricTags));
-      if (shouldAudit) {
-        await this.recordAudit({
-          principal: context.principal,
-          requestId: context.requestId,
-          tool: compiled.definition.name,
-          outcome: auditOutcome,
-          stage: auditStage,
-          fields: auditFields,
-        });
-      }
+      const durationMs = Date.now() - metricStartedAt;
+      this.recordMetric(() => this.metrics.timing('tool.duration_ms', durationMs, metricTags));
+      const readOnly = compiled.definition.annotations.readOnlyHint === true;
+      const audited = this.recordAudit({
+        principal: context.principal,
+        requestId: context.requestId,
+        tool: compiled.definition.name,
+        outcome: auditOutcome,
+        stage: auditStage,
+        readOnly,
+        durationMs,
+        fields: auditFields,
+      });
+      // A change must not report success before its audit row is written; reads do not wait.
+      if (!readOnly) await audited;
     }
   }
 

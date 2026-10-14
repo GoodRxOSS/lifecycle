@@ -163,7 +163,7 @@ describe('acceptDeploymentIntent', () => {
       sha: 'commit-c',
     });
 
-    expect(result).toEqual({ accepted: true, generation: 3, scopeKey: 'source:123:main' });
+    expect(result).toEqual({ accepted: true, generation: 3, scopeKey: 'source:123:main', replaced: [] });
     expect(read.select).toHaveBeenCalledWith('id', 'desiredGeneration', 'acceptedRefs');
     expect(read.findById).toHaveBeenCalledWith(42);
     expect(read.whereNull).toHaveBeenCalledWith('deletedAt');
@@ -225,7 +225,7 @@ describe('acceptDeploymentIntent', () => {
         branch: 'main',
         sha: 'same-sha',
       })
-    ).resolves.toEqual({ accepted: false, generation: 7, scopeKey: 'source:123:main' });
+    ).resolves.toEqual({ accepted: false, generation: 7, scopeKey: 'source:123:main', replaced: [] });
     expect(Build.query).toHaveBeenCalledTimes(1);
   });
 
@@ -257,7 +257,7 @@ describe('acceptDeploymentIntent', () => {
         sha: 'commit-b',
         beforeSha: 'commit-a',
       })
-    ).resolves.toEqual({ accepted: false, generation: 8, scopeKey: 'source:123:main' });
+    ).resolves.toEqual({ accepted: false, generation: 8, scopeKey: 'source:123:main', replaced: [] });
     expect(Build.query).toHaveBeenCalledTimes(1);
   });
 
@@ -290,7 +290,12 @@ describe('acceptDeploymentIntent', () => {
         sha: 'commit-b',
         beforeSha: 'commit-c',
       })
-    ).resolves.toEqual({ accepted: true, generation: 9, scopeKey: 'source:123:main' });
+    ).resolves.toEqual({
+      accepted: true,
+      generation: 9,
+      scopeKey: 'source:123:main',
+      replaced: [{ requestId: 'request-c', generation: 8 }],
+    });
     expect(write.patch).toHaveBeenCalledWith(
       expect.objectContaining({
         desiredGeneration: 9,
@@ -316,7 +321,7 @@ describe('acceptDeploymentIntent', () => {
         requestId: 'request-7',
         githubRepositoryId: 123,
       })
-    ).resolves.toEqual({ accepted: false, generation: 7, scopeKey: 'repository:123' });
+    ).resolves.toEqual({ accepted: false, generation: 7, scopeKey: 'repository:123', replaced: [] });
     expect(Build.query).toHaveBeenCalledTimes(1);
   });
 
@@ -391,6 +396,7 @@ describe('acceptDeploymentIntent', () => {
       accepted: true,
       generation: 7,
       scopeKey: 'all',
+      replaced: [{ requestId: 'request-5', generation: 5 }],
     });
 
     expect(write.patch).toHaveBeenCalledWith({
@@ -434,7 +440,7 @@ describe('acceptDeploymentIntent', () => {
 
     await expect(
       acceptDeploymentIntent(42, { type: 'repository', requestId: 'request-1', githubRepositoryId: 123 })
-    ).resolves.toEqual({ accepted: true, generation: 1, scopeKey: 'repository:123' });
+    ).resolves.toEqual({ accepted: true, generation: 1, scopeKey: 'repository:123', replaced: [] });
     expect(write.patch).toHaveBeenCalledWith({
       desiredGeneration: 1,
       acceptedRefs: {
@@ -523,7 +529,7 @@ describe('acceptDeploymentIntent row stamping', () => {
         branch: 'main',
         sha: 'commit-a',
       })
-    ).resolves.toEqual({ accepted: false, generation: 1, scopeKey: 'source:123:main' });
+    ).resolves.toEqual({ accepted: false, generation: 1, scopeKey: 'source:123:main', replaced: [] });
 
     expect(Deploy.query).not.toHaveBeenCalled();
   });

@@ -21,9 +21,13 @@ import { analyticsTransaction } from './execution';
 import {
   analyticsBucketDates,
   analyticsBucketExpression,
+  analyticsSlicePeriod,
   parseAnalyticsCalendarQuery,
+  parseAnalyticsPagination,
+  parseAnalyticsSlice,
   resolveAnalyticsRange,
   type AnalyticsCalendarQuery,
+  type AnalyticsSlice,
   type ResolvedAnalyticsRange,
 } from './query';
 
@@ -36,15 +40,24 @@ export type EnvironmentAnalyticsScope = {
 };
 export type EnvironmentAnalyticsQuery = AnalyticsCalendarQuery &
   EnvironmentAnalyticsScope & {
-    rankBy: 'first_seen' | 'observed_prs' | 'pr_coverage';
+    rankBy: 'first_seen' | 'observed_prs' | 'prs_deployed' | 'deploy_rate';
     activityBreakdown?: 'repositories';
   };
+export type EnvironmentAnalyticsWindowEvidence = 'requested' | 'rolled_out';
+export type EnvironmentAnalyticsEvidence = EnvironmentAnalyticsWindowEvidence | 'live' | 'ready' | 'never_requested';
+export type EnvironmentAnalyticsRecordsSlice = AnalyticsSlice & { evidence: EnvironmentAnalyticsEvidence | null };
+export type EnvironmentAnalyticsPullRequestsSlice = AnalyticsSlice & {
+  evidence: EnvironmentAnalyticsWindowEvidence | null;
+};
 export type EnvironmentAnalyticsRecordsQuery = EnvironmentAnalyticsQuery & {
   cohort: 'first_seen' | 'current';
   phase: EnvironmentPhase | null;
+  slice: EnvironmentAnalyticsRecordsSlice;
   page: number;
   limit: number;
 };
+export type EnvironmentAnalyticsPullRequestsQuery = AnalyticsCalendarQuery &
+  EnvironmentAnalyticsScope & { slice: EnvironmentAnalyticsPullRequestsSlice; page: number; limit: number };
 export type AnalyticsRepositoryIdentity = {
   repositoryId: number | null;
   fullName: string | null;
@@ -52,19 +65,26 @@ export type AnalyticsRepositoryIdentity = {
 };
 export type EnvironmentAnalyticsTotals = {
   firstSeenEnvironments: number;
+  deployRequestedEnvironments: number;
+  rolledOutEnvironments: number;
   observedPullRequests: number | null;
-  pullRequestsWithEnvironments: number | null;
+  pullRequestsWithDeployRequest: number | null;
+  pullRequestsDeployed: number | null;
   activeRepositories: number;
   unattributedEnvironments: number;
   ambiguousRepositoryEnvironments: number;
 };
 export type EnvironmentAnalyticsRepository = AnalyticsRepositoryIdentity & {
   firstSeenEnvironments: number;
+  deployRequestedEnvironments: number;
+  rolledOutEnvironments: number;
   observedPullRequests: number | null;
-  pullRequestsWithEnvironments: number | null;
-  pullRequestCoverage: number | null;
+  pullRequestsWithDeployRequest: number | null;
+  pullRequestsDeployed: number | null;
+  deployRate: number | null;
   currentEnvironments: number;
   readyEnvironments: number;
+  liveEnvironments: number;
 };
 export type EnvironmentActivityAnalyticsBucket = {
   date: string;
@@ -103,6 +123,7 @@ export type EnvironmentAnalytics = {
     previousObservedPullRequests: number | null;
   }>;
   activity?: EnvironmentActivityBreakdown;
+  inventoryTotals: InventoryTotals;
   repositories: EnvironmentAnalyticsRepository[];
   rankingTotal: number;
   rankingTruncated: boolean;
@@ -111,6 +132,10 @@ export type EnvironmentAnalytics = {
 };
 export type InventoryTotals = {
   current: number;
+  requested: number;
+  pullRequestsNeverRequested: number;
+  rolledOut: number;
+  live: number;
   static: number;
   ephemeral: number;
   ready: number;
@@ -185,6 +210,11 @@ export type EnvironmentAnalyticsRecord = AnalyticsRepositoryIdentity & {
   expiresAt: string | null;
   deletedAt: string | null;
   resourceAvailable: boolean;
+  deployRequested: boolean;
+  rolledOut: boolean;
+  live: boolean;
+  firstReadyAt: string | null;
+  lastTornDownAt: string | null;
   repositoryAmbiguous: boolean;
   serviceInstances: number | null;
   serviceTypes: EnvironmentServiceCounts['byType'] | null;
@@ -196,8 +226,6 @@ export type InventoryAnalytics = {
   totals: InventoryTotals;
   services: ManagedServiceInventory;
   repositories: InventoryRepository[];
-  exceptions: EnvironmentAnalyticsRecord[];
-  truncated: boolean;
   repositoriesTruncated: boolean;
   repositoryTotal: number;
   caveats: string[];
@@ -214,7 +242,26 @@ export type EnvironmentAnalyticsRecords = {
   scope: EnvironmentAnalyticsScope;
   range: ResolvedAnalyticsRange | null;
   cohort: 'first_seen' | 'current';
+  slice: EnvironmentAnalyticsRecordsSlice;
   records: EnvironmentAnalyticsRecord[];
+  pagination: { page: number; limit: number; total: number; hasMore: boolean };
+};
+export type EnvironmentAnalyticsPullRequestRecord = AnalyticsRepositoryIdentity & {
+  id: number;
+  number: number;
+  title: string | null;
+  author: string | null;
+  createdAt: string | null;
+  deployRequested: boolean;
+  rolledOut: boolean;
+  environment: { id: number; uuid: string | null; namespace: string | null; resourceAvailable: boolean } | null;
+};
+export type EnvironmentAnalyticsPullRequests = {
+  asOf: string;
+  scope: EnvironmentAnalyticsScope;
+  range: ResolvedAnalyticsRange;
+  slice: EnvironmentAnalyticsPullRequestsSlice;
+  records: EnvironmentAnalyticsPullRequestRecord[];
   pagination: { page: number; limit: number; total: number; hasMore: boolean };
 };
 
@@ -230,6 +277,11 @@ type Projection = {
   deletedAt: Date | string | null;
   expiresAt: Date | string | null;
   deployEnabled: boolean | null;
+  deployRequested: boolean | null;
+  rolledOut: boolean | null;
+  namespaceLive: boolean | null;
+  firstReadyAt: Date | string | null;
+  lastTornDownAt: Date | string | null;
   pullRequestId: number | null;
   prDeployOnUpdate: boolean | null;
   prAuthor: string | null;
@@ -244,15 +296,49 @@ type Projection = {
 };
 type CountRow = AnalyticsRepositoryIdentity & {
   count: number | string;
-  covered?: number | string;
+  requested?: number | string;
+  deployed?: number | string;
   ambiguous?: number | string;
 };
 type EnvironmentBucketRow = { date: string; count: number | string; key?: string };
+type PullRequestRow = AnalyticsRepositoryIdentity & {
+  id: number;
+  pullRequestNumber: number;
+  title: string | null;
+  githubLogin: string | null;
+  createdAt: Date | string | null;
+  deployRequested: boolean | null;
+  rolledOut: boolean | null;
+  environmentId: number | null;
+  environmentUuid: string | null;
+  environmentNamespace: string | null;
+  environmentStatus: string | null;
+  environmentDeletedAt: Date | string | null;
+};
 const BATCH_SIZE = 1000;
 const RANKING_LIMIT = 100;
 const ACTIVITY_REPOSITORY_LIMIT = 5;
-const EXCEPTION_LIMIT = 20;
+const DEPLOY_RATE_MIN_PULL_REQUESTS = 10;
 const MANAGED_SERVICE_MAX_PAGE = 1_000_000;
+const RECORDS_MAX_PAGE = 1_000_000;
+const WINDOW_EVIDENCE: EnvironmentAnalyticsWindowEvidence[] = ['requested', 'rolled_out'];
+const CURRENT_EVIDENCE: EnvironmentAnalyticsEvidence[] = [...WINDOW_EVIDENCE, 'live', 'ready', 'never_requested'];
+const ENVIRONMENT_EVIDENCE_SQL: Record<EnvironmentAnalyticsWindowEvidence, string> = {
+  requested: 'e."deployRequested"',
+  rolled_out: 'e."rolledOut"',
+};
+const PULL_REQUEST_EVIDENCE_SQL: Record<EnvironmentAnalyticsWindowEvidence, string> = {
+  requested: 'coverage.requested',
+  rolled_out: 'coverage.deployed',
+};
+const CURRENT_EVIDENCE_MATCHES: Record<EnvironmentAnalyticsEvidence, (record: EnvironmentAnalyticsRecord) => boolean> =
+  {
+    requested: (record) => record.deployRequested,
+    rolled_out: (record) => record.rolledOut,
+    live: (record) => record.live,
+    ready: (record) => record.phase === 'ready',
+    never_requested: (record) => !record.deployRequested && record.pullRequest != null,
+  };
 const MANAGED_SERVICE_TYPES: ManagedServiceType[] = [
   DeployTypes.DOCKER,
   DeployTypes.GITHUB,
@@ -274,7 +360,7 @@ const CURRENT_PHASES: EnvironmentPhase[] = [
   'tearing_down',
 ];
 const CAVEATS = [
-  'Historical counts cover retained first-seen records, not deployment attempts. Collection and retention start are unknown.',
+  'Created counts cover retained records, including records that never had a deploy request. Deploy requested and rolled out come from the request and rollout times recorded on each record.',
   'API-created environments have no installation binding; duplicate active repository matches are unattributed and counted as ambiguous.',
 ];
 const timestamp = (value: Date | string | null) => {
@@ -283,6 +369,8 @@ const timestamp = (value: Date | string | null) => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 };
 const count = (value: unknown) => Number(value) || 0;
+const resourceAvailable = (row: { uuid: string | null; deletedAt: Date | string | null }) =>
+  Boolean(row.uuid) && row.deletedAt == null;
 const identityKey = (value: number | null) => (value == null ? 'unattributed' : String(value));
 const identity = (row: AnalyticsRepositoryIdentity): AnalyticsRepositoryIdentity => ({
   repositoryId: row.repositoryId == null ? null : Number(row.repositoryId),
@@ -291,6 +379,10 @@ const identity = (row: AnalyticsRepositoryIdentity): AnalyticsRepositoryIdentity
 });
 const emptyInventory = (): InventoryTotals => ({
   current: 0,
+  requested: 0,
+  pullRequestsNeverRequested: 0,
+  rolledOut: 0,
+  live: 0,
   static: 0,
   ephemeral: 0,
   ready: 0,
@@ -344,9 +436,10 @@ export function parseEnvironmentAnalyticsScope(params: URLSearchParams): Environ
 }
 
 export function parseEnvironmentAnalyticsQuery(params: URLSearchParams): EnvironmentAnalyticsQuery {
-  const rankBy = params.get('rankBy') ?? 'first_seen';
-  if (!['first_seen', 'observed_prs', 'pr_coverage'].includes(rankBy))
-    throw new BadRequestError('rankBy must be first_seen, observed_prs or pr_coverage.', 'invalid_query');
+  // pr_coverage is the ranking older links used; the deploy rate is its replacement.
+  const rankBy = (params.get('rankBy') ?? 'first_seen').replace(/^pr_coverage$/, 'deploy_rate');
+  if (!['first_seen', 'observed_prs', 'prs_deployed', 'deploy_rate'].includes(rankBy))
+    throw new BadRequestError('rankBy must be first_seen, observed_prs, prs_deployed or deploy_rate.', 'invalid_query');
   const activityBreakdown = params.get('activityBreakdown') ?? 'none';
   if (activityBreakdown !== 'none' && activityBreakdown !== 'repositories')
     throw new BadRequestError('activityBreakdown must be none or repositories.', 'invalid_query');
@@ -356,6 +449,24 @@ export function parseEnvironmentAnalyticsQuery(params: URLSearchParams): Environ
     rankBy: rankBy as EnvironmentAnalyticsQuery['rankBy'],
     ...(activityBreakdown === 'repositories' ? { activityBreakdown } : {}),
   };
+}
+
+function parseEvidence<Evidence extends EnvironmentAnalyticsEvidence>(
+  params: URLSearchParams,
+  allowed: Evidence[],
+  message: string
+): Evidence | null {
+  const value = params.get('evidence');
+  if (value === null) return null;
+  if (!allowed.includes(value as Evidence)) throw new BadRequestError(message, 'invalid_query');
+  return value as Evidence;
+}
+
+function parseWindowSlice(params: URLSearchParams, calendar: AnalyticsCalendarQuery): AnalyticsSlice {
+  const slice = parseAnalyticsSlice(params);
+  if (slice.period === 'previous' && calendar.compare === false)
+    throw new BadRequestError('period must be current when compare is false.', 'invalid_query');
+  return slice;
 }
 
 export function parseEnvironmentAnalyticsRecordsQuery(params: URLSearchParams): EnvironmentAnalyticsRecordsQuery {
@@ -373,17 +484,49 @@ export function parseEnvironmentAnalyticsRecordsQuery(params: URLSearchParams): 
   if (
     !Number.isSafeInteger(page) ||
     page < 1 ||
-    page > 1_000_000 ||
+    page > RECORDS_MAX_PAGE ||
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
     limit > 100
   )
     throw new BadRequestError('page must be positive and limit must be between 1 and 100.', 'invalid_query');
-  const query =
-    cohort === 'current'
-      ? { ...parseEnvironmentAnalyticsScope(params), rankBy: 'first_seen' as const }
-      : parseEnvironmentAnalyticsQuery(params);
-  return { ...query, cohort, phase, page, limit };
+  if (cohort === 'current') {
+    if (params.has('date') || params.has('period'))
+      throw new BadRequestError('date and period apply to the first_seen cohort only.', 'invalid_query');
+    const evidence = parseEvidence(
+      params,
+      CURRENT_EVIDENCE,
+      'evidence must be requested, rolled_out, live, ready or never_requested.'
+    );
+    const slice = { evidence, date: null, period: 'current' as const };
+    return { ...parseEnvironmentAnalyticsScope(params), rankBy: 'first_seen', cohort, phase, slice, page, limit };
+  }
+  const query = parseEnvironmentAnalyticsQuery(params);
+  const evidence = parseEvidence(
+    params,
+    WINDOW_EVIDENCE,
+    'evidence must be requested or rolled_out for the first_seen cohort.'
+  );
+  return { ...query, cohort, phase, slice: { evidence, ...parseWindowSlice(params, query) }, page, limit };
+}
+
+export function parseEnvironmentAnalyticsPullRequestsQuery(
+  params: URLSearchParams
+): EnvironmentAnalyticsPullRequestsQuery {
+  const scope = parseEnvironmentAnalyticsScope(params);
+  if (scope.environmentType === 'static')
+    throw new BadRequestError(
+      'Pull requests are not available for static environments. Use environmentType all or ephemeral.',
+      'invalid_query'
+    );
+  const calendar = parseAnalyticsCalendarQuery(params);
+  const evidence = parseEvidence(params, WINDOW_EVIDENCE, 'evidence must be requested or rolled_out.');
+  return {
+    ...calendar,
+    ...scope,
+    slice: { evidence, ...parseWindowSlice(params, calendar) },
+    ...parseAnalyticsPagination(params, RECORDS_MAX_PAGE),
+  };
 }
 
 export function parseManagedServiceRecordsQuery(params: URLSearchParams): ManagedServiceRecordsQuery {
@@ -414,14 +557,19 @@ export function environmentBase(knex: Knex, scope: EnvironmentAnalyticsScope): K
   const base = knex.raw(
     `
     SELECT b.id, b.uuid, b.namespace, b.status, b."isStatic", b."triggerType", b."createdAt", b."updatedAt",
-      b."deletedAt", b."expiresAt", b."deployEnabled", b."pullRequestId", (p.id IS NOT NULL) AS "hasPullRequest", p."deployOnUpdate" AS "prDeployOnUpdate",
+      b."deletedAt", b."expiresAt", b."deployEnabled", b."firstReadyAt", b."lastTornDownAt",
+      (b."desiredGeneration" > 0 OR b."firstRolledOutAt" IS NOT NULL OR b."firstReadyAt" IS NOT NULL) AS "deployRequested",
+      (b."firstRolledOutAt" IS NOT NULL) AS "rolledOut",
+      CASE WHEN b."namespaceCreatedAt" IS NULL THEN NULL
+        ELSE b."namespaceCreatedAt" > COALESCE(b."namespaceDeletedAt", '-infinity'::timestamptz) END AS "namespaceLive",
+      b."pullRequestId", (p.id IS NOT NULL) AS "hasPullRequest", p."deployOnUpdate" AS "prDeployOnUpdate",
       p."githubLogin" AS "prAuthor", p."pullRequestNumber", p.title AS "prTitle",
       COALESCE(b."createdByGithubLogin", p."githubLogin") AS author,
       CASE WHEN p.id IS NOT NULL THEN p."repositoryId" WHEN rc.matches = 1 THEN rc."repositoryId" END AS "repositoryId",
       (p.id IS NULL AND COALESCE(rc.matches, 0) > 1) AS "repositoryAmbiguous"
     FROM builds b LEFT JOIN pull_requests p ON p.id = b."pullRequestId"
     LEFT JOIN repository_candidates rc ON p.id IS NULL AND rc."githubRepositoryId" = b."githubRepositoryId"
-    WHERE b.kind = ?
+    WHERE b.kind = ? AND (b."pullRequestId" IS NOT NULL OR b."triggerType" = 'api')
   `,
     [BuildKind.ENVIRONMENT]
   );
@@ -449,6 +597,49 @@ function pullRequestBase(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.Que
   if (scope.organization) query.whereRaw(`LOWER(split_part(r."fullName", '/', 1)) = LOWER(?)`, [scope.organization]);
   if (scope.environmentAuthor) query.whereRaw('LOWER(p."githubLogin") = LOWER(?)', [scope.environmentAuthor]);
   return query;
+}
+
+function pullRequestBuildsSql(scope: EnvironmentAnalyticsScope): string {
+  const ephemeralOnly = scope.environmentType === 'ephemeral' ? ' AND COALESCE(c."isStatic", false) = false' : '';
+  return `FROM builds c WHERE c."pullRequestId" = p.id AND c.kind = ?${ephemeralOnly}`;
+}
+
+function pullRequestCoverage(query: Knex.QueryBuilder, scope: EnvironmentAnalyticsScope): Knex.QueryBuilder {
+  return query.joinRaw(
+    `LEFT JOIN LATERAL (
+            SELECT bool_or(c."desiredGeneration" > 0 OR c."firstRolledOutAt" IS NOT NULL OR c."firstReadyAt" IS NOT NULL) AS requested,
+              bool_or(c."firstRolledOutAt" IS NOT NULL) AS deployed
+            ${pullRequestBuildsSql(scope)}
+          ) coverage ON true`,
+    [BuildKind.ENVIRONMENT]
+  );
+}
+
+function newestPullRequestEnvironment(query: Knex.QueryBuilder, scope: EnvironmentAnalyticsScope): Knex.QueryBuilder {
+  return query.joinRaw(
+    `LEFT JOIN LATERAL (
+            SELECT c.id, c.uuid, c.namespace, c.status, c."deletedAt"
+            ${pullRequestBuildsSql(scope)}
+            ORDER BY c.id DESC LIMIT 1
+          ) environment ON true`,
+    [BuildKind.ENVIRONMENT]
+  );
+}
+
+function sliceWindow(
+  knex: Knex,
+  range: ResolvedAnalyticsRange,
+  slice: AnalyticsSlice,
+  column: string,
+  evidence: string | null
+): (query: Knex.QueryBuilder) => Knex.QueryBuilder {
+  const period = analyticsSlicePeriod(range, slice);
+  return (query) => {
+    query.where(column, '>=', period.fromUtc).where(column, '<', period.toUtc);
+    if (slice.date) query.where(analyticsBucketExpression(knex, range, column, slice.period), '=', slice.date);
+    if (evidence) query.whereRaw(evidence);
+    return query;
+  };
 }
 
 function projection(knex: Knex, scope: EnvironmentAnalyticsScope): Knex.QueryBuilder {
@@ -537,7 +728,17 @@ export function analyticsEnvironmentRecord(row: Projection): EnvironmentAnalytic
     updatedAt: timestamp(row.updatedAt),
     expiresAt: timestamp(row.expiresAt),
     deletedAt: timestamp(row.deletedAt),
-    resourceAvailable: Boolean(row.uuid) && row.deletedAt == null && row.status !== BuildStatus.TORN_DOWN,
+    resourceAvailable: resourceAvailable(row),
+    deployRequested: row.deployRequested === true,
+    rolledOut: row.rolledOut === true,
+    live:
+      resourceAvailable(row) &&
+      row.status !== BuildStatus.TORN_DOWN &&
+      row.rolledOut === true &&
+      row.namespaceLive !== false &&
+      (row.pullRequestId == null ? row.deployEnabled === true : row.prDeployOnUpdate === true),
+    firstReadyAt: timestamp(row.firstReadyAt),
+    lastTornDownAt: timestamp(row.lastTornDownAt),
     repositoryAmbiguous: row.repositoryAmbiguous === true,
     serviceInstances: null,
     serviceTypes: null,
@@ -546,8 +747,37 @@ export function analyticsEnvironmentRecord(row: Projection): EnvironmentAnalytic
   };
 }
 
+function pullRequestRecord(row: PullRequestRow): EnvironmentAnalyticsPullRequestRecord {
+  return {
+    ...identity(row),
+    id: Number(row.id),
+    number: Number(row.pullRequestNumber),
+    title: row.title ?? null,
+    author: row.githubLogin ?? null,
+    createdAt: timestamp(row.createdAt),
+    deployRequested: row.deployRequested === true,
+    rolledOut: row.rolledOut === true,
+    environment:
+      row.environmentId == null
+        ? null
+        : {
+            id: Number(row.environmentId),
+            uuid: row.environmentUuid,
+            namespace: row.environmentNamespace,
+            resourceAvailable: resourceAvailable({
+              uuid: row.environmentUuid,
+              deletedAt: row.environmentDeletedAt,
+            }),
+          },
+  };
+}
+
 function addInventory(totals: InventoryTotals, record: EnvironmentAnalyticsRecord): void {
   totals.current++;
+  if (record.deployRequested) totals.requested++;
+  else if (record.pullRequest) totals.pullRequestsNeverRequested++;
+  if (record.rolledOut) totals.rolledOut++;
+  if (record.live) totals.live++;
   totals[record.isStatic ? 'static' : 'ephemeral']++;
   if (record.repositoryId == null) totals.unattributed++;
   if (record.repositoryAmbiguous) totals.ambiguous++;
@@ -591,30 +821,17 @@ export default class EnvironmentAnalyticsService {
   private async inventory(
     knex: Knex,
     scope: EnvironmentAnalyticsScope
-  ): Promise<{
-    totals: InventoryTotals;
-    repositories: Map<string, InventoryRepository>;
-    exceptions: EnvironmentAnalyticsRecord[];
-    exceptionTotal: number;
-  }> {
+  ): Promise<{ totals: InventoryTotals; repositories: Map<string, InventoryRepository> }> {
     const totals = emptyInventory(),
       repositories = new Map<string, InventoryRepository>();
-    const exceptions: EnvironmentAnalyticsRecord[] = [];
-    let exceptionTotal = 0;
     await this.visitCurrent(knex, scope, (record) => {
       addInventory(totals, record);
       const key = identityKey(record.repositoryId);
       const repository = repositories.get(key) ?? { ...identity(record), ...emptyInventory() };
       addInventory(repository, record);
       repositories.set(key, repository);
-      if (record.phase !== 'ready') {
-        exceptionTotal++;
-        exceptions.push(record);
-        exceptions.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || b.id - a.id);
-        if (exceptions.length > EXCEPTION_LIMIT) exceptions.pop();
-      }
     });
-    return { totals, repositories, exceptions, exceptionTotal };
+    return { totals, repositories };
   }
 
   private async addServiceCounts(
@@ -844,6 +1061,8 @@ export default class EnvironmentAnalyticsService {
       .select('e.repositoryId', 'r.fullName', 'r.githubInstallationId')
       .count('e.id as count')
       .select(knex.raw('count(*) FILTER (WHERE e."repositoryAmbiguous") AS ambiguous'))
+      .select(knex.raw('count(*) FILTER (WHERE e."deployRequested") AS requested'))
+      .select(knex.raw('count(*) FILTER (WHERE e."rolledOut") AS deployed'))
       .groupBy('e.repositoryId', 'r.fullName', 'r.githubInstallationId')) as CountRow[];
     const envBuckets = includeEnvBuckets ? await this.environmentBuckets(knex, query, range, prior) : [];
     let prRows: CountRow[] = [],
@@ -852,17 +1071,11 @@ export default class EnvironmentAnalyticsService {
       const prs = pullRequestBase(knex, query)
         .where('p.createdAt', '>=', period.fromUtc)
         .where('p.createdAt', '<', period.toUtc);
-      const coverage = knex('builds as coverage')
-        .distinct('coverage.pullRequestId')
-        .whereNotNull('coverage.pullRequestId')
-        .where('coverage.kind', BuildKind.ENVIRONMENT);
-      if (query.environmentType === 'ephemeral') coverage.whereRaw('COALESCE(coverage."isStatic", false) = false');
-      prRows = (await prs
-        .clone()
-        .leftJoin(coverage.as('coverage'), 'coverage.pullRequestId', 'p.id')
+      prRows = (await pullRequestCoverage(prs.clone(), query)
         .select('p.repositoryId', 'r.fullName', 'r.githubInstallationId')
         .count('p.id as count')
-        .select(knex.raw('count(*) FILTER (WHERE coverage."pullRequestId" IS NOT NULL) AS covered'))
+        .select(knex.raw('count(*) FILTER (WHERE coverage.requested) AS requested'))
+        .select(knex.raw('count(*) FILTER (WHERE coverage.deployed) AS deployed'))
         .groupBy('p.repositoryId', 'r.fullName', 'r.githubInstallationId')) as CountRow[];
       prBuckets = (await prs
         .clone()
@@ -875,8 +1088,11 @@ export default class EnvironmentAnalyticsService {
     const applicable = query.environmentType !== 'static';
     const totals: EnvironmentAnalyticsTotals = {
       firstSeenEnvironments: envRows.reduce((sum, row) => sum + count(row.count), 0),
+      deployRequestedEnvironments: envRows.reduce((sum, row) => sum + count(row.requested), 0),
+      rolledOutEnvironments: envRows.reduce((sum, row) => sum + count(row.deployed), 0),
       observedPullRequests: applicable ? prRows.reduce((sum, row) => sum + count(row.count), 0) : null,
-      pullRequestsWithEnvironments: applicable ? prRows.reduce((sum, row) => sum + count(row.covered), 0) : null,
+      pullRequestsWithDeployRequest: applicable ? prRows.reduce((sum, row) => sum + count(row.requested), 0) : null,
+      pullRequestsDeployed: applicable ? prRows.reduce((sum, row) => sum + count(row.deployed), 0) : null,
       activeRepositories: envRows.filter((row) => row.repositoryId != null && count(row.count) > 0).length,
       unattributedEnvironments: envRows
         .filter((row) => row.repositoryId == null)
@@ -907,37 +1123,52 @@ export default class EnvironmentAnalyticsService {
         const existing = repositories.get(key) ?? {
           ...identity(row),
           firstSeenEnvironments: 0,
+          deployRequestedEnvironments: 0,
+          rolledOutEnvironments: 0,
           observedPullRequests: applicable ? 0 : null,
-          pullRequestsWithEnvironments: applicable ? 0 : null,
-          pullRequestCoverage: null,
+          pullRequestsWithDeployRequest: applicable ? 0 : null,
+          pullRequestsDeployed: applicable ? 0 : null,
+          deployRate: null,
           currentEnvironments: 0,
           readyEnvironments: 0,
+          liveEnvironments: 0,
         };
         repositories.set(key, existing);
         return existing;
       };
-      for (const row of current.envRows) getRepository(row).firstSeenEnvironments += count(row.count);
+      for (const row of current.envRows) {
+        const repo = getRepository(row);
+        repo.firstSeenEnvironments += count(row.count);
+        repo.deployRequestedEnvironments += count(row.requested);
+        repo.rolledOutEnvironments += count(row.deployed);
+      }
       for (const row of current.prRows) {
         const repo = getRepository(row);
         repo.observedPullRequests = count(row.count);
-        repo.pullRequestsWithEnvironments = count(row.covered);
+        repo.pullRequestsWithDeployRequest = count(row.requested);
+        repo.pullRequestsDeployed = count(row.deployed);
       }
       for (const row of inventory.repositories.values()) {
         const repo = getRepository(row);
         repo.currentEnvironments = row.current;
         repo.readyEnvironments = row.ready;
+        repo.liveEnvironments = row.live;
       }
+      // A rate over a handful of pull requests ranks noise; it is withheld below the minimum sample.
       const ranking = [...repositories.values()].map((row) => ({
         ...row,
-        pullRequestCoverage: row.observedPullRequests
-          ? row.pullRequestsWithEnvironments! / row.observedPullRequests
-          : null,
+        deployRate:
+          row.observedPullRequests != null && row.observedPullRequests >= DEPLOY_RATE_MIN_PULL_REQUESTS
+            ? row.pullRequestsDeployed! / row.observedPullRequests
+            : null,
       }));
       const rankValue = (row: EnvironmentAnalyticsRepository) =>
         query.rankBy === 'observed_prs'
           ? row.observedPullRequests ?? -1
-          : query.rankBy === 'pr_coverage'
-          ? row.pullRequestCoverage ?? -1
+          : query.rankBy === 'prs_deployed'
+          ? row.pullRequestsDeployed ?? -1
+          : query.rankBy === 'deploy_rate'
+          ? row.deployRate ?? -1
           : row.firstSeenEnvironments;
       ranking.sort(
         (a, b) =>
@@ -971,13 +1202,14 @@ export default class EnvironmentAnalyticsService {
           previousObservedPullRequests: previous && applicable ? previousPrs.get(date) ?? 0 : null,
         })),
         ...(breakdown ? { activity: breakdown.activity } : {}),
+        inventoryTotals: inventory.totals,
         repositories: ranking.slice(0, RANKING_LIMIT),
         rankingTotal: ranking.length,
         rankingTruncated: ranking.length > RANKING_LIMIT,
         rankBy: query.rankBy,
         caveats: [
           ...CAVEATS,
-          'PR coverage uses the same first-observed PR cohort; linked retained environments may have been created outside that window. Static-only PR metrics are inapplicable.',
+          `PR deploy measures use the PRs first recorded in the window. A deploy request or rollout may have happened outside it. The deploy rate is withheld below ${DEPLOY_RATE_MIN_PULL_REQUESTS} recorded PRs. Static-only PR metrics are inapplicable.`,
         ],
       };
     });
@@ -997,7 +1229,6 @@ export default class EnvironmentAnalyticsService {
     return this.transaction(async (knex) => {
       const [asOf] = await knex.select(knex.raw('CURRENT_TIMESTAMP AS "asOf"'));
       const result = await this.inventory(knex, scope);
-      await this.addServiceCounts(knex, scope, result.exceptions);
       const services = await this.serviceInventory(knex, scope);
       const repositories = [...result.repositories.values()].sort(
         (a, b) => b.current - a.current || (a.fullName ?? '\uffff').localeCompare(b.fullName ?? '\uffff')
@@ -1008,8 +1239,6 @@ export default class EnvironmentAnalyticsService {
         totals: result.totals,
         services,
         repositories: repositories.slice(0, RANKING_LIMIT),
-        exceptions: result.exceptions,
-        truncated: result.exceptionTotal > EXCEPTION_LIMIT,
         repositoriesTruncated: repositories.length > RANKING_LIMIT,
         repositoryTotal: repositories.length,
         caveats: [
@@ -1132,9 +1361,11 @@ export default class EnvironmentAnalyticsService {
       if (query.cohort === 'current') {
         const [row] = await knex.select(knex.raw('CURRENT_TIMESTAMP AS "asOf"'));
         asOf = timestamp(row.asOf)!;
-        if (query.phase) {
+        const evidence = query.slice.evidence;
+        if (query.phase || evidence) {
           await this.visitCurrent(knex, query, (record) => {
-            if (record.phase !== query.phase) return;
+            if (query.phase && record.phase !== query.phase) return;
+            if (evidence && !CURRENT_EVIDENCE_MATCHES[evidence](record)) return;
             if (total >= offset && records.length < query.limit) records.push(record);
             total++;
           });
@@ -1150,14 +1381,17 @@ export default class EnvironmentAnalyticsService {
       } else {
         range = await resolveAnalyticsRange(knex, query);
         asOf = range.asOf;
-        const base = environmentBase(knex, query)
-          .where('e.createdAt', '>=', range.fromUtc)
-          .where('e.createdAt', '<', range.toUtc);
-        const totalRow = await base.clone().count('e.id as total').first();
+        const evidence = query.slice.evidence;
+        const sliced = sliceWindow(
+          knex,
+          range,
+          query.slice,
+          'e.createdAt',
+          evidence && ENVIRONMENT_EVIDENCE_SQL[evidence]
+        );
+        const totalRow = await sliced(environmentBase(knex, query)).count('e.id as total').first();
         total = count(totalRow?.total);
-        const rows = (await projection(knex, query)
-          .where('e.createdAt', '>=', range.fromUtc)
-          .where('e.createdAt', '<', range.toUtc)
+        const rows = (await sliced(projection(knex, query))
           .orderBy('e.createdAt', 'desc')
           .orderBy('e.id', 'desc')
           .offset(offset)
@@ -1170,6 +1404,55 @@ export default class EnvironmentAnalyticsService {
         scope: this.scope(query),
         range,
         cohort: query.cohort,
+        slice: query.slice,
+        records,
+        pagination: { page: query.page, limit: query.limit, total, hasMore: offset + records.length < total },
+      };
+    });
+  }
+
+  async getPullRequests(query: EnvironmentAnalyticsPullRequestsQuery): Promise<EnvironmentAnalyticsPullRequests> {
+    return this.transaction(async (knex) => {
+      const range = await resolveAnalyticsRange(knex, query);
+      const evidence = query.slice.evidence;
+      const sliced = sliceWindow(
+        knex,
+        range,
+        query.slice,
+        'p.createdAt',
+        evidence && PULL_REQUEST_EVIDENCE_SQL[evidence]
+      );
+      const base = sliced(pullRequestCoverage(pullRequestBase(knex, query), query));
+      const totalRow = await base.clone().count('p.id as total').first();
+      const total = count(totalRow?.total);
+      const offset = (query.page - 1) * query.limit;
+      const rows = (await newestPullRequestEnvironment(base.clone(), query)
+        .select(
+          'p.id',
+          'p.pullRequestNumber',
+          'p.title',
+          'p.githubLogin',
+          'p.createdAt',
+          'p.repositoryId',
+          'r.fullName',
+          'r.githubInstallationId'
+        )
+        .select(
+          knex.raw(`coverage.requested AS "deployRequested", coverage.deployed AS "rolledOut",
+            environment.id AS "environmentId", environment.uuid AS "environmentUuid",
+            environment.namespace AS "environmentNamespace", environment.status AS "environmentStatus",
+            environment."deletedAt" AS "environmentDeletedAt"`)
+        )
+        .orderBy('p.createdAt', 'desc')
+        .orderBy('p.id', 'desc')
+        .offset(offset)
+        .limit(query.limit)) as PullRequestRow[];
+      const records = rows.map(pullRequestRecord);
+      return {
+        asOf: range.asOf,
+        scope: this.scope(query),
+        range,
+        slice: query.slice,
         records,
         pagination: { page: query.page, limit: query.limit, total, hasMore: offset + records.length < total },
       };

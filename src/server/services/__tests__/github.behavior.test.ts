@@ -471,7 +471,10 @@ describe('GithubService webhook boundary behavior', () => {
       pull_request: { id: 404, labels: [{ name: 'lifecycle-deploy!' }], state: 'open' },
     });
 
-    expect(db.services.BuildService.enqueueResolveAndDeployBuild).toHaveBeenCalledWith({ buildId: undefined });
+    expect(db.services.BuildService.enqueueResolveAndDeployBuild).toHaveBeenCalledWith({
+      buildId: undefined,
+      origin: 'label',
+    });
   });
 
   it('contains label-processing and pull-request patch failures', async () => {
@@ -682,6 +685,7 @@ describe('GithubService push fallback behavior', () => {
       sourceBeforeRef: 'before-sha',
       sourceGithubRepositoryId: 101,
       sourceBranch: 'main',
+      origin: 'config_push',
     });
   });
 });

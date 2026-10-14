@@ -80,11 +80,11 @@ type DtoBuild = Omit<Build, 'deploys'> & {
   deploys?: DtoDeploy[] | null;
 };
 
+// SECURITY: scrub the whole text first, so this cut cannot expose part of a secret.
 function safeText(value: string | null | undefined, max = 1000): string | undefined {
   if (!value) return undefined;
-  const scrubbed = scrubSecretsFromText(compactStatusMessage(value));
-  if (!scrubbed) return undefined;
-  return scrubbed.length > max ? scrubbed.slice(0, max) : scrubbed;
+  const scrubbed = compactStatusMessage(scrubSecretsFromText(value), max);
+  return scrubbed || undefined;
 }
 
 function safeLabel(value: string | null | undefined, max: number): string {

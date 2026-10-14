@@ -150,7 +150,9 @@ describe('get_context', () => {
     });
     expect(output).not.toHaveProperty('capabilities');
     expect(output).not.toHaveProperty('hints');
-    expect(audits).toEqual([]);
+    expect(audits).toEqual([
+      expect.objectContaining({ tool: 'get_context', outcome: 'succeeded', readOnly: true, fields: {} }),
+    ]);
   });
 
   it('clamps the dynamic wait policy to the server ceiling', async () => {
@@ -501,7 +503,14 @@ describe('get_environment', () => {
       services: [{ name: 'api', type: 'docker', status: 'ready', active: true, url: 'https://api.example.com' }],
       failingServices: [],
     });
-    expect(audits).toEqual([]);
+    expect(audits).toEqual([
+      expect.objectContaining({
+        tool: 'get_environment',
+        outcome: 'succeeded',
+        readOnly: true,
+        fields: { uuid: 'candidate-123456' },
+      }),
+    ]);
   });
 
   it('adds namespace and sorted variable keys in detailed format', async () => {

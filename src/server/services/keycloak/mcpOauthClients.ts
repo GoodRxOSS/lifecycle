@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { getLogger } from 'server/lib/logger';
 import { randomUUID } from 'node:crypto';
 import { AppError, BadRequestError, ConflictError, NotFoundError } from 'server/lib/appError';
 import { recordAuthAuditEvent } from '../authAudit';
@@ -271,6 +272,9 @@ function mappedKeycloakError(error: KeycloakAdminError): AppError {
   });
 }
 
+const CLIENT_NAME_CACHE_MS = 10 * 60 * 1000;
+const clientNameCache = new Map<string, { name: string | null; expiresAt: number }>();
+
 export default class McpOauthClientService {
   private static instance: McpOauthClientService;
 
@@ -385,6 +389,23 @@ export default class McpOauthClientService {
       if (error instanceof KeycloakAdminError) throw mappedKeycloakError(error);
       throw error;
     }
+  }
+
+  /** The registered display name of any OAuth client in the realm, cached; null when unknown or unreachable. */
+  async clientName(clientId: string): Promise<string | null> {
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(clientId)) return null;
+    const cached = clientNameCache.get(clientId);
+    if (cached && cached.expiresAt > Date.now()) return cached.name;
+    let name: string | null = null;
+    try {
+      const client = await this.findExact(clientId);
+      name = client?.name?.trim() || null;
+    } catch (error) {
+      getLogger().warn({ error, clientId }, 'MCP client name lookup failed');
+      return null;
+    }
+    clientNameCache.set(clientId, { name, expiresAt: Date.now() + CLIENT_NAME_CACHE_MS });
+    return name;
   }
 
   private async findExact(clientId: string): Promise<KeycloakClientRepresentation | null> {

@@ -22,6 +22,8 @@ export function transformProviderModels(providers: any[]): Array<{
   maxTokens: number;
   inputCostPerMillion?: number;
   outputCostPerMillion?: number;
+  cacheReadCostPerMillion?: number;
+  cacheWriteCostPerMillion?: number;
 }> {
   return providers
     .filter((provider: any) => provider.enabled)
@@ -40,6 +42,10 @@ export function transformProviderModels(providers: any[]): Array<{
           maxTokens: model.maxTokens,
           ...(model.inputCostPerMillion != null ? { inputCostPerMillion: model.inputCostPerMillion } : {}),
           ...(model.outputCostPerMillion != null ? { outputCostPerMillion: model.outputCostPerMillion } : {}),
+          ...(model.cacheReadCostPerMillion != null ? { cacheReadCostPerMillion: model.cacheReadCostPerMillion } : {}),
+          ...(model.cacheWriteCostPerMillion != null
+            ? { cacheWriteCostPerMillion: model.cacheWriteCostPerMillion }
+            : {}),
         }));
     });
 }

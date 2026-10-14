@@ -158,6 +158,8 @@ export interface AgentModelSummary {
   maxTokens: number;
   inputCostPerMillion?: number;
   outputCostPerMillion?: number;
+  cacheReadCostPerMillion?: number;
+  cacheWriteCostPerMillion?: number;
 }
 
 export interface AgentResolvedModelSelection {
@@ -165,6 +167,8 @@ export interface AgentResolvedModelSelection {
   modelId: string;
   inputCostPerMillion?: number;
   outputCostPerMillion?: number;
+  cacheReadCostPerMillion?: number;
+  cacheWriteCostPerMillion?: number;
 }
 
 export interface AgentRunExecutionOptions {

@@ -2,7 +2,12 @@ import knexFactory from 'knex';
 import {
   analyticsBucketDates,
   analyticsBucketExpression,
+  analyticsSlicePeriod,
+  analyticsSliceScan,
   parseAnalyticsCalendarQuery,
+  parseAnalyticsPagination,
+  parseAnalyticsSlice,
+  parseAnalyticsSort,
   resolveAnalyticsRange,
   type ResolvedAnalyticsRange,
 } from './query';
@@ -161,5 +166,118 @@ describe('analytics calendar contract', () => {
     const range = await resolveAnalyticsRange({ raw } as any, { from: '9999-12-30', to: '9999-12-31' });
     expect(range.dates).toEqual(['9999-12-30']);
     expect(range.previous).toMatchObject({ from: '9999-12-29', to: '9999-12-30', dates: ['9999-12-29'] });
+  });
+
+  it('parses the shared slice, pagination and sort parameters', () => {
+    expect(parseAnalyticsSlice(new URLSearchParams())).toEqual({ date: null, period: 'current' });
+    expect(parseAnalyticsSlice(new URLSearchParams('date=2026-03-09&period=previous'))).toEqual({
+      date: '2026-03-09',
+      period: 'previous',
+    });
+    expect(() => parseAnalyticsSlice(new URLSearchParams('date=2026-3-9'))).toThrow();
+    expect(() => parseAnalyticsSlice(new URLSearchParams('period=last'))).toThrow();
+    expect(parseAnalyticsPagination(new URLSearchParams())).toEqual({ page: 1, limit: 25 });
+    expect(parseAnalyticsPagination(new URLSearchParams('page=3&limit=100'))).toEqual({ page: 3, limit: 100 });
+    expect(() => parseAnalyticsPagination(new URLSearchParams('page=0'))).toThrow();
+    expect(() => parseAnalyticsPagination(new URLSearchParams('limit=101'))).toThrow();
+    expect(() => parseAnalyticsPagination(new URLSearchParams('page=10001'))).toThrow();
+    expect(parseAnalyticsPagination(new URLSearchParams('page=10001'), 1_000_000)).toEqual({ page: 10001, limit: 25 });
+    const keys = ['requestedAt', 'timeToReady'] as const;
+    expect(parseAnalyticsSort(new URLSearchParams(), keys, 'requestedAt')).toEqual({
+      key: 'requestedAt',
+      descending: true,
+    });
+    expect(parseAnalyticsSort(new URLSearchParams('sort=timeToReady:asc'), keys, 'requestedAt')).toEqual({
+      key: 'timeToReady',
+      descending: false,
+    });
+    expect(parseAnalyticsSort(new URLSearchParams('sort=timeToReady'), keys, 'requestedAt').descending).toBe(true);
+    expect(() => parseAnalyticsSort(new URLSearchParams('sort=queueWait'), keys, 'requestedAt')).toThrow();
+    expect(() => parseAnalyticsSort(new URLSearchParams('sort=timeToReady:up'), keys, 'requestedAt')).toThrow();
+  });
+
+  it('resolves a slice to its period and keeps dates inside the bucket list', () => {
+    const range: ResolvedAnalyticsRange = {
+      from: '2026-03-08',
+      to: '2026-03-10',
+      fromUtc: '2026-03-08T00:00:00.000Z',
+      toUtc: '2026-03-10T00:00:00.000Z',
+      dates: ['2026-03-08', '2026-03-09'],
+      timezone: 'UTC',
+      interval: 'day',
+      compare: true,
+      calendarDays: 2,
+      asOf: '2026-03-10T00:00:00.000Z',
+      previous: {
+        from: '2026-03-06',
+        to: '2026-03-08',
+        fromUtc: '2026-03-06T00:00:00.000Z',
+        toUtc: '2026-03-08T00:00:00.000Z',
+        dates: ['2026-03-06', '2026-03-07'],
+      },
+    };
+    expect(analyticsSlicePeriod(range, { date: null, period: 'current' })).toBe(range);
+    expect(analyticsSlicePeriod(range, { date: '2026-03-09', period: 'previous' })).toBe(range.previous);
+    expect(() => analyticsSlicePeriod(range, { date: '2026-03-07', period: 'previous' })).toThrow(
+      'date must be the start of a bucket inside the window.'
+    );
+    expect(() =>
+      analyticsSlicePeriod({ ...range, compare: false, previous: null }, { date: null, period: 'previous' })
+    ).toThrow('period must be current when compare is false.');
+    const weekly = { ...range, interval: 'week' as const };
+    expect(analyticsSlicePeriod(weekly, { date: '2026-03-02', period: 'current' })).toBe(weekly);
+    expect(analyticsSlicePeriod(weekly, { date: '2026-03-09', period: 'current' })).toBe(weekly);
+    expect(() => analyticsSlicePeriod(weekly, { date: '2026-03-08', period: 'current' })).toThrow();
+  });
+
+  it('scans one period for a slice, and one bucket with a day of margin on each side for a date', () => {
+    const range: ResolvedAnalyticsRange = {
+      from: '2026-03-01',
+      to: '2026-03-29',
+      fromUtc: '2026-03-01T08:00:00.000Z',
+      toUtc: '2026-03-29T07:00:00.000Z',
+      dates: Array.from({ length: 28 }, (_, day) => `2026-03-${String(day + 1).padStart(2, '0')}`),
+      timezone: 'America/Los_Angeles',
+      interval: 'day',
+      compare: true,
+      calendarDays: 28,
+      asOf: '2026-03-29T07:00:00.000Z',
+      previous: {
+        from: '2026-02-01',
+        to: '2026-03-01',
+        fromUtc: '2026-02-01T08:00:00.000Z',
+        toUtc: '2026-03-01T08:00:00.000Z',
+        dates: Array.from({ length: 28 }, (_, day) => `2026-02-${String(day + 1).padStart(2, '0')}`),
+      },
+    };
+    expect(analyticsSliceScan(range, { date: null, period: 'current' })).toEqual({
+      fromUtc: range.fromUtc,
+      toUtc: range.toUtc,
+    });
+    expect(analyticsSliceScan(range, { date: null, period: 'previous' })).toEqual({
+      fromUtc: range.previous!.fromUtc,
+      toUtc: range.previous!.toUtc,
+    });
+    expect(analyticsSliceScan(range, { date: '2026-03-10', period: 'current' })).toEqual({
+      fromUtc: '2026-03-09T00:00:00.000Z',
+      toUtc: '2026-03-12T00:00:00.000Z',
+    });
+    expect(analyticsSliceScan(range, { date: '2026-03-10', period: 'previous' })).toEqual({
+      fromUtc: '2026-02-09T00:00:00.000Z',
+      toUtc: '2026-02-12T00:00:00.000Z',
+    });
+    expect(analyticsSliceScan(range, { date: '2026-03-01', period: 'current' })).toEqual({
+      fromUtc: range.fromUtc,
+      toUtc: '2026-03-03T00:00:00.000Z',
+    });
+    expect(analyticsSliceScan(range, { date: '2026-03-28', period: 'current' })).toEqual({
+      fromUtc: '2026-03-27T00:00:00.000Z',
+      toUtc: range.toUtc,
+    });
+    const weekly = { ...range, interval: 'week' as const };
+    expect(analyticsSliceScan(weekly, { date: '2026-03-09', period: 'current' })).toEqual({
+      fromUtc: '2026-03-08T00:00:00.000Z',
+      toUtc: '2026-03-17T00:00:00.000Z',
+    });
   });
 });
