@@ -21,10 +21,10 @@ jest.mock('./query', () => ({
 import AgentAnalyticsService, {
   parseAgentAnalyticsQuery,
   parseAgentAnalyticsRunsQuery,
-  parseAgentAnalyticsPagination,
   serializeAgentAnalyticsMetrics,
 } from './AgentAnalyticsService';
-import type { ResolvedAnalyticsRange } from './query';
+import knexFactory from 'knex';
+import { parseAnalyticsPagination, type ResolvedAnalyticsRange } from './query';
 
 const range: ResolvedAnalyticsRange = {
   from: '2026-03-08',
@@ -46,8 +46,13 @@ const range: ResolvedAnalyticsRange = {
   },
 };
 
+const formatter = knexFactory({ client: 'pg' });
 function serviceWithRows(results: unknown[][]) {
-  const raw = jest.fn(async (sql: string) => (sql.startsWith('SET ') ? undefined : { rows: results.shift() }));
+  const raw = jest.fn((sql: string, bindings?: readonly unknown[]) => {
+    if (sql.startsWith('SET ')) return undefined;
+    if (sql.startsWith('to_char(')) return formatter.raw(sql, bindings as any);
+    return { rows: results.shift() };
+  });
   const transaction = jest.fn(async (callback) => callback({ raw }));
   const service = new AgentAnalyticsService({ knex: { transaction } } as any);
   return { service, raw };
@@ -185,8 +190,8 @@ describe('AgentAnalyticsService', () => {
     ];
     expect(sql).toContain('COUNT(DISTINCT session_id)');
     expect(sql).toContain("jsonb_typeof(r.\"usageSummary\"->'totalTokens') = 'number'");
-    expect(sql).toContain("'{source,repoFullName}'");
-    expect(sql).toContain("'{source,workspaceLayout,primaryRepo}'");
+    expect(sql).toContain("rp.source -> 'repoFullName'");
+    expect(sql).toContain("rp.source #> '{workspaceLayout,primaryRepo}'");
     expect(sql).not.toContain('jsonb_array_elements');
     expect(sql).not.toContain('workspaceRepos');
     expect(sql).toContain('r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz');
@@ -221,6 +226,30 @@ describe('AgentAnalyticsService', () => {
     expect(sql).toContain('repository IS NULL AND status = ?');
     expect(sql).toContain('ORDER BY submitted_at DESC, id DESC LIMIT ? OFFSET ?');
     expect(bindings).toEqual([range.fromUtc, range.toUtc, 'failed', 25, 25]);
+  });
+
+  it('lists every unfinished status for the in_progress filter', async () => {
+    const { service, raw } = serviceWithRows([[{ total: 0, runs: [] }]]);
+    await service.listRuns({ runStatus: 'in_progress' }, 1, 25);
+    const [sql, bindings] = raw.mock.calls.filter(([sql]) => !sql.startsWith('SET '))[0] as unknown as [
+      string,
+      unknown[]
+    ];
+    expect(sql).toContain('WHERE status IN (?, ?, ?, ?, ?, ?)');
+    expect(sql).toContain('LEFT JOIN LATERAL jsonb_to_record(');
+    expect(sql).not.toContain(`r."runPlanSnapshot" #>`);
+    expect(bindings).toEqual([
+      range.fromUtc,
+      range.toUtc,
+      'queued',
+      'starting',
+      'running',
+      'waiting_for_approval',
+      'waiting_for_input',
+      'transitioned',
+      25,
+      0,
+    ]);
   });
 
   it('keeps usage totals when the earliest retained run has a nonfinite date', async () => {
@@ -423,6 +452,81 @@ describe('AgentAnalyticsService', () => {
     expect(bindings).toEqual([range.fromUtc, range.toUtc, sessionId, 'org/one', 'failed', 2, 4]);
   });
 
+  it('lists runs and sessions for one chart bucket of the comparison window', async () => {
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const runs = serviceWithRows([[{ total: 0, runs: [] }]]);
+    const result = await runs.service.listRuns({ sessionId, runStatus: 'failed' }, 2, 10, {
+      date: '2026-03-09',
+      period: 'previous',
+    });
+    expect(result.slice).toEqual({ date: '2026-03-09', period: 'previous' });
+    expect(result.range).toBe(range);
+    expect(result.pagination).toEqual({ page: 2, limit: 10, total: 0, hasMore: false });
+    const [sql, bindings] = runs.raw.mock.calls.find(([sql]) => sql.includes('WITH facts'))!;
+    expect(sql).toContain(
+      `WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz AND to_char(date_trunc(?, ("r"."createdAt" AT TIME ZONE ?) + (? * interval '1 day')), 'YYYY-MM-DD') = ?`
+    );
+    expect(sql).toContain('AND s.uuid = ?::uuid');
+    expect(bindings).toEqual([
+      range.previous!.fromUtc,
+      range.previous!.toUtc,
+      'day',
+      'America/Los_Angeles',
+      2,
+      '2026-03-09',
+      sessionId,
+      'failed',
+      10,
+      10,
+    ]);
+    const sessions = serviceWithRows([[{ total: 0, sessions: [] }]]);
+    const sessionResult = await sessions.service.listSessions({ owner: 'owner' }, 1, 5, {
+      date: '2026-03-08',
+      period: 'current',
+    });
+    expect(sessionResult.slice).toEqual({ date: '2026-03-08', period: 'current' });
+    const [sessionSql, sessionBindings] = sessions.raw.mock.calls.find(([sql]) => sql.includes('WITH facts'))!;
+    expect(sessionSql).toContain(
+      `WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz AND to_char(date_trunc(?, ("r"."createdAt" AT TIME ZONE ?) + (? * interval '1 day')), 'YYYY-MM-DD') = ?`
+    );
+    expect(sessionBindings).toEqual([
+      range.fromUtc,
+      range.toUtc,
+      'day',
+      'America/Los_Angeles',
+      0,
+      '2026-03-08',
+      'owner',
+      5,
+      0,
+    ]);
+    const previous = serviceWithRows([[{ total: 0, sessions: [] }]]);
+    await previous.service.listSessions({}, 1, 25, { date: null, period: 'previous' });
+    const [previousSql, previousBindings] = previous.raw.mock.calls.find(([sql]) => sql.includes('WITH facts'))!;
+    expect(previousSql).not.toContain('to_char(');
+    expect(previousBindings).toEqual([range.previous!.fromUtc, range.previous!.toUtc, 25, 0]);
+    const plain = serviceWithRows([[{ total: 0, runs: [] }]]);
+    expect((await plain.service.listRuns({})).slice).toEqual({ date: null, period: 'current' });
+    expect(plain.raw.mock.calls.find(([sql]) => sql.includes('WITH facts'))![1]).toEqual([
+      range.fromUtc,
+      range.toUtc,
+      25,
+      0,
+    ]);
+  });
+
+  it('rejects a slice outside the resolved window before querying', async () => {
+    const { service, raw } = serviceWithRows([[{ total: 0, runs: [] }]]);
+    await expect(service.listRuns({}, 1, 25, { date: '2026-03-07', period: 'current' })).rejects.toThrow(
+      'date must be the start of a bucket inside the window.'
+    );
+    mockResolveRange.mockResolvedValue({ ...range, compare: false, previous: null });
+    await expect(service.listSessions({}, 1, 25, { date: null, period: 'previous' })).rejects.toThrow(
+      'period must be current when compare is false.'
+    );
+    expect(raw.mock.calls.some(([sql]) => sql.includes('WITH facts'))).toBe(false);
+  });
+
   it('returns bounded independent options and truncation counts', async () => {
     const raw = jest.fn().mockResolvedValue({
       rows: [
@@ -474,12 +578,13 @@ describe('Agent analytics input boundaries', () => {
     expect(() => parseAgentAnalyticsQuery(new URLSearchParams(input))).toThrow();
   });
   it.each(['page=0', 'page=2.5', 'page=10001', 'limit=101', 'limit=-1'])('rejects invalid pagination %s', (input) => {
-    expect(() => parseAgentAnalyticsPagination(new URLSearchParams(input))).toThrow();
+    expect(() => parseAnalyticsPagination(new URLSearchParams(input))).toThrow();
   });
   it('validates run outcomes and default bounded pagination', () => {
-    expect(parseAgentAnalyticsPagination(new URLSearchParams())).toEqual({ page: 1, limit: 25 });
+    expect(parseAnalyticsPagination(new URLSearchParams())).toEqual({ page: 1, limit: 25 });
     expect(() => parseAgentAnalyticsRunsQuery(new URLSearchParams('runStatus=success'))).toThrow();
     expect(parseAgentAnalyticsRunsQuery(new URLSearchParams('runStatus=unknown')).runStatus).toBe('unknown');
+    expect(parseAgentAnalyticsRunsQuery(new URLSearchParams('runStatus=in_progress')).runStatus).toBe('in_progress');
   });
   it('validates the exact session UUID without changing other Agent scopes', () => {
     const sessionId = 'AAAAAAAA-0000-4000-8000-000000000001';

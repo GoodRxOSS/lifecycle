@@ -36,6 +36,10 @@ const statuses = [
   'cancelled',
   'unknown',
 ];
+const slice = object({
+  date: { type: 'string', format: 'date', nullable: true },
+  period: { type: 'string', enum: ['current', 'previous'] },
+});
 const totals = object({ repositories: count, owners: count, models: count });
 const truncated = object({
   repositories: { type: 'boolean' },
@@ -133,6 +137,7 @@ export const agentAnalyticsSchemas = {
   AgentAnalyticsRuns: object({
     range: ref('AnalyticsRange'),
     asOf: { type: 'string', format: 'date-time' },
+    slice,
     caveats: array({ type: 'string' }),
     runs: array(ref('AgentAnalyticsRun')),
     pagination: object({ page: count, limit: count, total: count, hasMore: { type: 'boolean' } }),
@@ -153,6 +158,7 @@ export const agentAnalyticsSchemas = {
   AgentAnalyticsSessions: object({
     range: ref('AnalyticsRange'),
     asOf: { type: 'string', format: 'date-time' },
+    slice,
     caveats: array({ type: 'string' }),
     sessions: array(ref('AgentAnalyticsSession')),
     pagination: object({ page: count, limit: count, total: count, hasMore: { type: 'boolean' } }),

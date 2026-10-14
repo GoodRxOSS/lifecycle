@@ -59,6 +59,8 @@ const defaults = {
     database,
     port,
     ssl,
+    // Models write zone-less UTC timestamps and analytics keys buckets by date text; both depend on these settings.
+    options: '-c timezone=UTC -c datestyle=ISO,MDY',
   },
   pool: {
     min: 0,

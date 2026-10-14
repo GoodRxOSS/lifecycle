@@ -298,6 +298,7 @@ describe('Github Service - handlePullRequestHook', () => {
     expect(mockDb.models.Build.findOne).toHaveBeenCalledWith({ pullRequestId: 1 });
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
       buildId: 10,
+      origin: 'pr_open',
     });
     expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
     expect(mockPullRequest.__patch).toHaveBeenCalledWith(
@@ -324,6 +325,7 @@ describe('Github Service - handlePullRequestHook', () => {
 
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
       buildId: 10,
+      origin: 'pr_open',
     });
     expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
   });
@@ -492,6 +494,7 @@ describe('Github Service - handlePullRequestHook', () => {
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledTimes(1);
     expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith('resolve-deploy', {
       buildId: 10,
+      origin: 'pr_open',
     });
     expect(mockDb.services.LabelService.labelQueue.add).not.toHaveBeenCalled();
   });

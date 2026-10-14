@@ -745,3 +745,22 @@ it('builds and reuses the default configured service with deterministic ID, cloc
     jest.useRealTimers();
   }
 });
+
+describe('clientName', () => {
+  it('returns the registered display name, caches it, and skips lookups for malformed ids', async () => {
+    const { service, client } = fakeService([{ id: 'internal-1', clientId: 'name-cached', name: ' Claude Desktop ' }]);
+    await expect(service.clientName('name-cached')).resolves.toBe('Claude Desktop');
+    await expect(service.clientName('name-cached')).resolves.toBe('Claude Desktop');
+    expect(client.get).toHaveBeenCalledTimes(1);
+    await expect(service.clientName('not a valid id!')).resolves.toBeNull();
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null without caching when the lookup fails, so the next call retries', async () => {
+    const { service, client } = fakeService([{ id: 'internal-1', clientId: 'name-retry', name: 'Cursor' }]);
+    client.get.mockRejectedValueOnce(new Error('keycloak unreachable'));
+    await expect(service.clientName('name-retry')).resolves.toBeNull();
+    await expect(service.clientName('name-retry')).resolves.toBe('Cursor');
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
+});

@@ -32,6 +32,7 @@ import {
   processApiTokenOwnerSweep,
   warnIfApiTokenOwnerSweepUnconfigured,
 } from './apiTokenOwnerSweep';
+import { ANALYTICS_RETENTION_INTERVAL_MS, processAnalyticsRetentionSweep } from './analyticsRetention';
 import { loadAiSdk } from 'server/services/agent/aiSdkRuntime';
 import { AGENT_ENV_WATCH_QUEUE_NAME } from 'server/services/agent/EnvironmentWatchService';
 import {
@@ -121,6 +122,33 @@ export default function bootstrapJobs(services: IServices) {
       }
     )
     .catch((error) => getLogger().warn({ error }, 'Jobs: api token owner sweep schedule failed'));
+
+  queueManager.registerWorker(QUEUE_NAMES.ANALYTICS_RETENTION, processAnalyticsRetentionSweep, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  const analyticsRetentionQueue = queueManager.registerQueue(QUEUE_NAMES.ANALYTICS_RETENTION, {
+    connection: redisClient.getConnection(),
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: false,
+    },
+  });
+
+  void analyticsRetentionQueue
+    .add(
+      'analytics-retention',
+      {},
+      {
+        jobId: 'analytics-retention',
+        repeat: {
+          every: ANALYTICS_RETENTION_INTERVAL_MS,
+        },
+      }
+    )
+    .catch((error) => getLogger().warn({ error }, 'Jobs: analytics retention schedule failed'));
 
   queueManager.registerWorker(QUEUE_NAMES.TTL_CLEANUP, services.TTLCleanupService.processTTLCleanupQueue, {
     connection: redisClient.getConnection(),

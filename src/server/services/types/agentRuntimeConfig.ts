@@ -27,6 +27,8 @@ export interface AgentRuntimeModelConfig {
   maxTokens: number;
   inputCostPerMillion?: number;
   outputCostPerMillion?: number;
+  cacheReadCostPerMillion?: number;
+  cacheWriteCostPerMillion?: number;
 }
 
 export interface AgentRuntimeProviderConfig {

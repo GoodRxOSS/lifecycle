@@ -44,6 +44,16 @@ import _ from 'lodash';
 import { QUEUE_NAMES } from 'shared/config';
 import { LifecycleError } from 'server/lib/errors';
 import { withLogContext, getLogger, extractContextForQueue, LogStage, updateLogContext } from 'server/lib/logger';
+import {
+  boundedServiceOutcomes,
+  recordBuildEvent,
+  recordFirstRollout,
+  recordNamespaceDeleted,
+  serviceOutcomeMessage,
+  type BuildEventOrigin,
+  type BuildRunOutcome,
+  type ServiceRunOutcome,
+} from './buildEvents';
 import { ParsingError, YamlConfigParser } from 'server/lib/yamlConfigParser';
 import { ValidationError, YamlConfigValidator } from 'server/lib/yamlConfigValidator';
 
@@ -62,7 +72,7 @@ import DeployCleanupService from './deployCleanup';
 import { paginate, PaginationMetadata, PaginationParams } from 'server/lib/paginate';
 import { getYamlFileContentFromBranch } from 'server/lib/github';
 import WebhookService from './webhook';
-import { compactStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
+import { compactStatusMessage, fallbackDeployStatusMessage, statusMessageFromError } from 'server/lib/terminalFailure';
 import OverrideService, { isBranchOrExternalUrlEditable, type BuildServiceOverrideState } from './override';
 import ApiAccessConfigService from './apiAccessConfig';
 import { getBranchName, getDeployType, getRepositoryName, type Service } from 'server/models/yaml/YamlService';
@@ -171,11 +181,25 @@ interface DeploymentScopePreparation {
   acceptedSourcePins?: AcceptedSourcePins;
   /** Services the import could not read and that have no row; their dependents are blocked. */
   unresolvedServices?: string[];
+  unresolvedFailures?: Record<string, string>;
 }
 
 interface DeploymentScopeOutcome {
   deployed: number;
   failed: number;
+  services: number;
+  status: BuildRunOutcome;
+  reason: string | null;
+  serviceOutcomes: ServiceRunOutcome[];
+}
+
+interface RunFinishedOutcome {
+  status: BuildRunOutcome;
+  reason?: string | null;
+  services?: number;
+  failed?: number;
+  rollout?: boolean;
+  serviceOutcomes?: ServiceRunOutcome[];
 }
 
 type IntentConfiguration =
@@ -192,6 +216,7 @@ interface DeploymentReconciliationRequest {
   sourceRef?: string | null;
   sourceBeforeRef?: string | null;
   runUUID?: string | null;
+  origin?: BuildEventOrigin | null;
 }
 
 interface DeploymentReconciliationQueueJob {
@@ -347,6 +372,22 @@ export default class BuildService extends BaseService {
     getLogger({ stage: LogStage.BUILD_QUEUED, buildId: request.buildId, generation: accepted.generation }).info(
       'Build reconciliation: accepted'
     );
+    await recordBuildEvent(this.db.knex, {
+      buildId: request.buildId,
+      kind: 'deploy_requested',
+      runUUID: requestId,
+      origin: request.origin ?? null,
+      meta: { intent: intent.type, generation: accepted.generation, scopeKey: accepted.scopeKey },
+    });
+    for (const replaced of accepted.replaced) {
+      await recordBuildEvent(this.db.knex, {
+        buildId: request.buildId,
+        kind: 'run_superseded',
+        runUUID: replaced.requestId,
+        reason: 'intent_replaced',
+        meta: { generation: replaced.generation },
+      });
+    }
     return this.signalPendingDeploymentReconciliation(request.buildId, accepted.generation);
   }
 
@@ -1056,6 +1097,7 @@ export default class BuildService extends BaseService {
       buildId: build.id,
       githubRepositoryId: Number(sourceRepositoryId),
       runUUID,
+      origin: 'redeploy',
     });
 
     // The mailbox worker owns status/token changes for every selected Deploy.
@@ -1069,7 +1111,8 @@ export default class BuildService extends BaseService {
   async redeployBuild(
     buildUuid: string,
     expectedBuildId?: number,
-    expectedBuildKind?: BuildKind
+    expectedBuildKind?: BuildKind,
+    origin: BuildEventOrigin = 'redeploy'
   ): Promise<RedeployBuildResult> {
     const correlationId = `api-redeploy-${Date.now()}-${nanoid(8)}`;
     return withLogContext({ correlationId, buildUuid }, async () => {
@@ -1114,6 +1157,7 @@ export default class BuildService extends BaseService {
         await this.enqueueResolveAndDeployBuild({
           buildId,
           runUUID,
+          origin,
         });
 
         getLogger({ stage: LogStage.BUILD_QUEUED }).info('Build: redeploy queued');
@@ -1642,6 +1686,7 @@ export default class BuildService extends BaseService {
             await this.enqueueResolveAndDeployBuild({
               buildId: build.id,
               runUUID,
+              origin: 'api',
             });
           } else {
             getLogger().info('Environment: api create complete deploy=paused');
@@ -1907,6 +1952,7 @@ export default class BuildService extends BaseService {
         await this.enqueueResolveAndDeployBuild({
           buildId: build.id,
           runUUID: runUuid,
+          origin: 'api',
         });
         return { mode: 'redeploy_queued', changed: true, deployId: runUuid, build: persisted.build };
       }
@@ -2749,6 +2795,12 @@ export default class BuildService extends BaseService {
       getLogger().info('Deploy: aborting run reason=authority_changed');
       return null;
     }
+    await recordBuildEvent(this.db.knex, {
+      buildId: build.id,
+      kind: 'run_claimed',
+      runUUID,
+      meta: { generation: expectedGeneration ?? null },
+    });
     return runUUID;
   }
 
@@ -2825,7 +2877,10 @@ export default class BuildService extends BaseService {
     } = preparation;
 
     try {
-      if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) return null;
+      if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) {
+        await this.recordRunSuperseded(build.id, runUUID, expectedGeneration, 'ownership_lost');
+        return null;
+      }
 
       await Promise.all([
         this.buildImages(
@@ -2853,6 +2908,7 @@ export default class BuildService extends BaseService {
       // A row that failed its image phase is recorded on the row; its siblings still roll out.
       if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) {
         getLogger().info('Deploy: rollout skipped reason=ownership_lost');
+        await this.recordRunSuperseded(build.id, runUUID, expectedGeneration, 'rollout_skipped');
         return null;
       }
       await this.publishDerivedBuildStatus(build.id);
@@ -2871,12 +2927,14 @@ export default class BuildService extends BaseService {
     } catch (error) {
       if (error instanceof DeploymentSupersededError) {
         getLogger().info('Build: deployment phase stopped reason=superseded');
+        await this.recordRunSuperseded(build.id, runUUID, expectedGeneration, 'phase_superseded');
         return null;
       }
       if (error instanceof AuthorityLockLostError) throw error;
       getLogger().error({ error }, 'Build: deploy failed');
       if (!(await this.isDeploymentRunCurrent(build.id, runUUID, expectedGeneration))) {
         getLogger().info('Build: failure ignored reason=ownership_lost');
+        await this.recordRunSuperseded(build.id, runUUID, expectedGeneration, 'failure_ignored');
         return null;
       }
       await this.recordFailureOnOwnedDeploys(build.id, runUUID, expectedGeneration, error, 'Deployment failed.');
@@ -2884,16 +2942,34 @@ export default class BuildService extends BaseService {
     }
   }
 
+  /** Build-only services finish at built, so readiness is judged per service type, as the environment status is. */
   private async summarizeIntentDeploys(
     buildId: number,
     runUUID: string,
     generation: number
   ): Promise<DeploymentScopeOutcome> {
-    const rows = await this.db.models.Deploy.query()
-      .select('status')
-      .where({ buildId, runUUID, desiredGeneration: generation });
-    const failed = rows.filter((row) => isDeployFailure(row.status)).length;
-    return { deployed: rows.length - failed, failed };
+    const rows = (await this.db.models.Deploy.query()
+      .select('id', 'uuid', 'deployableId', 'active', 'status', 'statusMessage', 'publicUrl')
+      .where({ buildId, runUUID, desiredGeneration: generation })
+      .orderBy('id')
+      .withGraphFetched('deployable')) as Deploy[];
+    const failed = rows.filter((row) => isDeployFailure(row.status));
+    const unfinished = rows.filter((row) => !isDeployFailure(row.status) && !isActiveServiceReady(row));
+    const first = failed[0] ?? unfinished[0];
+    let reason: string | null = null;
+    if (first && isDeployFailure(first.status)) {
+      reason = first.statusMessage || fallbackDeployStatusMessage(first.status as DeployStatus);
+    } else if (first) {
+      reason = `${first.deployable?.name ?? first.uuid} did not report ready (${first.status})`;
+    }
+    return {
+      deployed: rows.length - failed.length,
+      failed: failed.length,
+      services: rows.length,
+      status: failed.length === 0 && unfinished.length === 0 ? 'succeeded' : 'failed',
+      reason: reason == null ? null : compactStatusMessage(reason),
+      serviceOutcomes: boundedServiceOutcomes(rows.map(serviceRunOutcome)),
+    };
   }
 
   /**
@@ -3164,10 +3240,6 @@ export default class BuildService extends BaseService {
       .first();
     let build = existing;
     if (!build) {
-      const rootRepository =
-        options.repositoryId == null
-          ? null
-          : await this.db.models.Repository.query().findById(options.repositoryId).select('githubRepositoryId');
       // insertOnUuid retries haikunator collisions against the live-uuid unique index.
       build = await insertOnUuid(
         (uuid: string) =>
@@ -3176,7 +3248,7 @@ export default class BuildService extends BaseService {
             environmentId: environment.id,
             status: BuildStatus.QUEUED,
             pullRequestId: options.pullRequestId,
-            githubRepositoryId: rootRepository?.githubRepositoryId ?? null,
+            githubRepositoryId: options.repositoryId ?? null,
             sha: nanoId(),
             enabledFeatures: JSON.stringify(enabledFeatures),
             githubDeployments,
@@ -3280,7 +3352,8 @@ export default class BuildService extends BaseService {
         })
       );
 
-      await k8s.deleteNamespace(build.namespace);
+      const namespaceDeleted = await k8s.deleteNamespace(build.namespace);
+      if (namespaceDeleted) await recordNamespaceDeleted(this.db.knex, build.id, teardownRunUUID, build.namespace);
       if (this.db.services?.Ingress?.ingressCleanupQueue) {
         await this.ingressService.ingressCleanupQueue.add('cleanup', {
           buildId: build.id,
@@ -4026,7 +4099,7 @@ export default class BuildService extends BaseService {
         (!githubRepositoryId || deploy.githubRepositoryId === githubRepositoryId) &&
         (!githubRepositoryId || !sourceBranch || deploy.branchName === sourceBranch)
     );
-    await Promise.all(
+    const updated = await Promise.all(
       deploys.map((deploy) => {
         let update = this.db.models.Deploy.query()
           .patch({ isRunningLatest: true, runningImage: deploy?.dockerImage })
@@ -4035,6 +4108,7 @@ export default class BuildService extends BaseService {
         return update;
       })
     );
+    if (updated.some((count) => Number(count) > 0)) await recordFirstRollout(this.db.knex, build.id);
     getLogger().debug('Deploy: updated running image and status');
   }
 
@@ -4485,6 +4559,109 @@ export default class BuildService extends BaseService {
     await this.settleBuildObservedGeneration(buildId, generation);
   }
 
+  private async recordRunSuperseded(buildId: number, token: string, generation: number, reason: string): Promise<void> {
+    const blocked = await loadEnvironmentAuthority(this.db.models, buildId)
+      .then((current) => this.deploymentBlockReason(current))
+      .catch(() => null);
+    await recordBuildEvent(this.db.knex, {
+      buildId,
+      kind: 'run_superseded',
+      runUUID: token,
+      reason,
+      meta: { generation, blocked },
+    });
+  }
+
+  /** A run left with no rows while a newer request holds some of its selection was taken over; otherwise a service the import could not read fails it first, then its rows decide. */
+  private async recordRunOutcome(
+    buildId: number,
+    token: string,
+    generation: number,
+    intent: DeploymentIntent,
+    summary: DeploymentScopeOutcome,
+    unresolved: Record<string, string> = {},
+    rollout = false,
+    whenEmpty?: { status: BuildRunOutcome; reason: string }
+  ): Promise<void> {
+    if (summary.services === 0 && (await this.intentTakenOver(buildId, intent, generation))) {
+      return this.recordRunSuperseded(buildId, token, generation, 'rows_taken');
+    }
+    const names = Object.keys(unresolved);
+    let outcome: RunFinishedOutcome = summary;
+    if (names.length > 0) {
+      outcome = {
+        status: 'failed',
+        reason: compactStatusMessage(unresolved[names[0]]),
+        services: summary.services + names.length,
+        failed: summary.failed + names.length,
+        serviceOutcomes: [
+          ...names.map(
+            (name): ServiceRunOutcome => ({
+              name,
+              type: null,
+              status: null,
+              outcome: 'failed',
+              message: serviceOutcomeMessage(unresolved[name]),
+            })
+          ),
+          ...summary.serviceOutcomes,
+        ],
+      };
+    } else if (summary.services === 0 && whenEmpty) {
+      outcome = whenEmpty;
+    }
+    await this.recordRunFinished(buildId, token, generation, rollout ? { ...outcome, rollout } : outcome);
+  }
+
+  private async intentTakenOver(buildId: number, intent: DeploymentIntent, generation: number): Promise<boolean> {
+    const taken = await this.db.models.Deploy.query()
+      .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
+      .where('desiredGeneration', '>', generation)
+      .resultSize();
+    return taken > 0;
+  }
+
+  private async recordRunFinished(
+    buildId: number,
+    token: string,
+    generation: number,
+    outcome: RunFinishedOutcome
+  ): Promise<void> {
+    await recordBuildEvent(this.db.knex, {
+      buildId,
+      kind: 'run_finished',
+      runUUID: token,
+      status: outcome.status,
+      reason: outcome.reason ?? null,
+      meta: {
+        generation,
+        services: outcome.services ?? null,
+        failed: outcome.failed ?? null,
+        ...(outcome.rollout ? { rollout: true } : {}),
+        ...(outcome.serviceOutcomes?.length
+          ? { serviceOutcomes: boundedServiceOutcomes(outcome.serviceOutcomes) }
+          : {}),
+      },
+    });
+  }
+
+  /** A root config error ends the run as failed; its rows are taken so nothing stays pending. */
+  private async failRunOnRootConfigError(
+    buildId: number,
+    token: string,
+    generation: number,
+    build: Build | null,
+    error: unknown
+  ): Promise<void> {
+    if (build) await this.recordRootConfigError(build, error);
+    await this.takeIntentDeploys(buildId, generation, token);
+    await this.observeIntentDeploys(buildId, generation);
+    await this.recordRunFinished(buildId, token, generation, {
+      status: 'failed',
+      reason: statusMessageFromError(error, 'Lifecycle configuration failed validation.'),
+    });
+  }
+
   private async signalPendingDeploymentReconciliation(buildId: number, generation: number): Promise<void> {
     const data: DeploymentReconciliationJobData = {
       ...extractContextForQueue(),
@@ -4606,6 +4783,16 @@ export default class BuildService extends BaseService {
       error,
       'Build queue processing failed.'
     );
+    await this.recordRunOutcome(
+      buildId,
+      claim.token,
+      claim.generation,
+      claim.intent,
+      await this.summarizeIntentDeploys(buildId, claim.token, claim.generation),
+      claim.intent.configFailures ?? {},
+      false,
+      { status: 'failed', reason: statusMessageFromError(error, 'Build queue processing failed.') }
+    );
     const observed = await this.observeIntentDeploys(buildId, claim.generation, claim.token);
     await this.finishIntent(buildId, claim.generation);
     return observed > 0;
@@ -4690,10 +4877,7 @@ export default class BuildService extends BaseService {
     token: string,
     failures: Record<string, string>
   ): Promise<string[]> {
-    const rows = await this.db.models.Deploy.query()
-      .where({ buildId, desiredGeneration: generation })
-      .where('observedGeneration', '<', generation)
-      .withGraphFetched('deployable');
+    const rows = await this.db.models.Deploy.query().where({ buildId, active: true }).withGraphFetched('deployable');
     const matched = new Set<string>();
     for (const row of rows) {
       const message = row.deployable?.name ? failures[row.deployable.name] : undefined;
@@ -4707,7 +4891,8 @@ export default class BuildService extends BaseService {
           statusMessage: compactStatusMessage(message),
           observedGeneration: generation,
         })
-        .where({ id: row.id, desiredGeneration: generation });
+        .where({ id: row.id, desiredGeneration: generation })
+        .where('observedGeneration', '<', generation);
     }
     return Object.keys(failures).filter((name) => !matched.has(name));
   }
@@ -4742,7 +4927,10 @@ export default class BuildService extends BaseService {
             () => this.isIntentPending(buildId, token, claim.generation),
             async (): Promise<IntentConfiguration | null> => {
               const build = await this.loadBuildDeploymentAuthority(buildId);
-              if (!build) return null;
+              if (!build) {
+                await this.recordRunSuperseded(buildId, token, claim.generation, 'build_missing');
+                return null;
+              }
               if (build.uuid) updateLogContext({ buildUuid: build.uuid });
               state.build = build;
 
@@ -4753,6 +4941,13 @@ export default class BuildService extends BaseService {
               }
               if (blocked) {
                 getLogger(logContext).info(`Build reconciliation: observed without execution reason=${blocked}`);
+                await recordBuildEvent(this.db.knex, {
+                  buildId,
+                  kind: 'run_blocked',
+                  runUUID: token,
+                  reason: blocked,
+                  meta: { generation: claim.generation },
+                });
                 await this.observeIntentDeploys(buildId, claim.generation);
                 return { kind: 'observed' };
               }
@@ -4763,10 +4958,29 @@ export default class BuildService extends BaseService {
                   .select('id');
                 if (!pendingRow) {
                   getLogger(logContext).info('Build reconciliation: nothing pending reason=rows_settled_or_taken');
+                  await this.recordRunOutcome(
+                    buildId,
+                    token,
+                    claim.generation,
+                    intent,
+                    await this.summarizeIntentDeploys(buildId, token, claim.generation),
+                    intent.configFailures
+                  );
                   return { kind: 'observed' };
                 }
               }
-              if (envWide && !(await this.claimDeploymentRun(build, token, claim.generation))) return null;
+              if (envWide && !(await this.claimDeploymentRun(build, token, claim.generation))) {
+                await this.recordRunSuperseded(buildId, token, claim.generation, 'claim_lost');
+                return null;
+              }
+              if (!envWide) {
+                await recordBuildEvent(this.db.knex, {
+                  buildId,
+                  kind: 'run_claimed',
+                  runUUID: token,
+                  meta: { generation: claim.generation, scope: 'repository' },
+                });
+              }
 
               const sourceRef = await this.resolveCurrentSourceRef(scope);
               const acceptedSourcePins = await this.resolveAcceptedSourcePins(
@@ -4804,12 +5018,13 @@ export default class BuildService extends BaseService {
                 if (!(error instanceof ParsingError || error instanceof ValidationError)) throw error;
                 // A service's own broken YAML is reported per service, so an error that escapes the import is the root config's.
                 // Recorded while the configuration lock is held, so the status follows the order the config was read in.
-                await this.recordRootConfigError(build, error);
-                await this.takeIntentDeploys(buildId, claim.generation, token);
-                await this.observeIntentDeploys(buildId, claim.generation);
+                await this.failRunOnRootConfigError(buildId, token, claim.generation, build, error);
                 return { kind: 'observed' };
               }
-              if (!preparation) return null;
+              if (!preparation) {
+                await this.recordRunSuperseded(buildId, token, claim.generation, 'preparation_skipped');
+                return null;
+              }
               await this.adoptDeploysForIntent(buildId, intent, claim.generation);
               let unresolvedServices: string[] = [];
               if (imported?.configFailures && Object.keys(imported.configFailures).length > 0) {
@@ -4820,20 +5035,22 @@ export default class BuildService extends BaseService {
                   imported.configFailures
                 );
               }
-              await recordIntentConfigFailures(
-                buildId,
-                claim.generation,
-                Object.fromEntries(
-                  unresolvedServices.map((name) => [name, imported?.configFailures?.[name] ?? 'invalid lifecycle.yaml'])
-                )
+              const unresolvedFailures = Object.fromEntries(
+                unresolvedServices.map((name) => [name, imported?.configFailures?.[name] ?? 'invalid lifecycle.yaml'])
               );
+              await recordIntentConfigFailures(buildId, claim.generation, unresolvedFailures);
               preparation.unresolvedServices = unresolvedServices;
+              preparation.unresolvedFailures = unresolvedFailures;
               const owned = await this.claimIntentDeploys(buildId, claim.generation, token);
               await this.markConfigurationsAsBuilt(build, token, scope.githubRepositoryId, scope.sourceBranch);
               return { kind: 'ready', preparation, owned };
             }
           );
-          if (!configuration.admitted || !configuration.value) return;
+          if (!configuration.admitted) {
+            await this.recordRunSuperseded(buildId, token, claim.generation, 'intent_replaced');
+            return;
+          }
+          if (!configuration.value) return;
           const outcome = configuration.value;
           if (outcome.kind === 'deferred') return;
           if (outcome.kind === 'observed') {
@@ -4842,6 +5059,14 @@ export default class BuildService extends BaseService {
           }
           if (outcome.owned === 0) {
             getLogger(logContext).info('Build reconciliation: completed services=0');
+            await this.recordRunOutcome(
+              buildId,
+              token,
+              claim.generation,
+              intent,
+              await this.summarizeIntentDeploys(buildId, token, claim.generation),
+              outcome.preparation.unresolvedFailures
+            );
             await this.finishIntent(buildId, claim.generation);
             return;
           }
@@ -4851,6 +5076,18 @@ export default class BuildService extends BaseService {
           );
           await this.publishDerivedBuildStatus(buildId);
           const summary = await this.executeDeploymentScope(outcome.preparation, claim.generation);
+          // Recorded first: a retry after the rows settle must not read as a run that never finished.
+          if (summary) {
+            await this.recordRunOutcome(
+              buildId,
+              token,
+              claim.generation,
+              intent,
+              summary,
+              outcome.preparation.unresolvedFailures,
+              true
+            );
+          }
           if (summary?.deployed) await this.enqueueIngressManifest(buildId, token, claim.generation);
           const observed = await this.observeIntentDeploys(buildId, claim.generation, token);
           await this.finishIntent(buildId, claim.generation);
@@ -4869,13 +5106,12 @@ export default class BuildService extends BaseService {
           }
           if (!stillCurrent) {
             getLogger(logContext).info('Build reconciliation: stale failure ignored');
+            await this.recordRunSuperseded(buildId, token, claim.generation, 'stale_failure_ignored');
             return;
           }
 
           if (error instanceof ParsingError || error instanceof ValidationError) {
-            if (state.build) await this.recordRootConfigError(state.build, error);
-            await this.takeIntentDeploys(buildId, claim.generation, token);
-            await this.observeIntentDeploys(buildId, claim.generation);
+            await this.failRunOnRootConfigError(buildId, token, claim.generation, state.build, error);
             await this.finishIntent(buildId, claim.generation);
             return;
           }
@@ -4928,6 +5164,23 @@ function rootSourcePinKey(build: Build): string | null {
   const source = getBuildSource(build);
   if (source.githubRepositoryId == null || !source.branchName) return null;
   return `${source.githubRepositoryId}:${source.branchName}`;
+}
+
+function serviceRunOutcome(row: Deploy): ServiceRunOutcome {
+  const outcome = serviceRunOutcomeKind(row);
+  return {
+    name: row.deployable?.name ?? row.uuid,
+    type: row.deployable?.type ?? null,
+    status: row.status ?? null,
+    outcome,
+    message:
+      outcome === 'failed' ? serviceOutcomeMessage(row.statusMessage || fallbackDeployStatusMessage(row.status)) : null,
+  };
+}
+
+function serviceRunOutcomeKind(row: Deploy): ServiceRunOutcome['outcome'] {
+  if (isDeployFailure(row.status)) return 'failed';
+  return isActiveServiceReady(row) ? 'ready' : 'unfinished';
 }
 
 /**

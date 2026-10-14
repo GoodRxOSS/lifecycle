@@ -2,9 +2,11 @@ import { DeployStatus } from 'shared/constants';
 
 const MAX_STATUS_MESSAGE_LENGTH = 1000;
 
-export function compactStatusMessage(message: string): string {
+/** Cuts by code point so a surrogate pair is never split into text that JSON storage rejects. */
+export function compactStatusMessage(message: string, maxLength = MAX_STATUS_MESSAGE_LENGTH): string {
   const compact = message.replace(/\s+/g, ' ').trim();
-  return compact.length > MAX_STATUS_MESSAGE_LENGTH ? `${compact.slice(0, MAX_STATUS_MESSAGE_LENGTH - 3)}...` : compact;
+  const points = Array.from(compact);
+  return points.length > maxLength ? `${points.slice(0, maxLength - 3).join('')}...` : compact;
 }
 
 export function statusMessageFromError(error: unknown, fallbackMessage: string): string {

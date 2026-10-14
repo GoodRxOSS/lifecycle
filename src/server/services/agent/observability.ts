@@ -19,6 +19,8 @@ import type { AgentRunUsageSummary } from './types';
 export interface AgentModelCostEstimateConfig {
   inputCostPerMillion?: number;
   outputCostPerMillion?: number;
+  cacheReadCostPerMillion?: number;
+  cacheWriteCostPerMillion?: number;
 }
 
 type UsageLike =
@@ -256,8 +258,24 @@ export function estimateConfiguredModelCostUsd(
     return {};
   }
 
-  const estimatedCostUsd =
-    ((inputTokens ?? 0) * (inputRate ?? 0) + (outputTokens ?? 0) * (outputRate ?? 0)) / 1_000_000;
+  const cacheReadRate = parseCostRatePerMillion(costEstimateConfig?.cacheReadCostPerMillion);
+  const cacheWriteRate = parseCostRatePerMillion(costEstimateConfig?.cacheWriteCostPerMillion);
+  const cacheReadTokens =
+    parseFiniteNumber(usageSummary.cacheReadInputTokens) ?? parseFiniteNumber(usageSummary.cachedInputTokens) ?? 0;
+  const cacheWriteTokens = parseFiniteNumber(usageSummary.cacheCreationInputTokens) ?? 0;
+  const reportedUncached = parseFiniteNumber(usageSummary.nonCachedInputTokens);
+  // inputTokens is the SDK total; without a per-detail split, cache rates only apply when configured.
+  const priceCacheSeparately = reportedUncached != null || cacheReadRate != null || cacheWriteRate != null;
+  const uncachedInputTokens = priceCacheSeparately
+    ? reportedUncached ?? Math.max(0, (inputTokens ?? 0) - cacheReadTokens - cacheWriteTokens)
+    : inputTokens ?? 0;
+  const inputCost = priceCacheSeparately
+    ? uncachedInputTokens * (inputRate ?? 0) +
+      cacheReadTokens * (cacheReadRate ?? inputRate ?? 0) +
+      cacheWriteTokens * (cacheWriteRate ?? inputRate ?? 0)
+    : uncachedInputTokens * (inputRate ?? 0);
+
+  const estimatedCostUsd = (inputCost + (outputTokens ?? 0) * (outputRate ?? 0)) / 1_000_000;
   if (!Number.isFinite(estimatedCostUsd)) {
     return {};
   }

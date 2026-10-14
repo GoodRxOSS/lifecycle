@@ -12,7 +12,7 @@
 
 import type { Knex } from 'knex';
 import { AppError, toErrorResponseError } from 'server/lib/appError';
-import { analyticsTransaction } from './execution';
+import { ANALYTICS_CONCURRENCY, ANALYTICS_QUEUE_WAIT_MS, analyticsTransaction } from './execution';
 
 function database() {
   const raw = jest.fn().mockResolvedValue(undefined);
@@ -29,6 +29,7 @@ describe('Analytics transaction failures', () => {
     expect(raw.mock.calls).toEqual([
       ['SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'],
       ["SET LOCAL statement_timeout = '10s'"],
+      ['SET LOCAL jit = off'],
     ]);
     expect(work).toHaveBeenCalledWith(trx);
   });
@@ -76,5 +77,41 @@ describe('Analytics transaction failures', () => {
     const work = jest.fn();
     await expect(analyticsTransaction(knex, work)).rejects.toBe(original);
     expect(work).not.toHaveBeenCalled();
+  });
+});
+
+describe('Analytics admission', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('queues work beyond the concurrency limit and fails fast when no slot frees in time', async () => {
+    jest.useFakeTimers();
+    const { knex } = database();
+    const releases: Array<() => void> = [];
+    const hold = () => new Promise<string>((resolve) => releases.push(() => resolve('done')));
+    const settle = async () => {
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    };
+    const first = Array.from({ length: ANALYTICS_CONCURRENCY }, () => analyticsTransaction(knex, hold));
+    let fifthStarted = false;
+    const fifth = analyticsTransaction(knex, () => {
+      fifthStarted = true;
+      return hold();
+    });
+    await settle();
+    expect(fifthStarted).toBe(false);
+    releases[0]();
+    await first[0];
+    await settle();
+    expect(fifthStarted).toBe(true);
+    const sixth = analyticsTransaction(knex, async () => 'never');
+    await settle();
+    jest.advanceTimersByTime(ANALYTICS_QUEUE_WAIT_MS);
+    await expect(sixth).rejects.toMatchObject({ httpStatus: 503, code: 'analytics_busy', retryable: true });
+    releases.slice(1).forEach((release) => release());
+    await expect(Promise.all([...first.slice(1), fifth])).resolves.toEqual(Array(ANALYTICS_CONCURRENCY).fill('done'));
+    const after = analyticsTransaction(knex, async () => 'free');
+    await expect(after).resolves.toBe('free');
   });
 });

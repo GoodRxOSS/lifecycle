@@ -117,6 +117,8 @@ export const agentRuntimeConfigSchema = {
                 maxTokens: { type: 'integer', minimum: 1 },
                 inputCostPerMillion: { type: 'number', minimum: 0 },
                 outputCostPerMillion: { type: 'number', minimum: 0 },
+                cacheReadCostPerMillion: { type: 'number', minimum: 0 },
+                cacheWriteCostPerMillion: { type: 'number', minimum: 0 },
               },
               required: ['id', 'displayName', 'enabled', 'default', 'maxTokens'],
             },

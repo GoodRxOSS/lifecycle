@@ -16,9 +16,12 @@ import { defaultDb } from 'server/lib/dependencies';
 import { BadRequestError } from 'server/lib/appError';
 import { analyticsTransaction } from './execution';
 import {
+  analyticsBucketExpression,
+  analyticsSlicePeriod,
   parseAnalyticsCalendarQuery,
   resolveAnalyticsRange,
   type AnalyticsCalendarQuery,
+  type AnalyticsSlice,
   type ResolvedAnalyticsRange,
 } from './query';
 
@@ -36,6 +39,16 @@ export const AGENT_ANALYTICS_STATUSES = [
 ] as const;
 
 export type AgentAnalyticsStatus = (typeof AGENT_ANALYTICS_STATUSES)[number];
+export const AGENT_IN_PROGRESS_STATUSES = [
+  'queued',
+  'starting',
+  'running',
+  'waiting_for_approval',
+  'waiting_for_input',
+  'transitioned',
+] as const;
+/** in_progress selects every status that has not finished. */
+export type AgentAnalyticsRunFilter = AgentAnalyticsStatus | 'in_progress';
 
 export interface AgentAnalyticsQuery extends AnalyticsCalendarQuery {
   repository?: string;
@@ -48,7 +61,7 @@ export interface AgentAnalyticsQuery extends AnalyticsCalendarQuery {
 }
 
 export interface AgentAnalyticsRunsQuery extends AgentAnalyticsQuery {
-  runStatus?: AgentAnalyticsStatus;
+  runStatus?: AgentAnalyticsRunFilter;
   sessionId?: string;
 }
 
@@ -124,6 +137,7 @@ export interface AgentAnalyticsRun {
 export interface AgentAnalyticsRuns {
   range: ResolvedAnalyticsRange;
   asOf: string;
+  slice: AnalyticsSlice;
   caveats: string[];
   runs: AgentAnalyticsRun[];
   pagination: { page: number; limit: number; total: number; hasMore: boolean };
@@ -145,6 +159,7 @@ export interface AgentAnalyticsSession extends AgentAnalyticsMetrics {
 export interface AgentAnalyticsSessions {
   range: ResolvedAnalyticsRange;
   asOf: string;
+  slice: AnalyticsSlice;
   caveats: string[];
   sessions: AgentAnalyticsSession[];
   pagination: { page: number; limit: number; total: number; hasMore: boolean };
@@ -163,6 +178,7 @@ export interface AgentAnalyticsOptions {
 }
 
 const RANKING_LIMIT = 20;
+const DEFAULT_SLICE: AnalyticsSlice = { date: null, period: 'current' };
 const CAVEATS = [
   'Submission cohorts use immutable run creation time; latest queue time can change when an approval resumes a run.',
   'Usage is cumulative recorded usage for runs submitted in the window; resumed execution may occur outside it.',
@@ -211,27 +227,16 @@ export function parseAgentAnalyticsQuery(params: URLSearchParams): AgentAnalytic
 export function parseAgentAnalyticsRunsQuery(params: URLSearchParams): AgentAnalyticsRunsQuery {
   const query = parseAgentAnalyticsQuery(params);
   const runStatus = filterValue(params, 'runStatus');
-  if (runStatus && !AGENT_ANALYTICS_STATUSES.includes(runStatus as AgentAnalyticsStatus))
+  if (runStatus && runStatus !== 'in_progress' && !AGENT_ANALYTICS_STATUSES.includes(runStatus as AgentAnalyticsStatus))
     throw new BadRequestError('runStatus must be a supported run outcome.');
   const sessionId = filterValue(params, 'sessionId');
   if (sessionId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
     throw new BadRequestError('sessionId must be a UUID.');
   return {
     ...query,
-    ...(runStatus ? { runStatus: runStatus as AgentAnalyticsStatus } : {}),
+    ...(runStatus ? { runStatus: runStatus as AgentAnalyticsRunFilter } : {}),
     ...(sessionId ? { sessionId: sessionId.toLowerCase() } : {}),
   };
-}
-
-export function parseAgentAnalyticsPagination(params: URLSearchParams): { page: number; limit: number } {
-  const parse = (key: string, fallback: number, maximum: number) => {
-    const value = params.get(key);
-    if (value == null) return fallback;
-    if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > maximum)
-      throw new BadRequestError(`${key} must be an integer between 1 and ${maximum}.`);
-    return Number(value);
-  };
-  return { page: parse('page', 1, 10000), limit: parse('limit', 25, 100) };
 }
 
 type SqlRow = Record<string, unknown>;
@@ -293,6 +298,11 @@ function jsonNumber(field: string): string {
   return `CASE WHEN jsonb_typeof(r."usageSummary"->'${field}') = 'number' THEN (r."usageSummary"->>'${field}')::numeric END`;
 }
 
+/** The stored run plan is large and TOASTed; one lateral call decompresses it once per row. */
+const RUN_PLAN_JOIN = `LEFT JOIN LATERAL jsonb_to_record(
+    CASE WHEN jsonb_typeof(r."runPlanSnapshot") = 'object' THEN r."runPlanSnapshot" END
+  ) AS rp(source jsonb, agent jsonb) ON true`;
+
 const RUN_DIMENSIONS = `
   r.id, r.uuid AS run_uuid, r."sessionId" AS session_id, r."threadId" AS thread_id,
   r."createdAt" AS submitted_at,
@@ -300,13 +310,13 @@ const RUN_DIMENSIONS = `
   CASE WHEN r.status IN (${AGENT_ANALYTICS_STATUSES.filter((status) => status !== 'unknown')
     .map((status) => `'${status}'`)
     .join(',')}) THEN r.status ELSE 'unknown' END AS status,
-  LOWER(COALESCE(${jsonString(`r."runPlanSnapshot" #> '{source,repoFullName}'`)}, ${jsonString(
-  `r."runPlanSnapshot" #> '{source,workspaceLayout,primaryRepo}'`
+  LOWER(COALESCE(${jsonString(`rp.source -> 'repoFullName'`)}, ${jsonString(
+  `rp.source #> '{workspaceLayout,primaryRepo}'`
 )})) AS repository,
   COALESCE(NULLIF(BTRIM(r."resolvedProvider"), ''), NULLIF(BTRIM(r.provider), ''), 'unknown_provider') AS provider,
   COALESCE(NULLIF(BTRIM(r."resolvedModel"), ''), NULLIF(BTRIM(r.model), ''), 'unknown_model') AS model,
-  ${jsonString(`r."runPlanSnapshot" #> '{agent,id}'`)} AS agent_id,
-  ${jsonString(`r."runPlanSnapshot" #> '{agent,label}'`)} AS agent_label`;
+  ${jsonString(`rp.agent -> 'id'`)} AS agent_id,
+  ${jsonString(`rp.agent -> 'label'`)} AS agent_label`;
 
 const USAGE_COLUMNS = `
   ${jsonNumber('inputTokens')} AS input_tokens,
@@ -367,6 +377,19 @@ function priorDate(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
+function sliceWindow(
+  trx: Knex.Transaction,
+  range: ResolvedAnalyticsRange,
+  slice: AnalyticsSlice
+): { sql: string; bindings: unknown[] } {
+  const period = analyticsSlicePeriod(range, slice);
+  const bucket = slice.date ? analyticsBucketExpression(trx, range, 'r.createdAt', slice.period).toSQL() : null;
+  return {
+    sql: `r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz${bucket ? ` AND ${bucket.sql} = ?` : ''}`,
+    bindings: [period.fromUtc, period.toUtc, ...(bucket ? [...bucket.bindings, slice.date] : [])],
+  };
+}
+
 export default class AgentAnalyticsService {
   constructor(private readonly db: Pick<Database, 'knex'> = defaultDb) {}
 
@@ -381,9 +404,9 @@ export default class AgentAnalyticsService {
           SELECT ${RUN_DIMENSIONS}, ${USAGE_COLUMNS}, s."userId" AS owner_id,
             s."sessionKind" AS session_kind,
             CASE WHEN r."createdAt" >= ?::timestamptz THEN 'current' ELSE 'previous' END AS period,
-            date_trunc(?, ((r."createdAt" AT TIME ZONE ?)::date +
-              CASE WHEN r."createdAt" < ?::timestamptz THEN ?::int ELSE 0 END)::timestamp)::date::text AS bucket
-          FROM agent_runs r JOIN agent_sessions s ON s.id = r."sessionId"
+            to_char(date_trunc(?, ((r."createdAt" AT TIME ZONE ?)::date +
+              CASE WHEN r."createdAt" < ?::timestamptz THEN ?::int ELSE 0 END)::timestamp), 'YYYY-MM-DD') AS bucket
+          FROM agent_runs r ${RUN_PLAN_JOIN} JOIN agent_sessions s ON s.id = r."sessionId"
           WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz
         ), scoped AS MATERIALIZED (SELECT * FROM facts ${scope.sql}),
         aggregates AS (
@@ -497,7 +520,7 @@ export default class AgentAnalyticsService {
         SELECT s."userId" AS owner_id, s."sessionKind" AS session_kind, first_run.*,
           CASE WHEN s."createdAt" >= ?::timestamptz THEN 'current' ELSE 'previous' END AS period
         FROM agent_sessions s LEFT JOIN LATERAL (
-          SELECT ${RUN_DIMENSIONS} FROM agent_runs r WHERE r."sessionId" = s.id ORDER BY r."createdAt", r.id LIMIT 1
+          SELECT ${RUN_DIMENSIONS} FROM agent_runs r ${RUN_PLAN_JOIN} WHERE r."sessionId" = s.id ORDER BY r."createdAt", r.id LIMIT 1
         ) first_run ON true
         WHERE s."createdAt" >= ?::timestamptz AND s."createdAt" < ?::timestamptz
       ) SELECT period, COUNT(*)::int AS count, COUNT(*) FILTER (WHERE repository IS NULL)::int AS unattributed
@@ -508,26 +531,36 @@ export default class AgentAnalyticsService {
     return result.rows;
   }
 
-  async listRuns(query: AgentAnalyticsRunsQuery, page = 1, limit = 25): Promise<AgentAnalyticsRuns> {
+  async listRuns(
+    query: AgentAnalyticsRunsQuery,
+    page = 1,
+    limit = 25,
+    slice: AnalyticsSlice = DEFAULT_SLICE
+  ): Promise<AgentAnalyticsRuns> {
     if (!Number.isInteger(page) || page < 1 || page > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new BadRequestError('Invalid run pagination.');
     return analyticsTransaction(this.db.knex, async (trx) => {
       const range = await resolveAnalyticsRange(trx, query);
+      const window = sliceWindow(trx, range, slice);
       const scope = scopeSql(query);
-      const statusCondition = query.runStatus ? `${scope.sql ? ' AND' : ' WHERE'} status = ?` : '';
-      const statusBindings = query.runStatus ? [query.runStatus] : [];
+      const statusFilter =
+        query.runStatus === 'in_progress'
+          ? `status IN (${AGENT_IN_PROGRESS_STATUSES.map(() => '?').join(', ')})`
+          : 'status = ?';
+      const statusCondition = query.runStatus ? `${scope.sql ? ' AND' : ' WHERE'} ${statusFilter}` : '';
+      const statusBindings =
+        query.runStatus === 'in_progress' ? [...AGENT_IN_PROGRESS_STATUSES] : query.runStatus ? [query.runStatus] : [];
       const sessionCondition = query.sessionId ? ' AND s.uuid = ?::uuid' : '';
       const facts = `WITH facts AS MATERIALIZED (
         SELECT ${RUN_DIMENSIONS}, ${USAGE_COLUMNS}, s."userId" AS owner_id, s."ownerGithubUsername" AS owner_github_username,
           s."sessionKind" AS session_kind, s.uuid AS session_uuid, t.uuid AS thread_uuid,
           ${jsonString(`r.error->'code'`)} AS error_code
-        FROM agent_runs r JOIN agent_sessions s ON s.id = r."sessionId" JOIN agent_threads t ON t.id = r."threadId"
-        WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz
+        FROM agent_runs r ${RUN_PLAN_JOIN} JOIN agent_sessions s ON s.id = r."sessionId" JOIN agent_threads t ON t.id = r."threadId"
+        WHERE ${window.sql}
         ${sessionCondition}
       ), scoped AS MATERIALIZED (SELECT * FROM facts ${scope.sql}${statusCondition})`;
       const bindings = [
-        range.fromUtc,
-        range.toUtc,
+        ...window.bindings,
         ...(query.sessionId ? [query.sessionId] : []),
         ...scope.bindings,
         ...statusBindings,
@@ -546,6 +579,7 @@ export default class AgentAnalyticsService {
       return {
         range,
         asOf: range.asOf,
+        slice,
         caveats: [...CAVEATS],
         runs: (row.runs as SqlRow[]).map((run) => ({
           runId: String(run.run_uuid),
@@ -575,17 +609,23 @@ export default class AgentAnalyticsService {
     });
   }
 
-  async listSessions(query: AgentAnalyticsQuery, page = 1, limit = 25): Promise<AgentAnalyticsSessions> {
+  async listSessions(
+    query: AgentAnalyticsQuery,
+    page = 1,
+    limit = 25,
+    slice: AnalyticsSlice = DEFAULT_SLICE
+  ): Promise<AgentAnalyticsSessions> {
     if (!Number.isInteger(page) || page < 1 || page > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new BadRequestError('Invalid session pagination.');
     return analyticsTransaction(this.db.knex, async (trx) => {
       const range = await resolveAnalyticsRange(trx, query);
+      const window = sliceWindow(trx, range, slice);
       const scope = scopeSql(query);
       const result = await trx.raw(
         `WITH facts AS MATERIALIZED (
           SELECT ${RUN_DIMENSIONS}, ${USAGE_COLUMNS}, s."userId" AS owner_id, s."sessionKind" AS session_kind
-          FROM agent_runs r JOIN agent_sessions s ON s.id = r."sessionId"
-          WHERE r."createdAt" >= ?::timestamptz AND r."createdAt" < ?::timestamptz
+          FROM agent_runs r ${RUN_PLAN_JOIN} JOIN agent_sessions s ON s.id = r."sessionId"
+          WHERE ${window.sql}
         ), scoped AS MATERIALIZED (SELECT * FROM facts ${scope.sql}),
         grouped AS MATERIALIZED (
           SELECT session_id, MIN(submitted_at) AS first_submitted_at, MAX(submitted_at) AS last_submitted_at,
@@ -613,13 +653,14 @@ export default class AgentAnalyticsService {
             LEFT JOIN repositories repos ON repos.session_id = g.session_id
           ) records
         ), '[]'::jsonb) AS sessions`,
-        [range.fromUtc, range.toUtc, ...scope.bindings, limit, (page - 1) * limit]
+        [...window.bindings, ...scope.bindings, limit, (page - 1) * limit]
       );
       const row = result.rows[0];
       const total = number(row.total);
       return {
         range,
         asOf: range.asOf,
+        slice,
         caveats: [
           ...CAVEATS,
           'Session rows aggregate all matching runs before pagination; a session can appear in more than one repository, model, or date scope.',
@@ -648,7 +689,7 @@ export default class AgentAnalyticsService {
     return analyticsTransaction(this.db.knex, async (trx) => {
       const result = await trx.raw(
         `
-      WITH facts AS MATERIALIZED (SELECT ${RUN_DIMENSIONS} FROM agent_runs r),
+      WITH facts AS MATERIALIZED (SELECT ${RUN_DIMENSIONS} FROM agent_runs r ${RUN_PLAN_JOIN}),
       repositories AS (SELECT DISTINCT repository FROM facts WHERE repository IS NOT NULL),
       models AS (SELECT DISTINCT provider, model FROM facts),
       owners AS (

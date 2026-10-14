@@ -111,7 +111,7 @@ describe('deleteNamespace cleanup contract', () => {
   it('treats an already-absent namespace as a successful idempotent cleanup', async () => {
     mockShellPromise.mockRejectedValueOnce(new Error('Error from server (NotFound): namespaces "env-gone" not found'));
 
-    await expect(deleteNamespace('env-gone')).resolves.toBeUndefined();
+    await expect(deleteNamespace('env-gone')).resolves.toBe(false);
   });
 
   it('propagates other kubectl failures so the teardown can retry', async () => {

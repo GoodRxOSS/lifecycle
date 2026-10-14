@@ -39,6 +39,13 @@ const repositoryProperties = {
 };
 const inventoryProperties = {
   current: integer,
+  requested: { ...integer, description: 'Current records with at least one accepted deploy request.' },
+  pullRequestsNeverRequested: {
+    ...integer,
+    description: 'Current PR records that never had a deploy request, usually open PRs without the deploy label.',
+  },
+  rolledOut: { ...integer, description: 'Current records with at least one service rolled out at some point.' },
+  live: { ...integer, description: 'Current records that rolled out and still have deploys enabled.' },
   static: integer,
   ephemeral: integer,
   ready: integer,
@@ -55,6 +62,10 @@ const phase = {
   enum: ['ready', 'deployed_not_ready', 'in_progress', 'paused', 'failed', 'tearing_down', 'torn_down'],
 };
 const managedServiceType = { type: 'string', enum: ['docker', 'github', 'helm', 'aurora-restore'] };
+const sliceProperties = {
+  date: { ...date, nullable: true },
+  period: { type: 'string', enum: ['current', 'previous'] },
+};
 const serviceInstanceType = object({ type: managedServiceType, instances: integer });
 
 export const environmentAnalyticsSchemas = {
@@ -77,8 +88,11 @@ export const environmentAnalyticsSchemas = {
   }),
   EnvironmentAnalyticsTotals: object({
     firstSeenEnvironments: integer,
+    deployRequestedEnvironments: integer,
+    rolledOutEnvironments: integer,
     observedPullRequests: nullableInteger,
-    pullRequestsWithEnvironments: nullableInteger,
+    pullRequestsWithDeployRequest: nullableInteger,
+    pullRequestsDeployed: nullableInteger,
     activeRepositories: integer,
     unattributedEnvironments: integer,
     ambiguousRepositoryEnvironments: integer,
@@ -86,11 +100,21 @@ export const environmentAnalyticsSchemas = {
   EnvironmentAnalyticsRepository: object({
     ...repositoryProperties,
     firstSeenEnvironments: integer,
+    deployRequestedEnvironments: integer,
+    rolledOutEnvironments: integer,
     observedPullRequests: nullableInteger,
-    pullRequestsWithEnvironments: nullableInteger,
-    pullRequestCoverage: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+    pullRequestsWithDeployRequest: nullableInteger,
+    pullRequestsDeployed: nullableInteger,
+    deployRate: {
+      type: 'number',
+      minimum: 0,
+      maximum: 1,
+      nullable: true,
+      description: 'PRs deployed divided by PRs recorded; null below 10 recorded PRs.',
+    },
     currentEnvironments: integer,
     readyEnvironments: integer,
+    liveEnvironments: integer,
   }),
   EnvironmentAnalyticsBucket: object({
     date,
@@ -145,10 +169,11 @@ export const environmentAnalyticsSchemas = {
       previousTotals: nullableRef('EnvironmentAnalyticsTotals'),
       buckets: array(ref('EnvironmentAnalyticsBucket')),
       activity: ref('EnvironmentActivityBreakdown'),
+      inventoryTotals: ref('InventoryAnalyticsTotals'),
       repositories: array(ref('EnvironmentAnalyticsRepository')),
       rankingTotal: integer,
       rankingTruncated: boolean,
-      rankBy: { type: 'string', enum: ['first_seen', 'observed_prs', 'pr_coverage'] },
+      rankBy: { type: 'string', enum: ['first_seen', 'observed_prs', 'prs_deployed', 'deploy_rate'] },
       caveats: array(text),
     },
     ['activity']
@@ -223,6 +248,11 @@ export const environmentAnalyticsSchemas = {
     expiresAt: nullableInstant,
     deletedAt: nullableInstant,
     resourceAvailable: boolean,
+    deployRequested: boolean,
+    rolledOut: boolean,
+    live: boolean,
+    firstReadyAt: nullableInstant,
+    lastTornDownAt: nullableInstant,
     repositoryAmbiguous: boolean,
     serviceInstances: {
       ...nullableInteger,
@@ -238,8 +268,6 @@ export const environmentAnalyticsSchemas = {
     totals: ref('InventoryAnalyticsTotals'),
     services: ref('ManagedServiceInventory'),
     repositories: array(ref('InventoryAnalyticsRepository')),
-    exceptions: array(ref('EnvironmentAnalyticsRecord')),
-    truncated: boolean,
     repositoriesTruncated: boolean,
     repositoryTotal: integer,
     caveats: array(text),
@@ -262,12 +290,55 @@ export const environmentAnalyticsSchemas = {
     total: integer,
     hasMore: boolean,
   }),
+  EnvironmentAnalyticsRecordsSlice: object({
+    evidence: {
+      type: 'string',
+      enum: ['requested', 'rolled_out', 'live', 'ready', 'never_requested'],
+      nullable: true,
+      description:
+        'Evidence count the records were selected for. The first_seen cohort supports requested and rolled_out.',
+    },
+    ...sliceProperties,
+  }),
   EnvironmentAnalyticsRecords: object({
     asOf: instant,
     scope: ref('EnvironmentAnalyticsScope'),
     range: nullableRef('AnalyticsRange'),
     cohort: { type: 'string', enum: ['first_seen', 'current'] },
+    slice: ref('EnvironmentAnalyticsRecordsSlice'),
     records: array(ref('EnvironmentAnalyticsRecord')),
+    pagination: ref('EnvironmentAnalyticsPagination'),
+  }),
+  EnvironmentAnalyticsPullRequestsSlice: object({
+    evidence: { type: 'string', enum: ['requested', 'rolled_out'], nullable: true },
+    ...sliceProperties,
+  }),
+  EnvironmentAnalyticsPullRequestEnvironment: object({
+    id: integer,
+    uuid: nullableText,
+    namespace: nullableText,
+    resourceAvailable: boolean,
+  }),
+  EnvironmentAnalyticsPullRequestRecord: object({
+    ...repositoryProperties,
+    id: integer,
+    number: integer,
+    title: nullableText,
+    author: nullableText,
+    createdAt: nullableInstant,
+    deployRequested: boolean,
+    rolledOut: boolean,
+    environment: {
+      ...nullableRef('EnvironmentAnalyticsPullRequestEnvironment'),
+      description: 'Newest environment of the pull request in the selected environment type.',
+    },
+  }),
+  EnvironmentAnalyticsPullRequests: object({
+    asOf: instant,
+    scope: ref('EnvironmentAnalyticsScope'),
+    range: ref('AnalyticsRange'),
+    slice: ref('EnvironmentAnalyticsPullRequestsSlice'),
+    records: array(ref('EnvironmentAnalyticsPullRequestRecord')),
     pagination: ref('EnvironmentAnalyticsPagination'),
   }),
   GetAnalyticsOptionsSuccessResponse: success('AnalyticsOptions'),
@@ -275,4 +346,5 @@ export const environmentAnalyticsSchemas = {
   GetInventoryAnalyticsSuccessResponse: success('InventoryAnalytics'),
   GetManagedServiceRecordsSuccessResponse: success('ManagedServiceRecords'),
   GetEnvironmentAnalyticsRecordsSuccessResponse: success('EnvironmentAnalyticsRecords'),
+  GetEnvironmentAnalyticsPullRequestsSuccessResponse: success('EnvironmentAnalyticsPullRequests'),
 };

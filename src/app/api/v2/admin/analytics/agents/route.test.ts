@@ -150,7 +150,10 @@ describe('Agent analytics admin API boundaries', () => {
 
   it('enforces run pagination and outcome filters', async () => {
     expect((await runs(request('?runStatus=failed&page=2&limit=100'))).status).toBe(200);
-    expect(mockRuns).toHaveBeenCalledWith(expect.objectContaining({ runStatus: 'failed' }), 2, 100);
+    expect(mockRuns).toHaveBeenCalledWith(expect.objectContaining({ runStatus: 'failed' }), 2, 100, {
+      date: null,
+      period: 'current',
+    });
     mockRuns.mockClear();
     expect((await runs(request('?limit=101'))).status).toBe(400);
     expect(mockRuns).not.toHaveBeenCalled();
@@ -171,15 +174,30 @@ describe('Agent analytics admin API boundaries', () => {
     expect(mockSessions).toHaveBeenCalledWith(
       expect.objectContaining({ repository: 'org/repo', owner: 'owner' }),
       2,
-      25
+      25,
+      { date: null, period: 'current' }
     );
     expect(mockSessions.mock.calls[0][0]).not.toHaveProperty('runStatus');
+  });
+
+  it('forwards the chart slice to runs and sessions and rejects an invalid slice before data access', async () => {
+    expect((await runs(request('?date=2026-03-09&period=previous'))).status).toBe(200);
+    expect(mockRuns).toHaveBeenCalledWith(expect.any(Object), 1, 25, { date: '2026-03-09', period: 'previous' });
+    expect((await sessions(request('?date=2026-03-09'))).status).toBe(200);
+    expect(mockSessions).toHaveBeenCalledWith(expect.any(Object), 1, 25, { date: '2026-03-09', period: 'current' });
+    expect((await runs(request('?period=last'))).status).toBe(400);
+    expect((await sessions(request('?date=2026-3-9'))).status).toBe(400);
+    expect(mockRuns).toHaveBeenCalledTimes(1);
+    expect(mockSessions).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid session IDs and forwards valid run drawer scope', async () => {
     const sessionId = '00000000-0000-4000-8000-000000000001';
     expect((await runs(request(`?sessionId=${sessionId}&page=2`))).status).toBe(200);
-    expect(mockRuns).toHaveBeenCalledWith(expect.objectContaining({ sessionId }), 2, 25);
+    expect(mockRuns).toHaveBeenCalledWith(expect.objectContaining({ sessionId }), 2, 25, {
+      date: null,
+      period: 'current',
+    });
     mockRuns.mockClear();
     expect((await runs(request('?sessionId=invalid'))).status).toBe(400);
     expect(mockRuns).not.toHaveBeenCalled();

@@ -53,7 +53,7 @@ export function createDeployEnvironmentToolDefinition(
         const loaded = await dependencies.loadNamedEnvironment(uuid);
         assertAuthorizedEnvironmentTarget(loaded, environmentId);
         annotateEnvironment(context, loaded.build);
-        const result = await dependencies.service().redeployBuild(uuid, environmentId, BuildKind.ENVIRONMENT);
+        const result = await dependencies.service().redeployBuild(uuid, environmentId, BuildKind.ENVIRONMENT, 'mcp');
         if (result.status !== 'success') {
           if (result.status === 'not_found') {
             throw new McpExecutionError('env_not_found', 'That environment was not found.');

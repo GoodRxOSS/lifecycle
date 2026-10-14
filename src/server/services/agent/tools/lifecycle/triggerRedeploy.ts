@@ -76,6 +76,7 @@ export class TriggerRedeployTool extends BaseTool {
       await new BuildService().enqueueResolveAndDeployBuild({
         buildId: build.id,
         runUUID: nanoid(),
+        origin: 'agent',
       });
 
       const { default: EnvironmentWatchService } = await import('server/services/agent/EnvironmentWatchService');

@@ -40,6 +40,9 @@ export const runtime = 'nodejs';
  *       - { in: query, name: interval, schema: { type: string, enum: [day, week], default: day } }
  *       - { in: query, name: cohort, schema: { type: string, enum: [first_seen, current], default: first_seen }, description: Current records ignore date controls. }
  *       - { in: query, name: phase, schema: { type: string, enum: [ready, deployed_not_ready, in_progress, paused, failed, tearing_down] }, description: Available for current cohort only. }
+ *       - { in: query, name: evidence, schema: { type: string, enum: [requested, rolled_out, live, ready, never_requested] }, description: Lists the records behind one evidence count. The first_seen cohort accepts requested and rolled_out only. }
+ *       - { in: query, name: date, schema: { type: string, format: date }, description: Start date of one chart bucket. Available for the first_seen cohort only. }
+ *       - { in: query, name: period, schema: { type: string, enum: [current, previous], default: current }, description: Lists the comparison window when previous. Available for the first_seen cohort only. }
  *       - { in: query, name: page, schema: { type: integer, minimum: 1, maximum: 1000000, default: 1 } }
  *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
  *     responses:

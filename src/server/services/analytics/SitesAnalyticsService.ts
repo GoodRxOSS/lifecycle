@@ -254,8 +254,6 @@ export default class SitesAnalyticsService {
   async getSummary(query: SitesAnalyticsQuery): Promise<SitesAnalyticsSummary> {
     const config = await this.loadConfig();
     return analyticsTransaction(this.db.knex, async (trx) => {
-      // These short aggregates never repay JIT compilation, and correlated subplans inflate cost estimates past its threshold.
-      await trx.raw('SET LOCAL jit = off');
       const range = await resolveAnalyticsRange(trx, query);
       const { activity: activityRows, publishers } = await this.activityAndPublishers(trx, query, range);
       const state = (await this.state(trx, query, range, config))[0] ?? {};

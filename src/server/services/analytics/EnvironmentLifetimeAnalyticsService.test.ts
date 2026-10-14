@@ -153,21 +153,31 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
   it.each(['30_to_90d', '90_to_180d', '180d_plus'])('rejects current-only age band %s for completed records', (bin) => {
     expect(() => parseEnvironmentLifetimeRecordsQuery(params(`bin=${bin}`))).toThrow();
   });
-  it('fills sparse dates, separates methods and preserves previous DST alignment', async () => {
+  it('separates methods, reports recorded samples and runtime, and keeps the previous period', async () => {
     const { service, raw } = serviceWithRows([
       [
-        { period: 'current', group_name: 'api', bucket: null, eligible: 2, samples: 1, missing: 1, mean_hours: 1 },
-        { period: 'current', group_name: 'pr', bucket: null, eligible: 1, samples: 1, mean_hours: 10 },
         {
           period: 'current',
           group_name: 'api',
-          bucket: '2026-03-09',
           eligible: 2,
           samples: 1,
+          recorded_samples: 1,
           missing: 1,
           mean_hours: 1,
         },
-        { period: 'previous', group_name: 'api', bucket: '2026-03-08', eligible: 1, samples: 1, mean_hours: 6 },
+        {
+          period: 'current',
+          group_name: 'pr',
+          eligible: 1,
+          samples: 1,
+          recorded_samples: 0,
+          mean_hours: 10,
+          runtime_samples: 1,
+          runtime_mean_hours: 4,
+          runtime_median_hours: 4,
+          runtime_p90_hours: 4,
+        },
+        { period: 'previous', group_name: 'api', eligible: 1, samples: 1, mean_hours: 6 },
       ],
       [{ group_name: 'all', eligible: 3, samples: 2, invalid: 1, mean_hours: 20 }],
       [
@@ -178,14 +188,22 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
     const result = await service.getSummary(
       parseEnvironmentAnalyticsQuery(params('repositoryId=4&organization=Org&environmentAuthor=Alice'))
     );
-    expect(result.completed.api).toMatchObject({ eligible: 2, samples: 1, missing: 1, meanHours: 1 });
-    expect(result.completed.pr).toMatchObject({ meanHours: 10, quality: 'estimated' });
-    expect(result.buckets[0]).toMatchObject({
-      date: '2026-03-08',
-      previousDate: '2026-03-06',
-      current: { api: { samples: 0, meanHours: null } },
-      previous: { api: { samples: 1, meanHours: 6 } },
+    expect(result.completed.api).toMatchObject({
+      eligible: 2,
+      samples: 1,
+      recordedSamples: 1,
+      missing: 1,
+      meanHours: 1,
+      runtime: { samples: 0, meanHours: null, medianHours: null, p90Hours: null },
     });
+    expect(result.completed.pr).toMatchObject({
+      meanHours: 10,
+      quality: 'estimated',
+      recordedSamples: 0,
+      runtime: { samples: 1, meanHours: 4, medianHours: 4, p90Hours: 4 },
+    });
+    expect(result.previousCompleted?.api).toMatchObject({ samples: 1, meanHours: 6 });
+    expect(result).not.toHaveProperty('buckets');
     expect(result.currentAge.all).toMatchObject({ eligible: 3, samples: 2, invalid: 1, quality: 'record_age' });
     expect(result.unplacedRetirements).toEqual({
       api: { missingEnd: 2, invalidEnd: 1 },
@@ -198,6 +216,11 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
     expect(completedCall[0]).toContain('percentile_cont(0.9)');
     expect(completedCall[0]).toContain('NOT isfinite(start_at)');
     expect(completedCall[0]).toContain('end_at < start_at');
+    expect(completedCall[0]).toContain(`COALESCE("lastTornDownAt", "updatedAt")`);
+    expect(completedCall[0]).toContain(`end_source IN ('deleted', 'torn_down', 'snapshot')`);
+    expect(completedCall[0]).toContain('"firstReadyAt" <= end_at');
+    expect(completedCall[0]).toContain('GROUP BY period, group_name');
+    expect(completedCall[0]).not.toContain('bucket');
     expect(completedCall[1]).toEqual(expect.arrayContaining([4, 'Org', 'Alice', range.previous!.fromUtc, range.toUtc]));
     const currentCall = raw.mock.calls.find(([sql]) => sql.includes("COALESCE(group_name, 'all')"))!;
     expect(currentCall[0]).toContain('"e"."deletedAt" is null');
@@ -205,30 +228,11 @@ describe('EnvironmentLifetimeAnalyticsService', () => {
     expect(currentCall[1]).not.toContain(range.toUtc);
     expect(raw.mock.calls[0][0]).toBe('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
   });
-  it('keeps weekly prior display dates within the supported AD domain', async () => {
-    mockResolveRange.mockResolvedValue({
-      ...range,
-      from: '0001-01-02',
-      to: '0001-01-03',
-      dates: ['0001-01-02'],
-      calendarDays: 1,
-      interval: 'week',
-      previous: { ...range.previous, from: '0001-01-01', to: '0001-01-02', dates: ['0001-01-01'] },
-    });
-    const { service } = serviceWithRows([[], [], []]);
-    const result = await service.getSummary(
-      parseEnvironmentAnalyticsQuery(params('from=0001-01-02&to=0001-01-03&interval=week'))
-    );
-    expect(result.buckets[0].date).toBe('0001-01-01');
-    expect(result.buckets[0].previousDate).toBeNull();
-    expect(result.buckets[0].previous).not.toBeNull();
-  });
   it('omits previous values when comparison is disabled', async () => {
     mockResolveRange.mockResolvedValue({ ...range, previous: null, compare: false });
     const { service } = serviceWithRows([[], [], []]);
     const result = await service.getSummary(parseEnvironmentAnalyticsQuery(params('compare=false')));
     expect(result.previousCompleted).toBeNull();
-    expect(result.buckets.every((row) => row.previous === null && row.previousDate === null)).toBe(true);
   });
   it('current records ignore malformed calendar controls and return first-record age', async () => {
     const { service, raw } = serviceWithRows([

@@ -13,11 +13,52 @@
 import type { Knex } from 'knex';
 import { AppError } from 'server/lib/appError';
 
+export const ANALYTICS_CONCURRENCY = 4;
+export const ANALYTICS_QUEUE_WAIT_MS = 5000;
+let running = 0;
+const waiting: Array<() => void> = [];
+
+/** Analytics shares the API's pool: a few extra requests wait briefly for a slot, the rest fail fast. */
+function acquire(): Promise<void> {
+  if (running < ANALYTICS_CONCURRENCY) {
+    running += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const grant = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      waiting.splice(waiting.indexOf(grant), 1);
+      reject(
+        new AppError({
+          httpStatus: 503,
+          code: 'analytics_busy',
+          message: 'Analytics is busy. Try again in a moment.',
+          nextAction: { kind: 'retry', label: 'Try again' },
+          retryable: true,
+        })
+      );
+    }, ANALYTICS_QUEUE_WAIT_MS);
+    waiting.push(grant);
+  });
+}
+
+function release(): void {
+  const next = waiting.shift();
+  if (next) next();
+  else running -= 1;
+}
+
 export async function analyticsTransaction<T>(knex: Knex, work: (trx: Knex.Transaction) => Promise<T>): Promise<T> {
+  await acquire();
   try {
     return await knex.transaction(async (trx) => {
       await trx.raw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
       await trx.raw("SET LOCAL statement_timeout = '10s'");
+      // Statements run once; JIT compiling them cost more than a second each on wide windows.
+      await trx.raw('SET LOCAL jit = off');
       return work(trx);
     });
   } catch (error) {
@@ -36,5 +77,7 @@ export async function analyticsTransaction<T>(knex: Knex, work: (trx: Knex.Trans
       });
     }
     throw error;
+  } finally {
+    release();
   }
 }

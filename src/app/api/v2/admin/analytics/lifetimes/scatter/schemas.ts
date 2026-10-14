@@ -21,14 +21,14 @@ export const environmentLifetimeScatterSchemas = {
   EnvironmentLifetimeScatterPoint: object({
     ...environmentLifetimeAnalyticsSchemas.EnvironmentLifetimeRecord.properties,
     group: { type: 'string', enum: ['api', 'pr'] },
-    method: { type: 'string', enum: ['created_to_deleted', 'created_to_last_update'] },
+    method: { type: 'string', enum: ['created_to_deleted', 'created_to_torn_down', 'created_to_last_update'] },
     quality: { type: 'string', enum: ['recorded', 'estimated'] },
     sampleState: { type: 'string', enum: ['valid'] },
     durationHours: { type: 'number', minimum: 0 },
     measuredUntilAt: { type: 'string', format: 'date-time' },
   }),
   EnvironmentLifetimeScatterCoverage: object({
-    method: { type: 'string', enum: ['created_to_deleted', 'created_to_last_update'] },
+    method: { type: 'string', enum: ['created_to_deleted', 'created_to_torn_down', 'created_to_last_update'] },
     quality: { type: 'string', enum: ['recorded', 'estimated'] },
     eligible: integer,
     samples: integer,

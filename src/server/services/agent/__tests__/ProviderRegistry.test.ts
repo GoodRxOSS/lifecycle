@@ -124,6 +124,8 @@ describe('resolveRequestedModelSelection', () => {
             ...MODELS[0],
             inputCostPerMillion: 1.25,
             outputCostPerMillion: 10,
+            cacheReadCostPerMillion: 0.125,
+            cacheWriteCostPerMillion: 1.5,
           },
         ],
         'gemini',
@@ -134,6 +136,8 @@ describe('resolveRequestedModelSelection', () => {
       modelId: 'gemini-3-flash-preview',
       inputCostPerMillion: 1.25,
       outputCostPerMillion: 10,
+      cacheReadCostPerMillion: 0.125,
+      cacheWriteCostPerMillion: 1.5,
     });
   });
 

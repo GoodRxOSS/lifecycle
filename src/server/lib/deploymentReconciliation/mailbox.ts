@@ -58,10 +58,17 @@ export interface DeploymentReconciliationJobData extends JobDataWithContext {
   generation: number;
 }
 
+export interface ReplacedDeploymentIntent {
+  requestId: string;
+  generation: number;
+}
+
 export interface AcceptDeploymentIntentResult {
   accepted: boolean;
   generation: number;
   scopeKey: string;
+  /** Pending requests this acceptance retired; a run already under way stops at its next ownership check. */
+  replaced: ReplacedDeploymentIntent[];
 }
 
 /** A stable key lets a newer intent replace only earlier work for the same scope. */
@@ -151,7 +158,7 @@ export async function acceptDeploymentIntent(
         previous.sha === intent.sha &&
         previous.target === intent.target)
     ) {
-      return { accepted: false, generation: desiredGeneration, scopeKey };
+      return { accepted: false, generation: desiredGeneration, scopeKey, replaced: [] };
     }
 
     // GitHub can deliver adjacent pushes out of order. If C is already desired,
@@ -164,7 +171,7 @@ export async function acceptDeploymentIntent(
       intent.sha === previous.beforeSha &&
       intent.beforeSha !== previous.sha
     ) {
-      return { accepted: false, generation: desiredGeneration, scopeKey };
+      return { accepted: false, generation: desiredGeneration, scopeKey, replaced: [] };
     }
 
     const generation = desiredGeneration + 1;
@@ -172,6 +179,10 @@ export async function acceptDeploymentIntent(
       throw new Error(`Build ${buildId} exhausted the safe generation range`);
     }
 
+    const replaced: ReplacedDeploymentIntent[] = [];
+    if (previous?.requestId && previous.observedGen !== previous.gen) {
+      replaced.push({ requestId: previous.requestId, generation: previous.gen });
+    }
     const nextRefs: AcceptedDeploymentRefs = {
       ...acceptedRefs,
       [scopeKey]: { ...intent, gen: generation },
@@ -183,6 +194,7 @@ export async function acceptDeploymentIntent(
           continue;
         }
         nextRefs[key] = { ...accepted, observedGen: accepted.gen };
+        replaced.push({ requestId: accepted.requestId, generation: accepted.gen });
       }
     }
 
@@ -192,7 +204,7 @@ export async function acceptDeploymentIntent(
     });
     await stampDeploysForIntent(trx, buildId, intent, generation);
 
-    return { accepted: true, generation, scopeKey };
+    return { accepted: true, generation, scopeKey, replaced };
   });
 }
 

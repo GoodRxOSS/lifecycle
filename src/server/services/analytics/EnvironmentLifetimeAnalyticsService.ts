@@ -25,7 +25,7 @@ import {
   type EnvironmentAnalyticsQuery,
   type EnvironmentAnalyticsScope,
 } from './EnvironmentAnalyticsService';
-import { analyticsBucketDates, resolveAnalyticsRange, type ResolvedAnalyticsRange } from './query';
+import { resolveAnalyticsRange, type ResolvedAnalyticsRange } from './query';
 
 export const ENVIRONMENT_LIFETIME_BINS = [
   { id: 'under_1h', label: 'Under 1 hour', fromHours: 0, toHours: 1 },
@@ -47,7 +47,11 @@ export const ENVIRONMENT_CURRENT_AGE_BINS = [
 export const ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT = 5000;
 
 export type EnvironmentLifetimeGroup = 'api' | 'pr' | 'other';
-export type EnvironmentLifetimeMethod = 'created_to_deleted' | 'created_to_last_update' | 'first_record_age';
+export type EnvironmentLifetimeMethod =
+  | 'created_to_deleted'
+  | 'created_to_torn_down'
+  | 'created_to_last_update'
+  | 'first_record_age';
 export type EnvironmentLifetimeQuality = 'recorded' | 'estimated' | 'record_age';
 export type EnvironmentLifetimeSampleState = 'valid' | 'missing' | 'invalid';
 export type EnvironmentLifetimeBin =
@@ -55,16 +59,24 @@ export type EnvironmentLifetimeBin =
   | (typeof ENVIRONMENT_CURRENT_AGE_BINS)[number]['id']
   | 'missing'
   | 'invalid';
+export type EnvironmentLifetimeRuntimeStats = {
+  samples: number;
+  meanHours: number | null;
+  medianHours: number | null;
+  p90Hours: number | null;
+};
 export type EnvironmentLifetimeStats = {
   method: EnvironmentLifetimeMethod;
   quality: EnvironmentLifetimeQuality;
   eligible: number;
   samples: number;
+  recordedSamples: number;
   missing: number;
   invalid: number;
   meanHours: number | null;
   medianHours: number | null;
   p90Hours: number | null;
+  runtime: EnvironmentLifetimeRuntimeStats;
   distribution: Array<{ id: string; label: string; fromHours: number; toHours: number | null; count: number }>;
 };
 export type EnvironmentLifetimeCompleted = { api: EnvironmentLifetimeStats; pr: EnvironmentLifetimeStats };
@@ -74,12 +86,6 @@ export type EnvironmentLifetimeAnalytics = {
   scope: EnvironmentAnalyticsScope;
   completed: EnvironmentLifetimeCompleted;
   previousCompleted: EnvironmentLifetimeCompleted | null;
-  buckets: Array<{
-    date: string;
-    previousDate: string | null;
-    current: EnvironmentLifetimeCompleted;
-    previous: EnvironmentLifetimeCompleted | null;
-  }>;
   currentAge: Record<'all' | EnvironmentLifetimeGroup, EnvironmentLifetimeStats>;
   unplacedRetirements: {
     api: { missingEnd: number; invalidEnd: number };
@@ -118,6 +124,8 @@ export type EnvironmentLifetimeRecord = AnalyticsRepositoryIdentity & {
   startedAt: string | null;
   measuredUntilAt: string | null;
   durationHours: number | null;
+  firstReadyAt: string | null;
+  runtimeHours: number | null;
 };
 export type EnvironmentLifetimeRecords = {
   asOf: string;
@@ -160,15 +168,16 @@ export type EnvironmentLifetimeScatter = {
 const MAX_PAGE = 10_000;
 const CAVEATS = [
   'API record duration measures creation to recorded deletion. It includes records that never deployed and does not measure runtime lifetime.',
-  'PR record duration estimates creation to the latest update of a torn-down record. It includes records that never deployed. Waiting time, later edits and reuse gaps can increase it.',
+  'PR record duration measures creation to the recorded teardown time. Records torn down before teardown times were recorded use their last update instead, which later edits can move forward. It includes records that never deployed.',
+  'Runtime measures the first time the environment was deployed to the end of the record. Records with no recorded first deploy have no runtime.',
+  'A PR that was closed and reopened keeps one record, so its recorded duration and runtime also span the time it was closed.',
   'Current age is time since the first retained record. It includes queued, paused and failed time and can include earlier PR episodes.',
-  'Retirement dates select completed samples. Missing or nonfinite end dates cannot be placed in a window; unplaced counts cover the entire selected scope.',
+  'Retirement dates select completed samples. Missing or nonfinite end dates cannot be placed in a window. Unplaced counts cover the entire selected scope.',
   'Counts cover retained environment records, not deployment attempts. Collection start and history completeness are unknown.',
 ];
 type LifetimeAggregate = Record<string, unknown> & {
   group_name?: string;
   period?: string;
-  bucket?: string | null;
 };
 
 const count = (value: unknown): number => {
@@ -186,15 +195,16 @@ const timestamp = (value: unknown): string | null => {
   const result = new Date(value as string | Date);
   return Number.isFinite(result.getTime()) ? result.toISOString() : null;
 };
-const previousBucketDate = (date: string, range: ResolvedAnalyticsRange): string | null => {
-  if (!range.previous) return null;
-  const aligned = new Date(Date.parse(`${date}T00:00:00Z`) - range.calendarDays * 86_400_000).toISOString();
-  return /^\d{4}-/.test(aligned) && !aligned.startsWith('0000-') ? aligned.slice(0, 10) : null;
-};
-function method(group: EnvironmentLifetimeGroup | 'all', cohort: 'completed' | 'current') {
+function method(
+  group: EnvironmentLifetimeGroup | 'all',
+  cohort: 'completed' | 'current',
+  coverage?: { samples: number; recordedSamples: number }
+) {
   if (cohort === 'current') return { method: 'first_record_age' as const, quality: 'record_age' as const };
-  return group === 'api'
-    ? { method: 'created_to_deleted' as const, quality: 'recorded' as const }
+  if (group === 'api') return { method: 'created_to_deleted' as const, quality: 'recorded' as const };
+  // A PR group is recorded only when every measured record has a recorded teardown time.
+  return coverage && coverage.samples > 0 && coverage.recordedSamples === coverage.samples
+    ? { method: 'created_to_torn_down' as const, quality: 'recorded' as const }
     : { method: 'created_to_last_update' as const, quality: 'estimated' as const };
 }
 
@@ -204,15 +214,24 @@ export function serializeEnvironmentLifetimeStats(
   row?: LifetimeAggregate
 ): EnvironmentLifetimeStats {
   const samples = count(row?.samples);
+  const recordedSamples = count(row?.recorded_samples);
+  const runtimeSamples = count(row?.runtime_samples);
   return {
-    ...method(group, cohort),
+    ...method(group, cohort, { samples, recordedSamples }),
     eligible: count(row?.eligible),
     samples,
+    recordedSamples,
     missing: count(row?.missing),
     invalid: count(row?.invalid),
     meanHours: samples ? nullableNumber(row?.mean_hours) : null,
     medianHours: samples ? nullableNumber(row?.median_hours) : null,
     p90Hours: samples ? nullableNumber(row?.p90_hours) : null,
+    runtime: {
+      samples: runtimeSamples,
+      meanHours: runtimeSamples ? nullableNumber(row?.runtime_mean_hours) : null,
+      medianHours: runtimeSamples ? nullableNumber(row?.runtime_median_hours) : null,
+      p90Hours: runtimeSamples ? nullableNumber(row?.runtime_p90_hours) : null,
+    },
     distribution: (cohort === 'current' ? ENVIRONMENT_CURRENT_AGE_BINS : ENVIRONMENT_LIFETIME_BINS).map((bin) => ({
       ...bin,
       count: count(row?.[bin.id]),
@@ -226,10 +245,7 @@ export function parseEnvironmentLifetimeRecordsQuery(params: URLSearchParams): E
     throw new BadRequestError('cohort must be completed or current.', 'invalid_query');
   const group = params.get('group') ?? 'all';
   if (!['all', 'api', 'pr', 'other'].includes(group) || (cohort === 'completed' && group === 'other'))
-    throw new BadRequestError(
-      'group must be all, api or pr; other is available for current age only.',
-      'invalid_query'
-    );
+    throw new BadRequestError('group must be all, api or pr, or other for current age only.', 'invalid_query');
   const bin = params.get('bin');
   const bins =
     cohort === 'current' ? [...ENVIRONMENT_LIFETIME_BINS, ...ENVIRONMENT_CURRENT_AGE_BINS] : ENVIRONMENT_LIFETIME_BINS;
@@ -289,8 +305,13 @@ function factsSql(
           ${
             cohort === 'current'
               ? 'CURRENT_TIMESTAMP'
-              : `CASE WHEN group_name = 'api' THEN "deletedAt" WHEN group_name = 'pr' THEN "updatedAt" END`
-          } AS end_at
+              : `CASE WHEN group_name = 'api' THEN "deletedAt" WHEN group_name = 'pr' THEN COALESCE("lastTornDownAt", "updatedAt") END`
+          } AS end_at,
+          ${
+            cohort === 'current'
+              ? `'snapshot'`
+              : `CASE WHEN group_name = 'api' THEN 'deleted' WHEN "lastTornDownAt" IS NOT NULL THEN 'torn_down' ELSE 'updated' END`
+          } AS end_source
         FROM classified
         ${
           cohort === 'completed'
@@ -303,7 +324,9 @@ function factsSql(
           ELSE 'valid' END AS sample_state
         FROM measured
       ), facts AS (
-        SELECT *, CASE WHEN sample_state = 'valid' THEN EXTRACT(EPOCH FROM (end_at - start_at)) / 3600.0 END::double precision AS duration_hours
+        SELECT *, CASE WHEN sample_state = 'valid' THEN EXTRACT(EPOCH FROM (end_at - start_at)) / 3600.0 END::double precision AS duration_hours,
+          CASE WHEN sample_state = 'valid' AND "firstReadyAt" IS NOT NULL AND isfinite("firstReadyAt") AND "firstReadyAt" <= end_at
+            THEN EXTRACT(EPOCH FROM (end_at - "firstReadyAt")) / 3600.0 END::double precision AS runtime_hours
         FROM evaluated
       )`,
     bindings: [
@@ -317,6 +340,11 @@ function aggregateSql(cohort: 'completed' | 'current'): string {
   const bins = cohort === 'current' ? ENVIRONMENT_CURRENT_AGE_BINS : ENVIRONMENT_LIFETIME_BINS;
   return `COUNT(*) AS eligible,
   COUNT(*) FILTER (WHERE sample_state = 'valid') AS samples,
+  COUNT(*) FILTER (WHERE sample_state = 'valid' AND end_source IN ('deleted', 'torn_down', 'snapshot')) AS recorded_samples,
+  COUNT(runtime_hours) AS runtime_samples,
+  AVG(runtime_hours) AS runtime_mean_hours,
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY runtime_hours) AS runtime_median_hours,
+  percentile_cont(0.9) WITHIN GROUP (ORDER BY runtime_hours) AS runtime_p90_hours,
   COUNT(*) FILTER (WHERE sample_state = 'missing') AS missing,
   COUNT(*) FILTER (WHERE sample_state = 'invalid') AS invalid,
   AVG(duration_hours) AS mean_hours,
@@ -336,21 +364,28 @@ const RECORD_JSON_SQL = `jsonb_build_object(
   'id', id, 'uuid', uuid, 'namespace', namespace, 'status', status, 'isStatic', COALESCE("isStatic", false),
   'author', author, 'repositoryId', "repositoryId", 'fullName', "fullName",
   'githubInstallationId', "githubInstallationId", 'repositoryAmbiguous', "repositoryAmbiguous",
-  'resourceAvailable', ("deletedAt" IS NULL AND (status IS NULL OR status <> ?) AND NULLIF(uuid, '') IS NOT NULL),
+  'resourceAvailable', ("deletedAt" IS NULL AND NULLIF(uuid, '') IS NOT NULL),
   'pullRequest', CASE WHEN group_name = 'pr' THEN jsonb_build_object(
     'number', "pullRequestNumber", 'title', "prTitle", 'author', "prAuthor") END,
   'group', group_name, 'sampleState', sample_state,
   'startedAt', CASE WHEN isfinite(start_at) THEN start_at END,
-  'measuredUntilAt', CASE WHEN isfinite(end_at) THEN end_at END, 'durationHours', duration_hours
+  'measuredUntilAt', CASE WHEN isfinite(end_at) THEN end_at END, 'durationHours', duration_hours,
+  'endSource', end_source, 'firstReadyAt', CASE WHEN "firstReadyAt" IS NOT NULL AND isfinite("firstReadyAt") THEN "firstReadyAt" END,
+  'runtimeHours', runtime_hours
 )`;
 
 function serializeRecord(
-  record: EnvironmentLifetimeRecord,
+  record: EnvironmentLifetimeRecord & { endSource?: string },
   cohort: 'completed' | 'current'
 ): EnvironmentLifetimeRecord {
+  const { endSource, ...rest } = record;
+  const measure =
+    cohort === 'completed' && record.group === 'pr' && endSource === 'torn_down'
+      ? { method: 'created_to_torn_down' as const, quality: 'recorded' as const }
+      : method(record.group, cohort);
   return {
-    ...record,
-    ...method(record.group, cohort),
+    ...rest,
+    ...measure,
     id: count(record.id),
     namespace: record.namespace ?? null,
     repositoryId: record.repositoryId == null ? null : count(record.repositoryId),
@@ -358,6 +393,8 @@ function serializeRecord(
     durationHours: nullableNumber(record.durationHours),
     startedAt: timestamp(record.startedAt),
     measuredUntilAt: timestamp(record.measuredUntilAt),
+    firstReadyAt: timestamp(record.firstReadyAt),
+    runtimeHours: nullableNumber(record.runtimeHours),
   };
 }
 
@@ -381,23 +418,12 @@ export default class EnvironmentLifetimeAnalyticsService {
       const completed = factsSql(trx, scope, 'completed');
       const result = await trx.raw(
         `WITH ${completed.sql}, period_facts AS (
-          SELECT *, CASE WHEN end_at >= ?::timestamptz THEN 'current' ELSE 'previous' END AS period,
-            to_char(date_trunc(?, (end_at AT TIME ZONE ?) +
-              (CASE WHEN end_at < ?::timestamptz THEN ?::int ELSE 0 END * interval '1 day')), 'YYYY-MM-DD') AS bucket
+          SELECT *, CASE WHEN end_at >= ?::timestamptz THEN 'current' ELSE 'previous' END AS period
           FROM facts WHERE group_name IN ('api','pr') AND isfinite(end_at)
             AND end_at >= ?::timestamptz AND end_at < ?::timestamptz
-        ) SELECT period, group_name, bucket, ${aggregateSql('completed')}
-          FROM period_facts GROUP BY GROUPING SETS ((period,group_name), (period,group_name,bucket))`,
-        [
-          ...completed.bindings,
-          range.fromUtc,
-          range.interval,
-          range.timezone,
-          range.fromUtc,
-          range.calendarDays,
-          range.previous?.fromUtc ?? range.fromUtc,
-          range.toUtc,
-        ]
+        ) SELECT period, group_name, ${aggregateSql('completed')}
+          FROM period_facts GROUP BY period, group_name`,
+        [...completed.bindings, range.fromUtc, range.previous?.fromUtc ?? range.fromUtc, range.toUtc]
       );
       const current = factsSql(trx, scope, 'current');
       const currentResult = await trx.raw(
@@ -413,32 +439,25 @@ export default class EnvironmentLifetimeAnalyticsService {
         completed.bindings
       );
       const rows = result.rows as LifetimeAggregate[];
-      const groupStats = (period: string, bucket: string | null): EnvironmentLifetimeCompleted => ({
+      const groupStats = (period: string): EnvironmentLifetimeCompleted => ({
         api: serializeEnvironmentLifetimeStats(
           'api',
           'completed',
-          rows.find((row) => row.period === period && row.bucket === bucket && row.group_name === 'api')
+          rows.find((row) => row.period === period && row.group_name === 'api')
         ),
         pr: serializeEnvironmentLifetimeStats(
           'pr',
           'completed',
-          rows.find((row) => row.period === period && row.bucket === bucket && row.group_name === 'pr')
+          rows.find((row) => row.period === period && row.group_name === 'pr')
         ),
       });
-      const dates = analyticsBucketDates(range);
       const unplaced = (group: string) => unplacedResult.rows.find((row) => row.group_name === group);
       return {
         range,
         asOf: range.asOf,
         scope,
-        completed: groupStats('current', null),
-        previousCompleted: range.previous ? groupStats('previous', null) : null,
-        buckets: dates.map((date) => ({
-          date,
-          previousDate: previousBucketDate(date, range),
-          current: groupStats('current', date),
-          previous: range.previous ? groupStats('previous', date) : null,
-        })),
+        completed: groupStats('current'),
+        previousCompleted: range.previous ? groupStats('previous') : null,
         currentAge: Object.fromEntries(
           ['all', 'api', 'pr', 'other'].map((group: 'all' | EnvironmentLifetimeGroup) => [
             group,
@@ -468,13 +487,14 @@ export default class EnvironmentLifetimeAnalyticsService {
       const result = await trx.raw(
         `WITH ${facts.sql}, windowed AS MATERIALIZED (
           SELECT id, uuid, namespace, status, "isStatic", author, "repositoryId", "fullName", "githubInstallationId",
-            "repositoryAmbiguous", "deletedAt", "pullRequestNumber", "prTitle", "prAuthor",
-            group_name, start_at, end_at, sample_state, duration_hours
+            "repositoryAmbiguous", "deletedAt", "pullRequestNumber", "prTitle", "prAuthor", "firstReadyAt",
+            group_name, start_at, end_at, end_source, sample_state, duration_hours, runtime_hours
           FROM facts WHERE group_name IN ('api','pr') AND isfinite(end_at)
             AND end_at >= ?::timestamptz AND end_at < ?::timestamptz ${groupPredicate}
         ), coverage AS (
           SELECT group_name, COUNT(*) AS eligible,
             COUNT(*) FILTER (WHERE sample_state = 'valid') AS samples,
+            COUNT(*) FILTER (WHERE sample_state = 'valid' AND end_source IN ('deleted', 'torn_down')) AS recorded_samples,
             COUNT(*) FILTER (WHERE sample_state = 'missing') AS missing,
             COUNT(*) FILTER (WHERE sample_state = 'invalid') AS invalid
           FROM windowed GROUP BY group_name
@@ -492,7 +512,6 @@ export default class EnvironmentLifetimeAnalyticsService {
           range.toUtc,
           ...(query.group === 'all' ? [] : [query.group]),
           ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT,
-          BuildStatus.TORN_DOWN,
           ENVIRONMENT_LIFETIME_SCATTER_POINT_LIMIT,
         ]
       );
@@ -519,10 +538,11 @@ export default class EnvironmentLifetimeAnalyticsService {
       if (points.length !== (truncated ? 0 : total)) throw new Error('Incomplete lifetime scatter result.');
       const coverage = (group: 'api' | 'pr'): EnvironmentLifetimeScatterCoverage => {
         const values = row.coverage.find((entry) => entry.group_name === group);
+        const samples = count(values?.samples);
         return {
-          ...method(group, 'completed'),
+          ...method(group, 'completed', { samples, recordedSamples: count(values?.recorded_samples) }),
           eligible: count(values?.eligible),
-          samples: count(values?.samples),
+          samples,
           missing: count(values?.missing),
           invalid: count(values?.invalid),
         };
@@ -583,7 +603,7 @@ export default class EnvironmentLifetimeAnalyticsService {
         ) SELECT (SELECT COUNT(*) FROM selected) AS total,
           COALESCE((SELECT jsonb_agg(${RECORD_JSON_SQL}
             ORDER BY duration_hours DESC NULLS LAST, end_at DESC NULLS LAST, id DESC) FROM page), '[]'::jsonb) AS records`,
-        [...bindings, query.limit, (query.page - 1) * query.limit, BuildStatus.TORN_DOWN]
+        [...bindings, query.limit, (query.page - 1) * query.limit]
       );
       const row = result.rows[0];
       const total = count(row.total);

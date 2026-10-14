@@ -107,6 +107,7 @@ export const QUEUE_NAMES = {
   // NOTE: No version suffix - singleton repeat job shared across app instances
   API_ENV_EXPIRY: 'api_env_expiry',
   API_TOKEN_OWNER_SWEEP: 'api_token_owner_sweep',
+  ANALYTICS_RETENTION: 'analytics_retention',
   RESOLVE_AND_DEPLOY: `resolve_and_deploy_${JOB_VERSION}`,
   BUILD_QUEUE: `build_queue_${JOB_VERSION}`,
   DEPLOYMENT_RECONCILIATION: `deployment_reconciliation_${JOB_VERSION}`,

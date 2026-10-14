@@ -13,10 +13,9 @@
 import { NextRequest } from 'next/server';
 import { createApiHandler } from 'server/lib/createApiHandler';
 import { successResponse, withNoStore } from 'server/lib/response';
-import AgentAnalyticsService, {
-  parseAgentAnalyticsRunsQuery,
-  parseAgentAnalyticsPagination,
-} from 'server/services/analytics/AgentAnalyticsService';
+import { parseAnalyticsPagination } from 'server/services/analytics/query';
+import AgentAnalyticsService, { parseAgentAnalyticsRunsQuery } from 'server/services/analytics/AgentAnalyticsService';
+import { parseAnalyticsSlice } from 'server/services/analytics/query';
 
 /**
  * @openapi
@@ -39,7 +38,9 @@ import AgentAnalyticsService, {
  *       - {in: query, name: provider, schema: {type: string}}
  *       - {in: query, name: model, schema: {type: string}}
  *       - {in: query, name: sessionId, schema: {type: string, format: uuid}, description: Exact retained session UUID.}
- *       - {in: query, name: runStatus, schema: {type: string, enum: [queued, starting, running, waiting_for_approval, waiting_for_input, transitioned, completed, failed, cancelled, unknown]}}
+ *       - {in: query, name: runStatus, schema: {type: string, enum: [queued, starting, running, waiting_for_approval, waiting_for_input, transitioned, completed, failed, cancelled, unknown, in_progress]}, description: in_progress selects every status that has not finished.}
+ *       - {in: query, name: date, schema: {type: string, format: date}, description: Start date of one chart bucket.}
+ *       - {in: query, name: period, schema: {type: string, enum: [current, previous], default: current}, description: Lists the comparison window when previous.}
  *       - {in: query, name: page, schema: {type: integer, minimum: 1, maximum: 10000, default: 1}}
  *       - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
  *     responses:
@@ -67,11 +68,12 @@ import AgentAnalyticsService, {
  */
 export const GET = createApiHandler(
   async (req: NextRequest) => {
-    const { page, limit } = parseAgentAnalyticsPagination(req.nextUrl.searchParams);
+    const { page, limit } = parseAnalyticsPagination(req.nextUrl.searchParams);
     const result = await new AgentAnalyticsService().listRuns(
       parseAgentAnalyticsRunsQuery(req.nextUrl.searchParams),
       page,
-      limit
+      limit,
+      parseAnalyticsSlice(req.nextUrl.searchParams)
     );
     return withNoStore(successResponse(result, { status: 200 }, req));
   },

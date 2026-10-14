@@ -694,7 +694,7 @@ describe('kubernetes behavior', () => {
 
     it('treats a missing namespace as deleted and rethrows other namespace deletion failures', async () => {
       mockShellPromise.mockRejectedValueOnce('Error from server (NotFound): namespaces already gone');
-      await expect(kubernetes.deleteNamespace('env-gone')).resolves.toBeUndefined();
+      await expect(kubernetes.deleteNamespace('env-gone')).resolves.toBe(false);
       expect(mockInfo).toHaveBeenCalledWith('Deploy: namespace skipped reason=notFound');
 
       const error = new Error('forbidden');
