@@ -68,6 +68,67 @@ describe('validateAgentRuntimeConfig', () => {
     expect(() => validateAgentRuntimeConfig(config)).toThrow('apiKeyEnvVar must be an environment variable name');
   });
 
+  it('accepts an http(s) baseUrl on the openai provider', () => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl: 'https://gateway.example.test/v1' };
+
+    expect(() => validateAgentRuntimeConfig(config)).not.toThrow();
+  });
+
+  it('rejects a baseUrl on a provider that cannot target a custom endpoint', () => {
+    const config = makeConfig();
+    config.providers[0].baseUrl = 'https://gateway.example.test/v1';
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('Provider "anthropic" does not support baseUrl');
+  });
+
+  it.each([
+    'gateway.example.test/v1',
+    'ftp://gateway.example.test',
+    'https://user:pass@gateway.example.test/v1',
+    'https://gateway.example.test/v1?token=abc',
+    'https://gateway.example.test/v1#models',
+    '',
+  ])('rejects an invalid openai baseUrl %j', (baseUrl) => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', baseUrl };
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('baseUrl must be an http(s) URL');
+  });
+
+  it('allows a discovering provider with no configured models', () => {
+    const config = makeConfig();
+    config.providers[0] = {
+      ...config.providers[0],
+      name: 'openai',
+      baseUrl: 'https://gateway.example.test/v1',
+      discoverModels: true,
+      models: [],
+    };
+
+    expect(() => validateAgentRuntimeConfig(config)).not.toThrow();
+  });
+
+  it('requires baseUrl for model discovery', () => {
+    const config = makeConfig();
+    config.providers[0] = { ...config.providers[0], name: 'openai', discoverModels: true };
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('discoverModels requires baseUrl');
+  });
+
+  it('still enforces default-model rules on discovery overrides', () => {
+    const config = makeConfig();
+    config.providers[0] = {
+      ...config.providers[0],
+      name: 'openai',
+      baseUrl: 'https://gateway.example.test/v1',
+      discoverModels: true,
+      models: [{ id: 'gateway-a', displayName: 'A', enabled: false, default: true, maxTokens: 1 }],
+    };
+
+    expect(() => validateAgentRuntimeConfig(config)).toThrow('must also be enabled');
+  });
+
   it('rejects an unsupported provider', () => {
     const config = makeConfig();
     config.providers[0].name = 'sample-provider' as any;
