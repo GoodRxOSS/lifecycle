@@ -41,6 +41,9 @@ import {
   getKanikoInsecureRegistries,
   isConfiguredGarRegistry,
   KANIKO_DOCKER_CONFIG_MOUNT_PATH,
+  buildEcrAssumeRoleScript,
+  buildEcrPushRoleSessionName,
+  normalizeEcrPushRoleArn,
   normalizeNativeBuildRegistryAuth,
 } from './registryAuth';
 
@@ -91,6 +94,7 @@ interface BuildArgOptions {
   ecrDomain: string;
   registryAuth?: GarRegistryAuth[];
   secretEnvKeys?: string[];
+  ecrAssumeRoleScript?: string;
 }
 
 // Each secret goes to buildctl twice: as a build arg, for Dockerfiles that read it with ARG, and as a
@@ -123,6 +127,7 @@ const ENGINES: Record<string, BuildEngine> = {
       ecrDomain,
       registryAuth = [],
       secretEnvKeys,
+      ecrAssumeRoleScript = '',
     }) => {
       const outputInsecureOption = isConfiguredGarRegistry(destination, registryAuth) ? '' : ',registry.insecure=true';
       const cacheInsecureOption = isConfiguredGarRegistry(cacheRef, registryAuth) ? '' : ',insecure=true';
@@ -170,6 +175,7 @@ if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.a
   
   echo "Testing AWS credentials..."
   if aws sts get-caller-identity; then
+${ecrAssumeRoleScript}
     echo "Getting ECR login token..."
     ECR_PASSWORD=$(aws ecr get-login-password --region \${AWS_REGION})
     echo "Got ECR password (length: \${#ECR_PASSWORD})"
@@ -254,7 +260,8 @@ function createBuildContainer(
   ecrDomain: string,
   secretRefs?: string[],
   secretEnvKeys?: string[],
-  registryAuth: GarRegistryAuth[] = []
+  registryAuth: GarRegistryAuth[] = [],
+  ecrAssumeRoleScript = ''
 ): any {
   const args = engine.createArgs({
     contextPath,
@@ -265,6 +272,7 @@ function createBuildContainer(
     ecrDomain,
     registryAuth,
     secretEnvKeys,
+    ecrAssumeRoleScript,
   });
 
   const containerEnvVars = engine.name === 'buildkit' ? envVars : buildArgs;
@@ -325,6 +333,7 @@ export async function buildWithEngine(
   const globalConfig = await GlobalConfigService.getInstance().getAllConfigs();
   const buildDefaults = globalConfig.buildDefaults || {};
   const registryAuth = normalizeNativeBuildRegistryAuth(buildDefaults.registryAuth);
+  const ecrPushRoleArn = normalizeEcrPushRoleArn(buildDefaults.ecrPushRoleArn);
 
   const serviceAccount = options.serviceAccount || buildDefaults.serviceAccount || 'native-build-sa';
   const jobTimeout = options.jobTimeout || buildDefaults.jobTimeout || 2100;
@@ -371,6 +380,7 @@ export async function buildWithEngine(
 
   let registryLoginScript = '';
   const registryDomain = options.ecrDomain;
+  const ecrAssumeRoleScript = buildEcrAssumeRoleScript(ecrPushRoleArn, buildEcrPushRoleSessionName(options.deployUuid));
 
   const ecrRegex = /^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$/;
   const ecrMatch = registryDomain.match(ecrRegex);
@@ -383,9 +393,12 @@ export async function buildWithEngine(
       'set -e',
       'export AWS_MAX_ATTEMPTS=5',
       'export AWS_RETRY_MODE=adaptive',
+      ecrAssumeRoleScript,
       `aws ecr get-login-password --region ${region} | { read PASSWORD; mkdir -p ${dockerConfigDirectory} && ` +
         `echo '{"auths":{"${registryDomain}":{"auth":"'$(echo -n "AWS:$PASSWORD" | base64)'"}}}' > ${dockerConfigPath}; }`,
-    ].join('\n');
+    ]
+      .filter(Boolean)
+      .join('\n');
   } else {
     registryLoginScript =
       `echo "Using in-cluster registry: ${registryDomain}"; ` +
@@ -450,7 +463,8 @@ export async function buildWithEngine(
       options.ecrDomain,
       options.secretRefs,
       options.secretEnvKeys,
-      registryAuth
+      registryAuth,
+      ecrAssumeRoleScript
     )
   );
 
@@ -470,7 +484,8 @@ export async function buildWithEngine(
         options.ecrDomain,
         options.secretRefs,
         options.secretEnvKeys,
-        registryAuth
+        registryAuth,
+        ecrAssumeRoleScript
       )
     );
     getLogger().debug('Build: including init image');
