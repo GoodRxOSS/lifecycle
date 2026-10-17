@@ -74,7 +74,7 @@ describe('getEnvironmentPodsInNamespace', () => {
         body: {
           items: [
             { metadata: { name: 'native', labels: { 'app.kubernetes.io/name': 'native-build' } } },
-            { metadata: { name: 'api', labels: { 'tags.datadoghq.com/service': 'catalog' } } },
+            { metadata: { name: 'api', uid: 'api-uid', labels: { 'tags.datadoghq.com/service': 'catalog' } } },
             { metadata: { name: 'web', labels: { 'app.kubernetes.io/name': 'web' } } },
             { metadata: { name: 'unlabelled' } },
           ],
@@ -84,6 +84,7 @@ describe('getEnvironmentPodsInNamespace', () => {
     await expect(getEnvironmentPodsInNamespace('env-a', { coreV1, maxPods: 0 })).resolves.toEqual([
       {
         podName: 'api',
+        podUid: 'api-uid',
         serviceName: 'catalog',
         status: 'Running',
         restarts: 2,
