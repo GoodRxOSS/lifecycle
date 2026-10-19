@@ -148,8 +148,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       objection:
-        specifier: ^3.9.1
-        version: 3.9.1(knex@2.5.1(pg@8.23.1))
+        specifier: 3.0.1
+        version: 3.0.1(knex@2.5.1(pg@8.23.1))
       p-queue:
         specifier: ^6.6.2
         version: 6.6.2
@@ -7728,12 +7728,12 @@ packages:
       { integrity: sha512-gXah6aZrcUxjWg2zR2MwouP2eHlCBzdV4pygudehaKXSGW4v2AsRQUK+lwwXhii6KFZcunEnmSUoYp5CXibxtA== }
     engines: { node: '>= 0.4' }
 
-  objection@3.9.1:
+  objection@3.0.1:
     resolution:
-      { integrity: sha512-A8+Wt4ShQeaemtd/K3pZMd0AvUoZGjlMWUc0R/DCZeH/4sV6WrcF3fpFUVExIkWAoEJlVGcy9Oto8/hj2aCb0w== }
-    engines: { node: '>=14.0.0' }
+      { integrity: sha512-rqNnyQE+C55UHjdpTOJEKQHJGZ/BGtBBtgxdUpKG4DQXRUmqxfmgS/MhPWxB9Pw0mLSVLEltr6soD4c0Sddy0Q== }
+    engines: { node: '>=12.0.0' }
     peerDependencies:
-      knex: '>=2.3.0 <4'
+      knex: '>=0.95.0'
 
   on-exit-leak-free@2.1.2:
     resolution:
@@ -17552,10 +17552,9 @@ snapshots:
       define-properties: 1.2.1
       es-object-atoms: 1.1.2
 
-  objection@3.9.1(knex@2.5.1(pg@8.23.1)):
+  objection@3.0.1(knex@2.5.1(pg@8.23.1)):
     dependencies:
       ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
       db-errors: 0.2.3
       knex: 2.5.1(pg@8.23.1)
 
