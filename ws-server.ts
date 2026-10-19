@@ -18,10 +18,10 @@
 import 'next/dist/server/node-environment';
 import 'module-alias/register';
 import { join } from 'path';
-import moduleAlias from 'module-alias';
+import { addAliases } from 'module-alias';
 
 // Register path aliases
-moduleAlias.addAliases({
+addAliases({
   shared: join(__dirname, 'src/shared'),
   server: join(__dirname, 'src/server'),
   root: join(__dirname, '.'),

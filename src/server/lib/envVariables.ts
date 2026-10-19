@@ -15,7 +15,7 @@
  */
 
 import _ from 'lodash';
-import * as mustache from 'mustache';
+import mustache from 'mustache';
 
 import Database from 'server/database';
 import { Build, Deploy } from 'server/models';

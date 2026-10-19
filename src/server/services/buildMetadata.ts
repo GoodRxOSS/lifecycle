@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import * as mustache from 'mustache';
+import mustache from 'mustache';
 import { nanoid } from 'nanoid';
 import { BuildEnvironmentVariables } from 'server/lib/buildEnvVariables';
 import { getLogger } from 'server/lib/logger';
