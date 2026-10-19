@@ -1274,7 +1274,7 @@ export default class AgentSessionService {
       liveDeploysBySessionId.set(deploy.devModeSessionId, current);
     }
 
-    const snapshotDeployById = new Map(snapshotDeploys.map((deploy) => [deploy.id, deploy]));
+    const snapshotDeployById = new Map(snapshotDeploys.map((deploy) => [deploy.id, deploy] as const));
 
     const sessionDatabaseIdByUuid = new Map(sessions.map((session) => [session.uuid, session.id]));
     const enrichedSessions = sessions.map((session) => {

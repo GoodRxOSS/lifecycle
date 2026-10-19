@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import * as mustache from 'mustache';
+import mustache from 'mustache';
 
 describe('envVariables - cloud secret pattern preservation', () => {
   const preserveAndRestoreSecretPatterns = (template: string, data: Record<string, any>): string => {

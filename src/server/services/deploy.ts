@@ -110,7 +110,7 @@ export default class DeployService extends BaseService {
           !githubRepositoryId ||
           (deployableRepositoryId === githubRepositoryId && (!sourceBranch || effectiveBranch === sourceBranch));
 
-        let deploy = existingDeployMap.get(deployable.id) ?? null;
+        let deploy: Deploy | null = existingDeployMap.get(deployable.id) ?? null;
         if (!deploy) {
           deploy = await this.db.models.Deploy.findOne({
             deployableId: deployable.id,

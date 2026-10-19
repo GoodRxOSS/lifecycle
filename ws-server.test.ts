@@ -95,7 +95,7 @@ const mockWebSocketServer = jest.fn(() => mockWss);
 jest.mock('module-alias/register', () => ({}));
 jest.mock('module-alias', () => ({
   __esModule: true,
-  default: { addAliases: jest.fn() },
+  addAliases: jest.fn(),
 }));
 jest.mock('http', () => {
   const actual = jest.requireActual('http');
