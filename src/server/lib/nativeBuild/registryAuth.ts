@@ -32,6 +32,8 @@ export const KANIKO_DOCKER_CONFIG_MOUNT_PATH = '/kaniko/.docker';
 const GAR_DOCKER_USERNAME = 'oauth2accesstoken';
 const GAR_REGISTRY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*-docker\.pkg\.dev$/;
 const ECR_REGISTRY_PATTERN = /^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$/;
+const IAM_ROLE_ARN_PATTERN = /^arn:aws[a-z-]*:iam::[0-9]{12}:role\/[\w+=,.@/-]{1,512}$/;
+const ROLE_SESSION_NAME_MAX_LENGTH = 64;
 const REGISTRY_AUTH_SECRET_SUFFIX = '-registry-auth';
 const REGISTRY_AUTH_SOURCE_VOLUME_NAME = 'registry-auth-source';
 const REGISTRY_AUTH_SOURCE_MOUNT_PATH = '/registry-auth';
@@ -100,6 +102,42 @@ export function isConfiguredGarRegistry(reference: string, registryAuth: GarRegi
 
 export function isEcrRegistry(reference: string): boolean {
   return ECR_REGISTRY_PATTERN.test(getRegistryHost(reference));
+}
+
+export function normalizeEcrPushRoleArn(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  const roleArn = typeof value === 'string' ? value.trim() : value;
+  if (typeof roleArn !== 'string' || !IAM_ROLE_ARN_PATTERN.test(roleArn)) {
+    throw new Error(`Build: invalid ecrPushRoleArn value=${String(value)} expected=arn:aws:iam::<account>:role/<name>`);
+  }
+
+  return roleArn;
+}
+
+export function buildEcrPushRoleSessionName(deployUuid: string): string {
+  return `lifecycle-${deployUuid}`.replace(/[^\w+=,.@-]/g, '-').slice(0, ROLE_SESSION_NAME_MAX_LENGTH);
+}
+
+// ECR create-on-push only fires for callers in the registry's own account: a cross-account caller gets
+// a 403 on the first blob check for a missing repository, and the push aborts before creation.
+export function buildEcrAssumeRoleScript(roleArn: string | undefined, sessionName: string): string {
+  if (!roleArn) {
+    return '';
+  }
+
+  return [
+    `echo "Assuming ECR push role ${roleArn}"`,
+    `ECR_PUSH_CREDENTIALS=$(aws sts assume-role --role-arn "${roleArn}" --role-session-name "${sessionName}" ` +
+      `--query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)`,
+    'export AWS_ACCESS_KEY_ID=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f1)',
+    'export AWS_SECRET_ACCESS_KEY=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f2)',
+    'export AWS_SESSION_TOKEN=$(echo "$ECR_PUSH_CREDENTIALS" | cut -f3)',
+    'unset ECR_PUSH_CREDENTIALS',
+    'aws sts get-caller-identity',
+  ].join('\n');
 }
 
 export function getKanikoInsecureRegistries(references: string[], registryAuth: GarRegistryAuth[]): string[] {
