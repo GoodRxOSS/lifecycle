@@ -28,6 +28,7 @@ import { createBuildJob } from '../kubernetes/jobFactory';
 import { buildNativeBuildJobName } from '../kubernetes/jobNames';
 import * as yaml from 'js-yaml';
 import { getLogArchivalService } from '../../services/logArchival';
+import { BuildCacheMode, DEFAULT_BUILD_CACHE_MODE, isBuildCacheMode } from '../buildEngines';
 import {
   buildNativeBuildRegistryAuthSecretName,
   createKanikoRegistryAuthMergeInitContainer,
@@ -62,6 +63,7 @@ export interface NativeBuildOptions {
   serviceAccount?: string;
   jobTimeout?: number;
   cacheRegistry?: string;
+  cacheMode?: BuildCacheMode;
   resources?: {
     requests?: Record<string, string>;
     limits?: Record<string, string>;
@@ -87,6 +89,7 @@ interface BuildArgOptions {
   dockerfilePath: string;
   destination: string;
   cacheRef: string;
+  cacheMode: BuildCacheMode;
   buildArgs: Record<string, string>;
   ecrDomain: string;
   registryAuth?: GarRegistryAuth[];
@@ -119,6 +122,7 @@ const ENGINES: Record<string, BuildEngine> = {
       dockerfilePath,
       destination,
       cacheRef,
+      cacheMode,
       buildArgs,
       ecrDomain,
       registryAuth = [],
@@ -138,10 +142,14 @@ const ENGINES: Record<string, BuildEngine> = {
         `filename=${dockerfilePath}`,
         '--output',
         `type=image,name=${destination},push=true${outputInsecureOption},oci-mediatypes=false`,
-        '--export-cache',
-        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true${cacheInsecureOption}`,
-        '--import-cache',
-        `type=registry,ref=${cacheRef}${cacheInsecureOption}`,
+        ...(cacheMode === 'off'
+          ? []
+          : [
+              '--export-cache',
+              `type=registry,ref=${cacheRef},mode=${cacheMode},compression=zstd,oci-mediatypes=true${cacheInsecureOption}`,
+              '--import-cache',
+              `type=registry,ref=${cacheRef}${cacheInsecureOption}`,
+            ]),
       ];
 
       Object.entries(buildArgs).forEach(([key, value]) => {
@@ -207,7 +215,7 @@ buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
     name: 'kaniko',
     image: 'gcr.io/kaniko-project/executor:v1.9.2',
     command: ['/kaniko/executor'],
-    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, buildArgs, registryAuth = [] }) => {
+    createArgs: ({ contextPath, dockerfilePath, destination, cacheRef, cacheMode, buildArgs, registryAuth = [] }) => {
       const insecureRegistryArgs =
         registryAuth.length === 0
           ? ['--insecure-registry']
@@ -218,8 +226,7 @@ buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
         `--context=${contextPath}`,
         `--dockerfile=${contextPath}/${dockerfilePath}`,
         `--destination=${destination}`,
-        '--cache=true',
-        `--cache-repo=${cacheRef}`,
+        ...(cacheMode === 'off' ? [] : ['--cache=true', `--cache-repo=${cacheRef}`]),
         ...insecureRegistryArgs,
         '--push-retry=3',
         '--snapshot-mode=time',
@@ -254,13 +261,15 @@ function createBuildContainer(
   ecrDomain: string,
   secretRefs?: string[],
   secretEnvKeys?: string[],
-  registryAuth: GarRegistryAuth[] = []
+  registryAuth: GarRegistryAuth[] = [],
+  cacheMode: BuildCacheMode = DEFAULT_BUILD_CACHE_MODE
 ): any {
   const args = engine.createArgs({
     contextPath,
     dockerfilePath,
     destination,
     cacheRef,
+    cacheMode,
     buildArgs,
     ecrDomain,
     registryAuth,
@@ -336,6 +345,11 @@ export async function buildWithEngine(
   };
 
   const cacheRegistry = options.cacheRegistry || buildDefaults.cacheRegistry;
+  const cacheMode: BuildCacheMode = isBuildCacheMode(options.cacheMode)
+    ? options.cacheMode
+    : isBuildCacheMode(buildDefaults.cache?.mode)
+    ? buildDefaults.cache.mode
+    : DEFAULT_BUILD_CACHE_MODE;
 
   const serviceName = deploy.deployable!.name;
   const shortRepoName = options.repo.split('/')[1] || options.repo;
@@ -356,7 +370,7 @@ export async function buildWithEngine(
       : undefined;
   const contextPath = `/workspace/repo-${shortRepoName}`;
 
-  getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath}`);
+  getLogger().debug(`Build: preparing ${engine.name} job dockerfile=${options.dockerfilePath} cacheMode=${cacheMode}`);
 
   const githubToken = await getGitHubToken();
   const gitUsername = 'x-access-token';
@@ -450,7 +464,8 @@ export async function buildWithEngine(
       options.ecrDomain,
       options.secretRefs,
       options.secretEnvKeys,
-      registryAuth
+      registryAuth,
+      cacheMode
     )
   );
 
@@ -470,7 +485,8 @@ export async function buildWithEngine(
         options.ecrDomain,
         options.secretRefs,
         options.secretEnvKeys,
-        registryAuth
+        registryAuth,
+        cacheMode
       )
     );
     getLogger().debug('Build: including init image');

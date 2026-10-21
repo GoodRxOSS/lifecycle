@@ -1276,6 +1276,7 @@ export default class DeployService extends BaseService {
             buildUuid: deploy.build.uuid,
             deployUuid: deploy.uuid,
             cacheRegistry: buildDefaults?.cacheRegistry,
+            cacheMode: deployable.builder?.cache?.mode,
             resources: deployable.builder?.resources,
             podAnnotations: deployable.builder?.podAnnotations,
             secretRefs: syncedExternalSecrets.secretNames,

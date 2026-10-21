@@ -400,6 +400,20 @@
                             }
                           }
                         }
+                      },
+                      "cache": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "max",
+                              "min",
+                              "off"
+                            ]
+                          }
+                        }
                       }
                     }
                   },
@@ -836,6 +850,20 @@
                             "additionalProperties": {
                               "type": "string"
                             }
+                          }
+                        }
+                      },
+                      "cache": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "max",
+                              "min",
+                              "off"
+                            ]
                           }
                         }
                       }

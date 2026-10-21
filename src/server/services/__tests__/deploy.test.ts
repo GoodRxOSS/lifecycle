@@ -3195,6 +3195,21 @@ describe('DeployService uncovered public behavior', () => {
     );
   });
 
+  test('native image builds pass the deployable builder cache mode', async () => {
+    const { service } = serviceHarness();
+    mockCodefreshTagExists.mockResolvedValue(false);
+    mockBuildWithNative.mockResolvedValue({ success: true });
+    const deploy = sourceBuildDeploy();
+    deploy.deployable.builder = { engine: 'buildkit', cache: { mode: 'min' } };
+    jest.spyOn(service, 'waitAndResolveForBuildDependentEnvVars').mockResolvedValue(undefined);
+    jest.spyOn(service, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'patchDeployWithTag').mockResolvedValue(undefined);
+
+    await expect(service.buildImageForHelmAndGithub(deploy, 'run-1')).resolves.toBe(true);
+
+    expect(mockBuildWithNative).toHaveBeenCalledWith(deploy, expect.objectContaining({ cacheMode: 'min' }));
+  });
+
   test('a comment-only secret is scanned but excluded from native build env when the stored service env is null', async () => {
     const { service, deployPatch } = serviceHarness();
     mockCodefreshTagExists.mockResolvedValue(false);
