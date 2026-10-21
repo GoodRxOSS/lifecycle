@@ -156,6 +156,20 @@ describe('YamlService behavior helpers', () => {
     expect(YamlService.getEffectiveBuilder(helmWithoutEngine)).toEqual({ resources: { limits: { memory: '2Gi' } } });
   });
 
+  it('keeps the cache settings when the default native builder is injected', () => {
+    const helmWithCache = {
+      ...helm,
+      helm: {
+        ...helm.helm,
+        docker: { ...helm.helm.docker, builder: { cache: { mode: 'min' } } },
+      },
+    };
+    expect(YamlService.getEffectiveBuilder(helmWithCache as any, 'buildkit')).toEqual({
+      cache: { mode: 'min' },
+      engine: 'buildkit',
+    });
+  });
+
   it('reads source-specific repository, image, environment, pipeline, and deployment fields', async () => {
     expect(YamlService.getEnvironmentVariables(helm)).toEqual({ APP_ENV: 'helm' });
     expect(YamlService.getInitEnvironmentVariables(helm)).toEqual({ INIT_ENV: 'helm' });

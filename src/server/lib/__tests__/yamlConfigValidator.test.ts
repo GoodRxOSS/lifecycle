@@ -72,6 +72,40 @@ describe('YamlConfigValidator', () => {
     }
   });
 
+  describe('builder cache mode', () => {
+    const configWithBuilder = (builder: unknown) => ({
+      version: '1.0.0',
+      services: [
+        {
+          name: 'web',
+          github: {
+            repository: 'org/web',
+            branchName: 'main',
+            docker: { defaultTag: 'main', app: { dockerfilePath: 'Dockerfile' }, builder },
+          },
+        },
+      ],
+    });
+
+    it.each(['max', 'min', 'off'])('accepts builder.cache.mode %s', (mode) => {
+      expect(
+        new YamlConfigValidator().validate('1.0.0', configWithBuilder({ engine: 'buildkit', cache: { mode } }) as never)
+      ).toBe(true);
+    });
+
+    it('rejects an unknown builder.cache.mode', () => {
+      expect(() =>
+        new YamlConfigValidator().validate('1.0.0', configWithBuilder({ cache: { mode: 'none' } }) as never)
+      ).toThrow(ValidationError);
+    });
+
+    it('rejects an unknown key under builder.cache', () => {
+      expect(() =>
+        new YamlConfigValidator().validate('1.0.0', configWithBuilder({ cache: { mode: 'min', ttl: '1h' } }) as never)
+      ).toThrow(ValidationError);
+    });
+  });
+
   it.each(['codefresh', 'docker', 'command'])('accepts supported webhook type %s', (value) => {
     expect(customFormat('webhookType')(value)).toBe(true);
   });

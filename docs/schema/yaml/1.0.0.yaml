@@ -197,6 +197,10 @@ services:
             # @param services.helm.docker.builder.resources.limits
             limits:
 
+          # @param services.helm.docker.builder.cache
+          cache:
+            # @param services.helm.docker.builder.cache.mode
+            mode: ''
         # @param services.helm.docker.app (required)
         app:
           # @param services.helm.docker.app.afterBuildPipelineConfig
@@ -426,6 +430,10 @@ services:
             # @param services.github.docker.builder.resources.limits
             limits:
 
+          # @param services.github.docker.builder.cache
+          cache:
+            # @param services.github.docker.builder.cache.mode
+            mode: ''
         # @param services.github.docker.app (required)
         app:
           # @param services.github.docker.app.afterBuildPipelineConfig

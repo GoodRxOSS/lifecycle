@@ -1258,3 +1258,143 @@ describe('kaniko registry login bootstrap', () => {
     expect(fullCommand).not.toContain('AWS_MAX_ATTEMPTS=5');
   });
 });
+
+describe('build cache mode', () => {
+  const mockDeploy = {
+    deployable: { name: 'my-app' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  const baseOptions: NativeBuildOptions = {
+    ecrRepo: 'test-repo',
+    ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+    envVars: { NODE_ENV: 'production' },
+    dockerfilePath: 'Dockerfile',
+    tag: 'v1.0.0',
+    revision: 'abc123def456789',
+    repo: 'owner/repo',
+    branch: 'main',
+    namespace: 'env-test-123',
+    buildId: '456',
+    deployUuid: 'my-app-abc123',
+    jobTimeout: 1800,
+    cacheRegistry: 'registry.example.com',
+  };
+
+  const cacheRef = 'registry.example.com/test-repo/my-app:cache';
+
+  const mockGlobalConfig = (buildDefaults: Record<string, unknown> = {}) => {
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({ buildDefaults }),
+    });
+  };
+
+  const getApplyCommand = (): string => {
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    return applyCall[0];
+  };
+
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const buildctlArg = (flag: string, value: string): RegExp =>
+    new RegExp(`${flag}(?:[\\\\\\sn])+${escapeRegExp(value)}(?![^\\\\\\s])`);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
+      logs: 'Build completed successfully',
+      success: true,
+    });
+  });
+
+  it('exports and imports cache with mode=max when nothing is set', async () => {
+    mockGlobalConfig();
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    const fullCommand = getApplyCommand();
+    expect(fullCommand).toMatch(
+      buildctlArg(
+        '--export-cache',
+        `type=registry,ref=${cacheRef},mode=max,compression=zstd,oci-mediatypes=true,insecure=true`
+      )
+    );
+    expect(fullCommand).toMatch(buildctlArg('--import-cache', `type=registry,ref=${cacheRef},insecure=true`));
+  });
+
+  it('uses mode=min from the service while keeping the import', async () => {
+    mockGlobalConfig();
+
+    await buildkitBuild(mockDeploy, { ...baseOptions, cacheMode: 'min' });
+
+    const fullCommand = getApplyCommand();
+    expect(fullCommand).toMatch(
+      buildctlArg(
+        '--export-cache',
+        `type=registry,ref=${cacheRef},mode=min,compression=zstd,oci-mediatypes=true,insecure=true`
+      )
+    );
+    expect(fullCommand).toMatch(buildctlArg('--import-cache', `type=registry,ref=${cacheRef},insecure=true`));
+  });
+
+  it('drops both export and import when the service sets off', async () => {
+    mockGlobalConfig();
+
+    await buildkitBuild(mockDeploy, { ...baseOptions, cacheMode: 'off' });
+
+    const fullCommand = getApplyCommand();
+    expect(fullCommand).not.toContain('--export-cache');
+    expect(fullCommand).not.toContain('--import-cache');
+  });
+
+  it('uses the global mode when the service does not set one', async () => {
+    mockGlobalConfig({ cache: { mode: 'min' } });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    expect(getApplyCommand()).toContain(`ref=${cacheRef},mode=min,`);
+  });
+
+  it('lets the service mode override the global mode', async () => {
+    mockGlobalConfig({ cache: { mode: 'off' } });
+
+    await buildkitBuild(mockDeploy, { ...baseOptions, cacheMode: 'max' });
+
+    expect(getApplyCommand()).toContain(`ref=${cacheRef},mode=max,`);
+  });
+
+  it('falls back to mode=max when the global mode is invalid', async () => {
+    mockGlobalConfig({ cache: { mode: 'MAX' } });
+
+    await buildkitBuild(mockDeploy, baseOptions);
+
+    expect(getApplyCommand()).toContain(`ref=${cacheRef},mode=max,`);
+  });
+
+  it('drops kaniko cache flags when mode is off', async () => {
+    const { kanikoBuild } = require('../engines');
+    mockGlobalConfig();
+
+    await kanikoBuild(mockDeploy, { ...baseOptions, cacheMode: 'off' });
+
+    const fullCommand = getApplyCommand();
+    expect(fullCommand).not.toContain('--cache=true');
+    expect(fullCommand).not.toContain('--cache-repo');
+  });
+
+  it('keeps kaniko cache flags when mode is min', async () => {
+    const { kanikoBuild } = require('../engines');
+    mockGlobalConfig();
+
+    await kanikoBuild(mockDeploy, { ...baseOptions, cacheMode: 'min' });
+
+    const fullCommand = getApplyCommand();
+    expect(fullCommand).toContain('--cache=true');
+    expect(fullCommand).toContain('--cache-repo=registry.example.com/test-repo/my-app/cache');
+  });
+});

@@ -21,7 +21,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { DeployTypes, FeatureFlags, NO_DEFAULT_ENV_UUID } from 'shared/constants';
 import Build from '../Build';
 import { DomainDefaults, NativeHelmConfig } from 'server/services/types/globalConfig';
-import { BuilderEngine } from 'server/lib/buildEngines';
+import { BuildCacheMode, BuilderEngine } from 'server/lib/buildEngines';
 
 export interface Service001 {
   readonly github: {
@@ -293,6 +293,7 @@ export interface ServiceDiskConfig {
 
 export interface Builder {
   readonly engine?: BuilderEngine;
+  readonly cache?: { readonly mode?: BuildCacheMode };
   readonly resources?: {
     readonly requests?: Record<string, string>;
     readonly limits?: Record<string, string>;
