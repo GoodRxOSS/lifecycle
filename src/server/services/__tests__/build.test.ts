@@ -2964,6 +2964,8 @@ describe('BuildService uncovered public behavior', () => {
     expect(enqueueBuildDeletion).toHaveBeenNthCalledWith(1, closed, 'pull_request_inactive_sweep');
     expect(enqueueBuildDeletion).toHaveBeenNthCalledWith(2, disabled, 'pull_request_inactive_sweep');
     expect(lifecycleEnabledForPullRequest).not.toHaveBeenCalledWith(repositoryMissing.pullRequest);
+    expect(lifecycleEnabledForPullRequest).toHaveBeenCalledTimes(1);
+    expect(lifecycleEnabledForPullRequest).toHaveBeenCalledWith(disabled.pullRequest);
   });
 
   test('cleanupBuilds ignores a non-PR environment after loading its authority graph', async () => {

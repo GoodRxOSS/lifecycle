@@ -203,10 +203,10 @@ describe('TTLCleanupService', () => {
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
   });
 
-  it('keeps the label and comment flow for expired namespaces tied to open pull requests', async () => {
+  it('disables expired open pull requests and enqueues teardown without waiting for the label webhook', async () => {
     const patch = jest.fn().mockResolvedValue(undefined);
     mockExpiredNamespace('env-open-sample-654321');
-    mockBuildLookup({
+    const build = {
       id: 456,
       uuid: 'open-sample-654321',
       status: 'deployed',
@@ -223,14 +223,15 @@ describe('TTLCleanupService', () => {
           patch,
         })),
       },
-    });
+    };
+    mockBuildLookup(build);
     mockGetPullRequestLabels.mockResolvedValue(['sample-deploy']);
     mockUpdatePullRequestLabels.mockResolvedValue(undefined);
     mockCreateOrUpdatePullRequestComment.mockResolvedValue(undefined);
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
-    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
+    expect(mockListNamespace).toHaveBeenCalledWith(undefined, undefined, undefined, undefined, 'lfc/ttl-enable!=false');
     expect(mockUpdatePullRequestLabels).toHaveBeenCalledWith({
       installationId: 2002,
       pullRequestNumber: 77,
@@ -245,8 +246,169 @@ describe('TTLCleanupService', () => {
     });
     expect(patch).toHaveBeenCalledWith({
       labels: JSON.stringify(['sample-disabled']),
+      deployOnUpdate: false,
     });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'deploy_disabled');
+    expect(patch.mock.invocationCallOrder[0]).toBeLessThan(mockEnqueueBuildDeletion.mock.invocationCallOrder[0]);
     expect(mockMetricsIncrement).toHaveBeenCalledWith('total', { dry_run: 'false' });
+  });
+
+  it('tears down an expired environment whose pull request already carries the disabled label', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    mockExpiredNamespace('env-missed-webhook-123456');
+    const build = {
+      id: 457,
+      uuid: 'missed-webhook-123456',
+      status: 'error',
+      isStatic: false,
+      pullRequest: {
+        status: 'open',
+        deployOnUpdate: true,
+        pullRequestNumber: 78,
+        fullName: 'ExampleOrg/missed-webhook',
+        labels: JSON.stringify(['sample-disabled']),
+        repository: { githubInstallationId: 2002 },
+        $query: jest.fn(() => ({ patch })),
+      },
+    };
+    mockBuildLookup(build);
+    mockGetPullRequestLabels.mockResolvedValue(['sample-disabled']);
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(patch).toHaveBeenCalledWith({ labels: JSON.stringify(['sample-disabled']), deployOnUpdate: false });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'deploy_disabled');
+    expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
+  });
+
+  it('enqueues teardown for an expired sandbox without touching the base pull request', async () => {
+    mockNamespaces([
+      {
+        metadata: {
+          name: 'sbx-sample-123456',
+          labels: {
+            'lfc/ttl-enable': 'true',
+            'lfc/ttl-expireAtUnix': expiredTimestamp,
+            'lfc/uuid': 'sample-123456',
+          },
+        },
+      },
+    ]);
+    const build = {
+      id: 88,
+      uuid: 'sample-123456',
+      kind: 'sandbox',
+      status: 'deployed',
+      isStatic: false,
+      pullRequest: {
+        status: 'open',
+        pullRequestNumber: 5,
+        fullName: 'ExampleOrg/base',
+        labels: JSON.stringify(['sample-deploy']),
+        repository: { githubInstallationId: 1 },
+      },
+    };
+    mockBuildLookup(build);
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'ttl_sandbox_expired');
+    expect(mockGetPullRequestLabels).not.toHaveBeenCalled();
+    expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
+  });
+
+  it('derives the build UUID from a sandbox namespace name', async () => {
+    mockNamespaces([
+      {
+        metadata: {
+          name: 'sbx-derived-123456',
+          labels: { 'lfc/ttl-expireAtUnix': expiredTimestamp },
+        },
+      },
+    ]);
+    const query = mockBuildLookup({
+      id: 89,
+      uuid: 'derived-123456',
+      status: 'deployed',
+      isStatic: false,
+      pullRequest: {
+        status: 'closed',
+        pullRequestNumber: 6,
+        fullName: 'ExampleOrg/closed',
+        labels: [],
+        repository: { githubInstallationId: 1 },
+      },
+    });
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(query.findOne).toHaveBeenCalledWith({ uuid: 'derived-123456' });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(expect.anything(), 'ttl_closed_pull_request');
+  });
+
+  it('expires a namespace with no TTL labels from its last activity', async () => {
+    const lastActivity = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    mockNamespaces([
+      {
+        metadata: {
+          name: 'env-unlabeled-123456',
+          creationTimestamp: lastActivity,
+          labels: {},
+        },
+      },
+    ]);
+    const build = {
+      id: 90,
+      uuid: 'unlabeled-123456',
+      status: 'error',
+      isStatic: false,
+      updatedAt: lastActivity,
+      pullRequest: {
+        status: 'closed',
+        pullRequestNumber: 7,
+        fullName: 'ExampleOrg/unlabeled',
+        labels: [],
+        repository: { githubInstallationId: 1 },
+      },
+    };
+    const query = mockBuildLookup(build);
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(query.findOne).toHaveBeenCalledWith({ uuid: 'unlabeled-123456' });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'ttl_closed_pull_request');
+  });
+
+  it('keeps a namespace with no TTL labels while its build was active within the TTL window', async () => {
+    mockNamespaces([
+      {
+        metadata: {
+          name: 'env-unlabeled-recent-123456',
+          creationTimestamp: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+          labels: {},
+        },
+      },
+    ]);
+    mockBuildLookup({
+      id: 91,
+      uuid: 'unlabeled-recent-123456',
+      status: 'deployed',
+      isStatic: false,
+      updatedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      pullRequest: {
+        status: 'closed',
+        pullRequestNumber: 8,
+        fullName: 'ExampleOrg/recent',
+        labels: [],
+        repository: { githubInstallationId: 1 },
+      },
+    });
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   it('does not scan namespaces when TTL cleanup is disabled', async () => {
@@ -348,7 +510,7 @@ describe('TTLCleanupService', () => {
     mockNamespaces([
       {},
       { metadata: { name: 'kube-system', labels: { 'lfc/ttl-expireAtUnix': expiredTimestamp } } },
-      { metadata: { name: 'env-no-expiration', labels: {} } },
+      { metadata: { name: 'env-no-expiration', labels: { 'lfc/ttl-enable': 'true' } } },
       { metadata: { name: 'env-invalid-expiration', labels: { 'lfc/ttl-expireAtUnix': 'not-a-number' } } },
       {
         metadata: {
@@ -467,9 +629,9 @@ describe('TTLCleanupService', () => {
   });
 
   it('falls back to persisted labels when GitHub label lookup fails', async () => {
-    const patch = jest.fn();
+    const patch = jest.fn().mockResolvedValue(undefined);
     mockExpiredNamespace();
-    mockBuildLookup({
+    const build = {
       id: 1,
       uuid: 'sample-123456',
       status: 'deployed',
@@ -482,12 +644,14 @@ describe('TTLCleanupService', () => {
         repository: { githubInstallationId: 1 },
         $query: jest.fn(() => ({ patch })),
       },
-    });
+    };
+    mockBuildLookup(build);
     mockGetPullRequestLabels.mockRejectedValue(new Error('GitHub unavailable'));
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
-    expect(patch).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledWith({ labels: JSON.stringify(['sample-disabled']), deployOnUpdate: false });
+    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'deploy_disabled');
     expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
   });
@@ -516,6 +680,7 @@ describe('TTLCleanupService', () => {
 
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
     expect(patch).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
     expect(mockMetricsIncrement).not.toHaveBeenCalled();
   });
 
