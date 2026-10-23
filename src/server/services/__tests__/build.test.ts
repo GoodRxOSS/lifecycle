@@ -3462,7 +3462,6 @@ describe('BuildService uncovered public behavior', () => {
     await expect(service.processApiEnvironmentExpiryQueue()).rejects.toBe(error);
 
     expect(logger.error).toHaveBeenCalledWith({ error }, 'Environment: expiry sweep failed');
-    mockedGetLogger.mockImplementation(defaultGetLoggerImplementation);
   });
 
   test('processApiEnvironmentExpiryQueue stays quiet while still returning an empty sweep result', async () => {
