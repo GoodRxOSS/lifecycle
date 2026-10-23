@@ -21,6 +21,7 @@ ENV PORT=$PORT
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
+RUN npm install --global "$(node -p "require('./package.json').packageManager.split('+')[0]")"
 RUN pnpm install --frozen-lockfile
 
 FROM packages
