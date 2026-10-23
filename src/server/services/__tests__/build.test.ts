@@ -3453,6 +3453,18 @@ describe('BuildService uncovered public behavior', () => {
     );
   });
 
+  test('processApiEnvironmentExpiryQueue logs and rethrows a failed sweep', async () => {
+    const logger = capturingLogger();
+    const service = serviceWith({});
+    const error = new Error('could not determine data type of parameter $6');
+    jest.spyOn(service, 'sweepExpiredApiEnvironments').mockRejectedValue(error);
+
+    await expect(service.processApiEnvironmentExpiryQueue()).rejects.toBe(error);
+
+    expect(logger.error).toHaveBeenCalledWith({ error }, 'Environment: expiry sweep failed');
+    mockedGetLogger.mockImplementation(defaultGetLoggerImplementation);
+  });
+
   test('processApiEnvironmentExpiryQueue stays quiet while still returning an empty sweep result', async () => {
     const service = serviceWith({});
     jest
