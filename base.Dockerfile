@@ -51,7 +51,9 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
   chmod +x ./kubectl && \
   mv ./kubectl /usr/local/bin/kubectl
 
-RUN npm install pnpm --global
+# Keep in sync with packageManager in package.json
+ARG PNPM_VERSION=9.15.0
+RUN npm install pnpm@${PNPM_VERSION} --global
 
 RUN npm install codefresh@0.81.5 --global
 

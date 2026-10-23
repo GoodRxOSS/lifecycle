@@ -45,7 +45,9 @@ RUN curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/s
 COPY ./scripts/install_deps.sh ./scripts/install_deps.sh
 RUN ./scripts/install_deps.sh
 
-RUN npm install pnpm --global
+# Keep in sync with packageManager in package.json
+ARG PNPM_VERSION=9.15.0
+RUN npm install pnpm@${PNPM_VERSION} --global
 
 # We need the codefresh CLI for triggering pipelines
 RUN npm install codefresh@0.81.5 --global
