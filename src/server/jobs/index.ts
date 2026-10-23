@@ -40,6 +40,8 @@ import {
   resolveAgentSessionCleanupConfig,
 } from 'server/lib/agentSession/runtimeConfig';
 
+const CLOSED_PR_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
 export default function bootstrapJobs(services: IServices) {
   if (defaultDb.services) {
     return;
@@ -151,6 +153,25 @@ export default function bootstrapJobs(services: IServices) {
     .catch((error) => getLogger().warn({ error }, 'Jobs: analytics retention schedule failed'));
 
   queueManager.registerWorker(QUEUE_NAMES.TTL_CLEANUP, services.TTLCleanupService.processTTLCleanupQueue, {
+    connection: redisClient.getConnection(),
+    concurrency: 1,
+  });
+
+  /* Backstop for builds whose pull request is recorded as closed or disabled but whose teardown never ran */
+  void services.PullRequest.cleanupClosedPRQueue
+    .add(
+      'cleanup',
+      {},
+      {
+        jobId: 'cleanup-closed-prs',
+        repeat: {
+          every: CLOSED_PR_CLEANUP_INTERVAL_MS,
+        },
+      }
+    )
+    .catch((error) => getLogger().error({ error }, 'Jobs: closed PR cleanup schedule failed'));
+
+  queueManager.registerWorker(QUEUE_NAMES.CLEANUP, services.PullRequest.processCleanupClosedPRs, {
     connection: redisClient.getConnection(),
     concurrency: 1,
   });

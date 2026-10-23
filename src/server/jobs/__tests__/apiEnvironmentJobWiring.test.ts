@@ -108,6 +108,10 @@ function createServices() {
     ActivityStream: { processComments: jest.fn() },
     GlobalConfig: { setupCacheRefreshJob: jest.fn(), processCacheRefresh: jest.fn() },
     TTLCleanupService: { setupTTLCleanupJob: jest.fn(), processTTLCleanupQueue: jest.fn() },
+    PullRequest: {
+      cleanupClosedPRQueue: { add: jest.fn().mockResolvedValue(undefined) },
+      processCleanupClosedPRs: jest.fn(),
+    },
     SitesService: { setupSitesCleanupJob: jest.fn(), processSitesCleanupQueue: jest.fn() },
     BuildService: {
       setupApiEnvironmentExpiryJob: jest.fn().mockResolvedValue(undefined),
@@ -191,6 +195,13 @@ describe('bootstrapJobs', () => {
     expect(services.SitesService.setupSitesCleanupJob).toHaveBeenCalledTimes(1);
     expect(services.BuildService.setupApiEnvironmentExpiryJob).toHaveBeenCalledTimes(1);
     expect(services.BuildService.setupDeploymentReconciliationSweep).toHaveBeenCalledTimes(1);
+    expect(services.PullRequest.cleanupClosedPRQueue.add).toHaveBeenCalledWith(
+      'cleanup',
+      {},
+      { jobId: 'cleanup-closed-prs', repeat: { every: 3_600_000 } }
+    );
+    const closedPrCleanupWorker = registeredWorkers.find((worker) => worker.queue === QUEUE_NAMES.CLEANUP);
+    expect(closedPrCleanupWorker?.handler).toBe(services.PullRequest.processCleanupClosedPRs);
 
     const ownerSweepWorker = registeredWorkers.find((worker) => worker.queue === QUEUE_NAMES.API_TOKEN_OWNER_SWEEP);
     expect(ownerSweepWorker?.handler).toBe(processApiTokenOwnerSweep);
@@ -234,6 +245,8 @@ describe('bootstrapJobs', () => {
     const cleanupConfigError = new Error('cleanup config invalid');
     (loadAiSdk as jest.Mock).mockRejectedValueOnce(preloadError);
     services.BuildService.setupApiEnvironmentExpiryJob.mockRejectedValueOnce(expiryError);
+    const closedPrCleanupError = new Error('closed PR cleanup schedule failed');
+    services.PullRequest.cleanupClosedPRQueue.add.mockRejectedValueOnce(closedPrCleanupError);
     mockQueueAddFactories.set(QUEUE_NAMES.API_TOKEN_OWNER_SWEEP, () => Promise.reject(ownerSweepError));
     (resolveAgentSessionCleanupConfig as jest.Mock).mockRejectedValueOnce(cleanupConfigError);
 
@@ -242,6 +255,10 @@ describe('bootstrapJobs', () => {
 
     expect(mockLoggerWarn).toHaveBeenCalledWith({ error: preloadError }, 'Jobs: ai sdk preload failed');
     expect(mockLoggerError).toHaveBeenCalledWith({ error: expiryError }, 'Jobs: api environment expiry setup failed');
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      { error: closedPrCleanupError },
+      'Jobs: closed PR cleanup schedule failed'
+    );
     expect(mockLoggerWarn).toHaveBeenCalledWith(
       { error: ownerSweepError },
       'Jobs: api token owner sweep schedule failed'
