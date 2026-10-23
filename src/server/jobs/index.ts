@@ -157,7 +157,7 @@ export default function bootstrapJobs(services: IServices) {
     concurrency: 1,
   });
 
-  /* Backstop for pull request close and disable webhooks that GitHub never delivered */
+  /* Backstop for builds whose pull request is recorded as closed or disabled but whose teardown never ran */
   void services.PullRequest.cleanupClosedPRQueue
     .add(
       'cleanup',

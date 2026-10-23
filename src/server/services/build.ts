@@ -299,7 +299,7 @@ export default class BuildService extends BaseService {
     for (const build of builds) {
       try {
         await build?.$fetchGraph('pullRequest.[repository]');
-        if (build.pullRequest?.repository != null) {
+        if (build.pullRequest?.repository != null && !build.isStatic) {
           const { status } = build.pullRequest;
           // Only an open PR with deploys turned off can be inactive, so the GitHub lookup is skipped for every other
           // build; this sweep visits every active build each hour.
