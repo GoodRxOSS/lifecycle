@@ -66,7 +66,7 @@ import { serializeUserToken, assertIssuanceEnabled, assertNoUnknownFields, TOKEN
  *             schema: { $ref: '#/components/schemas/PersonalApiTokenCreateSuccessResponse' }
  *       '400': { description: Invalid body / repository access / expiry. }
  *       '401': { description: Not authenticated. }
- *       '403': { description: Role not permitted, forbidden scope, or key issuance disabled (api_keys_disabled). }
+ *       '403': { description: 'Role not permitted, forbidden scope, or key issuance disabled (api_keys_disabled).' }
  */
 const getHandler = async (req: NextRequest) => {
   ApiTokenService.assertManagementAllowed();

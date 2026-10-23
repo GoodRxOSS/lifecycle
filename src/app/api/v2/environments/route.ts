@@ -138,10 +138,10 @@ import {
  *           application/json:
  *             schema: { $ref: '#/components/schemas/EnvironmentCreateSuccessResponse' }
  *       '400': { description: Invalid body or ambiguous environment (env_ambiguous). }
- *       '403': { description: Missing scope, repository not allowed for token, or api_environments disabled. }
+ *       '403': { description: 'Missing scope, repository not allowed for token, or api_environments disabled.' }
  *       '404': { description: Repository not onboarded (repo_not_onboarded). }
  *       '409': { description: Vanity name already taken (name_conflict). }
- *       '422': { description: Invalid config/override, or autoTrack with an immutable sha (auto_track_pinned_source). }
+ *       '422': { description: 'Invalid config/override, or autoTrack with an immutable sha (auto_track_pinned_source).' }
  */
 const getHandler = createPrincipalApiHandler({ scope: 'env:read' }, async (req: NextRequest, principal) => {
   const { searchParams } = req.nextUrl;

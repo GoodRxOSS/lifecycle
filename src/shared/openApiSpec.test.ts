@@ -1026,3 +1026,13 @@ describe('OpenAPI v2 agent session contract', () => {
     });
   });
 });
+
+describe('OpenAPI v2 spec validity', () => {
+  it('passes strict OpenAPI validation', async () => {
+    const { validate } = await import('@scalar/openapi-parser');
+    const result = await validate(swaggerSpec);
+    const errors = (result.errors ?? []).map((e: { message: string }) => e.message);
+    expect(errors).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+});
