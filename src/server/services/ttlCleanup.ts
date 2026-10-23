@@ -193,7 +193,11 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
+        // Sandbox namespaces carry their `sbx-` prefix in the uuid label, unlike the bare build uuid.
         let buildUUID = labels['lfc/uuid'];
+        if (buildUUID?.startsWith(prefix)) {
+          buildUUID = buildUUID.slice(prefix.length);
+        }
         if (!buildUUID) {
           buildUUID = nsName.slice(prefix.length);
           getLogger().warn(`TTL: namespace missing uuid label, derived from name namespace=${nsName}`);
@@ -238,6 +242,18 @@ export default class TTLCleanupService extends Service {
         const pullRequest = build.pullRequest;
 
         if (build.kind === BuildKind.SANDBOX && pullRequest) {
+          if (excludedRepositories.includes(pullRequest.fullName)) {
+            continue;
+          }
+          // Session activity never refreshes the namespace TTL, so a sandbox still backing a live session stays up.
+          const liveSession = await this.db.models.AgentSession.query()
+            .where({ buildUuid: build.uuid })
+            .whereIn('status', ['starting', 'active'])
+            .first();
+          if (liveSession) {
+            getLogger().debug(`TTL: sandbox has a live agent session, skipping namespace=${nsName}`);
+            continue;
+          }
           // The pull request belongs to the base environment, so its labels must not be touched.
           staleEnvironments.push({
             namespace: nsName,
@@ -353,12 +369,23 @@ export default class TTLCleanupService extends Service {
         getLogger().info(`TTL: enqueueing expired sandbox cleanup namespace=${env.namespace}`);
         await this.db.services.BuildService.enqueueBuildDeletion(env.build, 'ttl_sandbox_expired');
         return;
-      case 'already_disabled':
+      case 'already_disabled': {
+        // Labels were read during the scan; a re-enable since then must win over the stale snapshot.
+        const latestLabels = await getPullRequestLabels({
+          installationId: env.pullRequest.repository.githubInstallationId,
+          pullRequestNumber: env.pullRequest.pullRequestNumber,
+          fullName: env.pullRequest.fullName,
+        });
+        if (!latestLabels.includes(await getDisabledLabel()) || latestLabels.includes(await getKeepLabel())) {
+          getLogger().info(`TTL: pull request re-enabled since scan, skipping namespace=${env.namespace}`);
+          return;
+        }
         getLogger().info(
           `TTL: tearing down disabled environment namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`
         );
-        await this.disableAndEnqueueDeletion(env, env.currentLabels);
+        await this.disableAndEnqueueDeletion(env, latestLabels);
         return;
+      }
       case 'disable_pull_request':
         getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
         await this.cleanupStaleEnvironment(env, inactivityDays, commentTemplate, dryRun);

@@ -23,6 +23,7 @@ const mockEnqueueBuildDeletion = jest.fn();
 const mockBuildQuery = jest.fn();
 const mockMetricsIncrement = jest.fn();
 const mockQueueAdd = jest.fn();
+const mockAgentSessionFirst = jest.fn();
 
 jest.mock('@kubernetes/client-node', () => ({
   CoreV1Api: jest.fn(),
@@ -107,6 +108,13 @@ describe('TTLCleanupService', () => {
           Build: {
             query: mockBuildQuery,
           },
+          AgentSession: {
+            query: jest.fn(() => ({
+              where: jest.fn().mockReturnThis(),
+              whereIn: jest.fn().mockReturnThis(),
+              first: mockAgentSessionFirst,
+            })),
+          },
         },
         services: {
           BuildService: {
@@ -166,6 +174,7 @@ describe('TTLCleanupService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAgentSessionFirst.mockResolvedValue(undefined);
     mockGetAllConfigs.mockResolvedValue({
       ttl_cleanup: {
         enabled: true,
@@ -290,7 +299,7 @@ describe('TTLCleanupService', () => {
           labels: {
             'lfc/ttl-enable': 'true',
             'lfc/ttl-expireAtUnix': expiredTimestamp,
-            'lfc/uuid': 'sample-123456',
+            'lfc/uuid': 'sbx-sample-123456',
           },
         },
       },
@@ -309,10 +318,11 @@ describe('TTLCleanupService', () => {
         repository: { githubInstallationId: 1 },
       },
     };
-    mockBuildLookup(build);
+    const query = mockBuildLookup(build);
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
+    expect(query.findOne).toHaveBeenCalledWith({ uuid: 'sample-123456' });
     expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'ttl_sandbox_expired');
     expect(mockGetPullRequestLabels).not.toHaveBeenCalled();
     expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
@@ -346,6 +356,67 @@ describe('TTLCleanupService', () => {
 
     expect(query.findOne).toHaveBeenCalledWith({ uuid: 'derived-123456' });
     expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(expect.anything(), 'ttl_closed_pull_request');
+  });
+
+  it.each([
+    ['backs a live agent session', { id: 7 }, []],
+    ['belongs to an excluded repository', undefined, ['ExampleOrg/base']],
+  ])('keeps an expired sandbox that %s', async (_description, liveSession, excludedRepositories) => {
+    mockGetAllConfigs.mockResolvedValue({
+      ttl_cleanup: { enabled: true, inactivityDays: 7, excludedRepositories },
+    });
+    mockAgentSessionFirst.mockResolvedValue(liveSession);
+    mockNamespaces([
+      {
+        metadata: {
+          name: 'sbx-busy-123456',
+          labels: { 'lfc/ttl-enable': 'true', 'lfc/ttl-expireAtUnix': expiredTimestamp, 'lfc/uuid': 'sbx-busy-123456' },
+        },
+      },
+    ]);
+    mockBuildLookup({
+      id: 92,
+      uuid: 'busy-123456',
+      kind: 'sandbox',
+      status: 'deployed',
+      isStatic: false,
+      pullRequest: {
+        status: 'open',
+        pullRequestNumber: 5,
+        fullName: 'ExampleOrg/base',
+        labels: [],
+        repository: { githubInstallationId: 1 },
+      },
+    });
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
+  });
+
+  it('leaves a disabled environment alone when its pull request is re-enabled before teardown', async () => {
+    const patch = jest.fn();
+    mockExpiredNamespace('env-reenabled-123456');
+    mockBuildLookup({
+      id: 93,
+      uuid: 'reenabled-123456',
+      status: 'error',
+      isStatic: false,
+      pullRequest: {
+        status: 'open',
+        pullRequestNumber: 79,
+        fullName: 'ExampleOrg/reenabled',
+        labels: JSON.stringify(['sample-disabled']),
+        repository: { githubInstallationId: 2002 },
+        $query: jest.fn(() => ({ patch })),
+      },
+    });
+    mockGetPullRequestLabels.mockResolvedValueOnce(['sample-disabled']).mockResolvedValueOnce(['sample-deploy']);
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   it('expires a namespace with no TTL labels from its last activity', async () => {
@@ -628,7 +699,7 @@ describe('TTLCleanupService', () => {
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
   });
 
-  it('falls back to persisted labels when GitHub label lookup fails', async () => {
+  it('does not tear down a disabled environment when GitHub labels cannot be confirmed', async () => {
     const patch = jest.fn().mockResolvedValue(undefined);
     mockExpiredNamespace();
     const build = {
@@ -650,8 +721,8 @@ describe('TTLCleanupService', () => {
 
     await buildService().processTTLCleanupQueue({ data: {} } as any);
 
-    expect(patch).toHaveBeenCalledWith({ labels: JSON.stringify(['sample-disabled']), deployOnUpdate: false });
-    expect(mockEnqueueBuildDeletion).toHaveBeenCalledWith(build, 'deploy_disabled');
+    expect(patch).not.toHaveBeenCalled();
+    expect(mockEnqueueBuildDeletion).not.toHaveBeenCalledWith(build, expect.anything());
     expect(mockUpdatePullRequestLabels).not.toHaveBeenCalled();
     expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
   });
