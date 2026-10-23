@@ -1135,7 +1135,7 @@ describe('sweepExpiredApiEnvironments', () => {
     expect(pullRequestTeardownScope.whereNotNull).toHaveBeenCalledWith('pullRequestId');
     expect(pullRequestTeardownScope.whereNot).toHaveBeenCalledWith('status', BuildStatus.TORN_DOWN);
     expect(pullRequestTeardownState.where).toHaveBeenCalledWith('status', BuildStatus.TEARING_DOWN);
-    expect(pullRequestTeardownState.orWhereRaw).toHaveBeenCalledWith('?? = concat(?, ??)', [
+    expect(pullRequestTeardownState.orWhereRaw).toHaveBeenCalledWith('?? = concat(?::text, ??)', [
       'runUUID',
       'build-teardown-',
       'id',
