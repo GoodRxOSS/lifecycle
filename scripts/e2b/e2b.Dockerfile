@@ -9,7 +9,7 @@
 # Keep this self-contained instead of depending on lifecycleoss/workspace:latest; the E2B
 # remote builder needs every gateway contract change baked into the template deterministically.
 
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 ENV HOME=/home/agent
 ENV BUN_INSTALL=/home/agent/.bun
