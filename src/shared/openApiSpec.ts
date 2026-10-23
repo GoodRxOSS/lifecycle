@@ -214,7 +214,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             request_id: { type: 'string', format: 'uuid' },
             metadata: { $ref: '#/components/schemas/ResponseMetadata' },
             error: {
-              type: 'null',
+              nullable: true,
               description: 'Always null on successful responses.',
             },
           },
@@ -228,7 +228,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
           type: 'object',
           properties: {
             request_id: { type: 'string', format: 'uuid' },
-            data: { type: 'null' },
+            data: { nullable: true, description: 'Always null on error responses.' },
             error: { $ref: '#/components/schemas/ApiError' },
           },
           required: ['request_id', 'data', 'error'],
@@ -4241,7 +4241,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
                 messageCount: { type: 'integer' },
                 runCount: { type: 'integer' },
                 pendingActionsCount: { type: 'integer' },
-                latestRun: { $ref: '#/components/schemas/AgentRun', nullable: true },
+                latestRun: { nullable: true, allOf: [{ $ref: '#/components/schemas/AgentRun' }] },
               },
               required: ['messageCount', 'runCount', 'pendingActionsCount', 'latestRun'],
             },
@@ -6060,9 +6060,6 @@ export const openApiSpecificationForV2Api: OAS3Options = {
 
         AgentSessionStringRecord: {
           type: 'object',
-          propertyNames: {
-            minLength: 1,
-          },
           additionalProperties: {
             type: 'string',
             minLength: 1,

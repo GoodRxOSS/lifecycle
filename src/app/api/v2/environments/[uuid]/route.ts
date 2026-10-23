@@ -103,7 +103,7 @@ import {
  *       '400': { description: Invalid request body (invalid_body). }
  *       '404': { description: Environment not found. }
  *       '409': { description: Teardown already owns the environment (env_tearing_down). }
- *       '422': { description: Invalid override, or autoTrack on an immutable source (auto_track_pinned_source). }
+ *       '422': { description: 'Invalid override, or autoTrack on an immutable source (auto_track_pinned_source).' }
  *   delete:
  *     summary: Destroy an environment
  *     security:

@@ -170,6 +170,43 @@ function renderCallbackPage(options: {
  *         name: state
  *         schema:
  *           type: string
+ *     responses:
+ *       '200':
+ *         description: HTML page confirming the connection; posts the result to the opener window
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       '400':
+ *         description: HTML page describing why the connection failed
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       '404':
+ *         description: HTML page shown when the connection no longer exists
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       '409':
+ *         description: HTML page shown when the connection state conflicts with the callback
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       '410':
+ *         description: HTML page shown when the connection attempt expired
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       '422':
+ *         description: HTML page shown when the provider response could not be processed
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
  */
 const getHandler = async (req: NextRequest, { params }: { params: Promise<{ slug: string }> }) => {
   const { slug } = await params;
