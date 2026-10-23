@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV NODE_ENV=production

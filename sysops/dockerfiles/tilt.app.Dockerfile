@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Use a common base image for both stages
-FROM node:22-slim
+FROM node:22.23.4-slim
 
 # Set environment variables
 ENV PNPM_HOME="/pnpm"
