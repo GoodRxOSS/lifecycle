@@ -47,6 +47,9 @@ jest.mock('server/lib/yamlConfigParser', () => ({
 import Build from 'server/models/Build';
 import AgentSession from 'server/models/AgentSession';
 import {
+  BUILD_SCOPE_BUILD_MISSING_MESSAGE,
+  BUILD_SCOPE_LOOKUP_FAILED_MESSAGE,
+  LifecycleDiagnosticBuildScopeError,
   loadLatestSession,
   resolveLifecycleDiagnosticGithubSafety,
   resolvePrimaryRepo,
@@ -279,39 +282,36 @@ describe('capabilitySessionContext', () => {
     expect(mockParseYamlConfigFromBranch).not.toHaveBeenCalled();
   });
 
-  it('keeps the session-derived safety scope when its build row no longer exists', async () => {
+  it('fails instead of returning an unscoped safety when the session build no longer exists', async () => {
     mockWithGraphFetched.mockResolvedValue(null);
 
-    const result = await resolveLifecycleDiagnosticGithubSafety({
+    const safety = resolveLifecycleDiagnosticGithubSafety({
       session: session({
         buildUuid: 'deleted-build',
         workspaceRepos: [{ repo: 'Example/API', branch: 'main', primary: true }],
       }),
+      repoFullName: 'Example/API',
     });
 
-    expect(result).toEqual(
-      expect.objectContaining({
-        allowedRepos: ['example/api'],
-        buildUuid: 'deleted-build',
-        databaseScope: null,
-      })
-    );
-    expect(mockWarn).not.toHaveBeenCalled();
+    await expect(safety).rejects.toThrow(BUILD_SCOPE_BUILD_MISSING_MESSAGE);
+    await expect(safety).rejects.toBeInstanceOf(LifecycleDiagnosticBuildScopeError);
+    await expect(safety).rejects.toMatchObject({ code: 'build_scope_unavailable' });
+    expect(mockParseYamlConfigFromBranch).not.toHaveBeenCalled();
   });
 
-  it('keeps the session-derived scope and warns when build lookup fails', async () => {
+  it('fails instead of returning an unscoped safety when the build lookup errors', async () => {
     const lookupError = new Error('database unavailable');
     mockWithGraphFetched.mockRejectedValue(lookupError);
 
-    const result = await resolveLifecycleDiagnosticGithubSafety({
+    const safety = resolveLifecycleDiagnosticGithubSafety({
       session: session({
         buildUuid: 'build-1',
         selectedServices: [{ repo: 'Example/API', branch: 'main' }],
       }),
     });
 
-    expect(result.databaseScope).toBeNull();
-    expect(result.allowedRepos).toEqual(['example/api']);
+    await expect(safety).rejects.toThrow(BUILD_SCOPE_LOOKUP_FAILED_MESSAGE);
+    await expect(safety).rejects.toMatchObject({ code: 'build_scope_unavailable' });
     expect(mockWarn).toHaveBeenCalledWith(
       { error: lookupError, buildUuid: 'build-1' },
       'AgentExec: lifecycle diagnostic build scope unavailable buildUuid=build-1'

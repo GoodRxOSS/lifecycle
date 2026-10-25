@@ -17,6 +17,7 @@
 const mockDynamicTool = jest.fn((config) => config);
 const mockJsonSchema = jest.fn((schema) => schema);
 const mockResolveServers = jest.fn();
+const mockDiscoverPendingServerTools = jest.fn();
 const mockConnect = jest.fn();
 const mockListTools = jest.fn();
 const mockCallTool = jest.fn();
@@ -88,6 +89,7 @@ jest.mock('server/services/agentRuntime/mcp/config', () => {
     ...actual,
     McpConfigService: jest.fn().mockImplementation(() => ({
       resolveServers: (...args: unknown[]) => mockResolveServers(...args),
+      discoverPendingServerTools: (...args: unknown[]) => mockDiscoverPendingServerTools(...args),
     })),
   };
 });
@@ -273,6 +275,7 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
 }));
 
 import AgentCapabilityService from '../CapabilityService';
+import { BUILD_SCOPE_BUILD_MISSING_MESSAGE, BUILD_SCOPE_LOOKUP_FAILED_MESSAGE } from '../capabilitySessionContext';
 import { SessionWorkspaceGatewayUnavailableError } from '../errors';
 import { WORKSPACE_CORE_MCP_FEATURE_FLAG } from 'server/services/workspaceCoreMcp/config';
 import { REQUIRED_WORKSPACE_GATEWAY_TOOLS } from 'server/services/workspaceRuntime/gatewayContract';
@@ -404,7 +407,17 @@ describe('AgentCapabilityService.buildToolSet', () => {
     mockGithubClientInstances.length = 0;
     mockK8sClientInstances.length = 0;
     mockDatabaseClientInstances.length = 0;
-    mockBuildFindOne.mockResolvedValue(null);
+    mockBuildFindOne.mockResolvedValue({
+      id: 99,
+      uuid: 'sample-build-1',
+      namespace: 'env-sample-build-1',
+      environmentId: null,
+      pullRequestId: null,
+      pullRequest: null,
+      deploys: [],
+    });
+    mockDiscoverPendingServerTools.mockReset();
+    mockDiscoverPendingServerTools.mockImplementation(async ({ server }) => server.discoveredTools);
     mockGithubOctokitRequest.mockResolvedValue({
       data: {
         sha: 'existing-file-sha',
@@ -589,6 +602,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
     mockResolveServers.mockResolvedValue([
       {
         ...stdioServer,
+        transport: { type: 'http', url: 'https://admin-configured.example.test/mcp' },
         discoveredTools: [
           {
             name: 'get_design_context',
@@ -2157,5 +2171,159 @@ describe('AgentCapabilityService.buildToolSet', () => {
     expect(Object.keys(tools).length).toBeGreaterThan(0);
     expect(mockLoggerWarn).toHaveBeenCalled();
     expect(mockEnsureChatSandbox).not.toHaveBeenCalled();
+  });
+
+  it('fails the run before registering any build-dependent tool when the build lookup errors', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockBuildFindOne.mockRejectedValue(new Error('connection terminated unexpectedly'));
+
+    await expect(
+      buildToolSetWithMetadataForTest({
+        session: {
+          uuid: 'session-build-context',
+          sessionKind: 'chat',
+          buildUuid: 'sample-build-1',
+          workspaceStatus: 'none',
+          status: 'active',
+          podName: null,
+          namespace: null,
+        } as any,
+        repoFullName: 'example-org/example-repo',
+        userIdentity,
+        approvalPolicy: {} as any,
+        workspaceToolDiscoveryTimeoutMs: 4500,
+        workspaceToolExecutionTimeoutMs: 22000,
+      })
+    ).rejects.toThrow(BUILD_SCOPE_LOOKUP_FAILED_MESSAGE);
+
+    expect(mockK8sClientInstances).toHaveLength(0);
+    expect(mockDatabaseClientInstances).toHaveLength(0);
+    expect(mockGithubClientInstances).toHaveLength(0);
+    expect(mockDynamicTool).not.toHaveBeenCalled();
+    expect(mockResolveServers).not.toHaveBeenCalled();
+  });
+
+  it('fails the run when the session build no longer exists', async () => {
+    mockResolveServers.mockResolvedValue([]);
+    mockBuildFindOne.mockResolvedValue(null);
+
+    await expect(
+      buildToolSetWithMetadataForTest({
+        session: {
+          uuid: 'session-build-context',
+          sessionKind: 'chat',
+          buildUuid: 'sample-build-1',
+          workspaceStatus: 'none',
+          status: 'active',
+          podName: null,
+          namespace: null,
+        } as any,
+        repoFullName: 'example-org/example-repo',
+        userIdentity,
+        approvalPolicy: {} as any,
+        workspaceToolDiscoveryTimeoutMs: 4500,
+        workspaceToolExecutionTimeoutMs: 22000,
+      })
+    ).rejects.toThrow(BUILD_SCOPE_BUILD_MISSING_MESSAGE);
+
+    expect(mockK8sClientInstances).toHaveLength(0);
+    expect(mockDatabaseClientInstances).toHaveLength(0);
+    expect(mockGithubClientInstances).toHaveLength(0);
+    expect(mockDynamicTool).not.toHaveBeenCalled();
+    expect(mockResolveServers).not.toHaveBeenCalled();
+  });
+
+  it('discovers a pending stdio server through the session gateway and registers its tools', async () => {
+    mockResolveServers.mockResolvedValue([{ ...stdioServer, discoveredTools: [], discoveryPending: true }]);
+    mockDiscoverPendingServerTools.mockResolvedValue(stdioServer.discoveredTools);
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(mockDiscoverPendingServerTools).toHaveBeenCalledWith({
+      server: expect.objectContaining({ slug: 'figma', discoveryPending: true }),
+      transport: {
+        type: 'http',
+        url: 'http://agent-123.env-sample.svc.cluster.local:13338/servers/figma/mcp',
+      },
+      timeoutMs: 4500,
+    });
+    expect(tools.mcp__figma__get_design_context).toBeDefined();
+  });
+
+  it.each([true, false])(
+    'uses the write approval policy for workspace tools despite cached read annotations: pending=%s',
+    async (discoveryPending) => {
+      mockResolveServers.mockResolvedValue([{ ...stdioServer, discoveryPending }]);
+      mockDiscoverPendingServerTools.mockResolvedValue(stdioServer.discoveredTools);
+      mockModeForCapability.mockImplementation((_policy, capability) =>
+        capability === 'external_mcp_write' ? 'require_approval' : 'allow'
+      );
+      const { tools, metadata, toolApproval } = await buildToolSetWithMetadataForTest({
+        session,
+        repoFullName: 'example-org/example-repo',
+        userIdentity,
+        approvalPolicy: {} as any,
+        workspaceToolDiscoveryTimeoutMs: 4500,
+        workspaceToolExecutionTimeoutMs: 22000,
+      });
+      expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(1);
+      expect(tools.mcp__figma__get_design_context).toBeDefined();
+      expect(metadata).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ toolKey: 'mcp__figma__get_design_context', capabilityKey: 'external_mcp_write' }),
+        ])
+      );
+      expectUserApproval(toolApproval, 'mcp__figma__get_design_context');
+      expect(mockCapabilityForExternalMcpTool).not.toHaveBeenCalled();
+    }
+  );
+
+  it('does not let a workspace read annotation bypass an unavailable write capability', async () => {
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      resolvedCapabilityAccess: [
+        { capabilityId: 'external_mcp_read', effectiveAvailability: 'all_users', allowed: true, approvalMode: 'allow' },
+        {
+          capabilityId: 'external_mcp_write',
+          effectiveAvailability: 'admin_only',
+          allowed: false,
+          reason: 'admin_only',
+        },
+      ],
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+    expect(tools.mcp__figma__get_design_context).toBeUndefined();
+    expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a pending stdio server out of the run when gateway discovery fails', async () => {
+    mockResolveServers.mockResolvedValue([{ ...stdioServer, discoveredTools: [], discoveryPending: true }]);
+    mockDiscoverPendingServerTools.mockRejectedValue(new Error('gateway refused'));
+
+    const tools = await buildToolSetForTest({
+      session,
+      repoFullName: 'example-org/example-repo',
+      userIdentity,
+      approvalPolicy: {} as any,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+    });
+
+    expect(tools.mcp__figma__get_design_context).toBeUndefined();
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-123' }),
+      expect.stringContaining('workspace gateway discovery failed')
+    );
   });
 });

@@ -1,0 +1,53 @@
+# Upgrade checklist for the main-based security release
+
+This candidate starts from API main `976e713af4dbd1b5cd1cacd06ccef91d36dc24f0`. It addresses application security without introducing a migration of existing environment namespaces, service accounts, RBAC, AWS identities, network policies, databases or queues relative to that revision. API dependencies and the lockfile are unchanged. Existing permissions are not revoked by the first new Job.
+
+This boundary applies to the candidate diff, not to the difference between production and main. Map the production image to source and compare its migration ledger before approving an upgrade. Existing broad workload permissions and datastore exposure remain separate security work. No production closure or guarantee of uninterrupted control-plane connections follows from this checklist.
+
+## Included behavior
+
+- Shell injection fixes use argument arrays or quote data in fixed scripts. Native and Codefresh build/deploy/destroy paths, ingress and ExternalSecret commands retain their resource targets. Generated scripts and executable versions still require rehearsal.
+- Agent Kubernetes tools require an authoritative environment namespace. Failed build lookup withholds dependent tools instead of accepting a caller-supplied namespace.
+- Command-based MCP servers execute and discover tools through the session workspace gateway. Discovery runs for each agent run, even when stored tool metadata exists. Workspace tool catalogs and errors stay within that run; they do not update shared or user connection discovery state. These tools require the external MCP write policy regardless of their annotations.
+- Log streams require a ticket issued through authenticated `/api/v2/logs/stream-tickets`. The issuer checks environment access, API-key repository restrictions, and the pod/container. Tickets bind the target and expire after five minutes. They are replayable within that period; expiration does not terminate an established stream.
+- Editor bootstrap exchanges the existing authenticated link for an opaque grant tied to the session and owner. Lifecycle credentials are removed from upstream requests; upstream cookies are suppressed on HTTP and WebSocket responses. Old raw-token cookies are rejected. Reopen the editor through Lifecycle to obtain a grant. Grants expire at the earlier of one hour or the source token's expiry. A 60-second allowance for a future issue time handles clock skew; it does not extend expiry or maximum lifetime. Existing sockets require a separate drain during replacement.
+- All v1 API handlers are removed. The environment banner opens the authenticated environment page using existing `LFC_DASHBOARD_URL` metadata. Newly loaded scripts do not require an environment redeploy; cached pages need refresh. Fresh setup uses protected bootstrap state at `/api/setup/**`; configured installations remain managed through installation settings. See [V1 retirement and fresh setup](api-v1-retirement.md).
+
+## Finding accounting
+
+Rows refer to the original 22-critical-finding CSV. A source-complete candidate has the intended implementation; release verification and reviewer acceptance remain required. The log-ticket issue is a separate High finding and does not increase the critical count.
+
+| Classification                | Rows                          | Remaining work                                                                                                                                                                                               |
+| ----------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Source-complete candidates: 5 | 2, 8, 15, 17, 21              | Qualify v1 removal/setup and external consumers; deploy/destroy command fidelity; session-local MCP discovery/write policy; namespace denial; editor credentials and connection behavior.                    |
+| Partial fixes: 8              | 4, 9, 11, 12, 13, 16, 18, 19  | Direct shell execution is corrected. Report-specific input validation, generated pipeline review, exact-ref/fork behavior and credential scope still require evidence or an explicitly accepted alternative. |
+| Deferred: 9                   | 1, 3, 5, 6, 7, 10, 14, 20, 22 | Prewarm/setup execution isolation, workload authority, Aurora helpers, Redis/PostgreSQL controls, clone credentials, OpenSandbox key handling and workspace ownership. Assign owners and follow-up releases. |
+
+The candidate touches 13 critical rows. It does not close all 22 findings. Record each accepted criterion and unresolved condition in the release evidence; do not infer scanner closure from a passing build.
+
+## Before deployment
+
+- [ ] Pin API, UI and CLI source revisions, image/package digests and rollback artifacts. Give the ticket-capable CLI a distinguishable release version. Map the running production image to source and compare migrations with the candidate base; qualify any intervening main changes separately.
+- [ ] Confirm the rendered deployment contains no unintended chart, identity, namespace, RBAC, network, database or queue changes. Check private Terraform/chart overrides as well as this repository. Do not run fresh setup or rotate existing credentials as an upgrade step.
+- [ ] Inventory all v1 consumers: ingress, internal services, automation and scheduled tasks. Migrate them before removal. Update GitHub App callback/setup URLs before a future setup or installation flow, following the linked v1 checklist. Existing in-flight v1 setup links cannot resume.
+- [ ] Verify every serving production web/gateway/all replica has `ENABLE_AUTH=true` and an appropriate `LIFECYCLE_MODE` (`web`, `gateway` or `all`). Protected API, MCP, preview and editor access fails closed without configured authentication. Log issuance/redemption also requires a recognized serving mode. An unset mode is not a log-serving mode.
+- [ ] Verify worker replicas use `LIFECYCLE_MODE=job`. Their only HTTP routes are exact GET `/api/health` and GET `/api/jobs`; all upgrades are rejected. Inventory custom probes, metrics or HTTP consumers before rollout. Confirm `/api/jobs` starts queue consumers and readiness succeeds with the actual private chart.
+- [ ] Check explicit local-development settings separately. Only `APP_ENV=dev` or `APP_ENV=development` with auth disabled enables local anonymous behavior. An unset value or staging value does not qualify. Never use this exception on production listeners.
+- [ ] Compare the selected grant secret across every issuer and redeemer without recording secret values. Selection order is `CHAT_PREVIEW_GRANT_SECRET`, `ENCRYPTION_KEY`, `NEXTAUTH_SECRET`, then `GITHUB_WEBHOOK_SECRET`. The first nonempty configured value is selected and must not be a placeholder; an unusable higher-priority value does not fall through. Preserve the existing selected key to retain valid preview grants. Fresh setup has its separate shared-token requirements in the linked guide.
+- [ ] Confirm ingress, load balancers, proxies and application logs do not retain ticket/token query values. Check clock synchronization across replicas. Verify that issuer responses are not cached.
+- [ ] Capture representative existing PR and static environment state, including `good-dev-0` where available: Service/Ingress identities, pod UIDs, PVC data, application traffic and current Jobs. Record pending queue work so normal deployment activity can be distinguished from an upgrade regression.
+
+## Rehearse and cut over
+
+- [ ] Run the named test-repository scenarios for native build/Helm and Codefresh build/deploy/destroy, ExternalSecrets, Jobs, CronJobs, webhooks and after-build actions. Exercise valid complex branch/argument values and denied hostile input. The API image installs Codefresh CLI `0.81.5`; generated pipelines use `codefresh/cli:0.87.4`. Verify both execution environments, cleanup and error behavior.
+- [ ] Rehearse fresh setup separately with actual PostgreSQL locking, the bootstrap Secret, GitHub callbacks and multiple web replicas. Test stale/replayed state, Secret-write/DB-failure recovery and configured-install lockout. Do not use production as the fresh-install fixture.
+- [ ] Test pending and previously cached stdio connections across two sessions/runs. Confirm discovery uses each workspace, does not persist its catalog/errors globally, and cannot obtain read-only treatment through tool annotations. Verify absent namespace and failed build lookup deny Kubernetes tools before a request is made.
+- [ ] Test editor reopen, old-cookie rejection, grant expiry, clock skew, wrong owner/session and upstream credential/cookie filtering for supported backends. Test valid existing preview grants with the unchanged selected key.
+- [ ] Deploy the ticket-capable UI before the enforcing backend if using its missing-route fallback. Activate the ticket-capable CLI only after both issuer and enforcing WebSocket server are available; that CLI has no anonymous fallback. Test live pod/build/deploy logs and archived logs with the released artifacts.
+- [ ] Coordinate API/WebSocket replacement so ticket issuance and redemption reach compatible replicas. Remove every old anonymous listener, including internal worker endpoints, and drain existing sockets. Mixed replicas can interrupt logs. Users may need to reopen terminals or rerun CLI commands; do not assume automatic reconnect.
+- [ ] On the built image, verify anonymous issuance/stream denial, expired/tampered/wrong-target tickets, key scope/repository restrictions, worker HTTP/upgrade denial and v1 404s. Verify the banner in an existing environment with main-era metadata and a refreshed page.
+- [ ] Monitor the captured PR/static environments through control-plane replacement without changing their application configuration or permissions. Compare traffic, resource identities and PVC data. Confirm readiness, queue progress, error rates and new deploy operations before broad rollout.
+
+## Release decision
+
+Keep automated results, image digests, operator evidence and reviewer verdicts together in the release record. Unit tests establish specific code contracts; they do not establish private infrastructure compatibility, live queue behavior or the absence of old listeners. Approve production rollout only after the installation-specific gates pass. If rollback is required, record that the old image reopens the corrected security paths; availability recovery is not security closure.

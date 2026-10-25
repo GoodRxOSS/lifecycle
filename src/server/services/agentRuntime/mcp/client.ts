@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { MCPClient, MCPTransport } from '@ai-sdk/mcp';
+import type { MCPClient } from '@ai-sdk/mcp';
 import { getLogger } from 'server/lib/logger';
 import { importEsm } from 'server/lib/esmImport';
 import type { McpCallToolResult, McpDiscoveredTool, McpResolvedTransportConfig, McpToolAnnotations } from './types';
@@ -26,25 +26,11 @@ const MIN_SECRET_REDACTION_LENGTH = 4;
 
 type ListToolsDefinitions = Awaited<ReturnType<MCPClient['listTools']>>;
 type McpSdkModule = typeof import('@ai-sdk/mcp');
-type ExperimentalStdioMCPTransportConstructor = new (config: {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}) => MCPTransport;
-type ExperimentalStdioMCPModule = {
-  Experimental_StdioMCPTransport: ExperimentalStdioMCPTransportConstructor;
-};
-
 let mcpSdkPromise: Promise<McpSdkModule> | null = null;
 
 function loadMcpSdk(): Promise<McpSdkModule> {
   mcpSdkPromise ||= importEsm<McpSdkModule>('@ai-sdk/mcp');
   return mcpSdkPromise;
-}
-
-async function getExperimentalStdioMCPTransport(): Promise<ExperimentalStdioMCPTransportConstructor> {
-  const { Experimental_StdioMCPTransport } = await importEsm<ExperimentalStdioMCPModule>('@ai-sdk/mcp/mcp-stdio');
-  return Experimental_StdioMCPTransport;
 }
 
 function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -90,20 +76,6 @@ function toMcpDiscoveredTools(definitions: ListToolsDefinitions): McpDiscoveredT
     ...(tool.outputSchema ? { outputSchema: tool.outputSchema as Record<string, unknown> } : {}),
     annotations: mapToolAnnotations(tool.annotations as Record<string, unknown> | undefined),
   }));
-}
-
-async function createTransport(transport: McpResolvedTransportConfig) {
-  if (transport.type === 'stdio') {
-    const ExperimentalStdioMCPTransport = await getExperimentalStdioMCPTransport();
-
-    return new ExperimentalStdioMCPTransport({
-      command: transport.command,
-      args: transport.args || [],
-      env: transport.env,
-    });
-  }
-
-  return transport.redirect === undefined ? { ...transport, redirect: 'follow' as const } : transport;
 }
 
 function addSecretValue(secrets: Set<string>, value: unknown): void {
@@ -172,6 +144,8 @@ function sanitizeTransportErrorMessage(error: unknown, transport: McpResolvedTra
     .reduce((current, secret) => current.split(secret).join(REDACTED_MCP_SECRET), message);
 }
 
+export const MCP_STDIO_REFUSED_MESSAGE = 'Command-based MCP servers can only run inside a session workspace.';
+
 export class McpClientManager {
   private client: MCPClient | null = null;
   private toolDefinitions: ListToolsDefinitions | null = null;
@@ -180,11 +154,15 @@ export class McpClientManager {
     transport: McpResolvedTransportConfig,
     handshakeTimeoutMs: number = DEFAULT_HANDSHAKE_TIMEOUT_MS
   ): Promise<void> {
+    if (transport.type === 'stdio') {
+      throw new Error(MCP_STDIO_REFUSED_MESSAGE);
+    }
+
     this.client = await withTimeout(
       (async () => {
-        const [{ createMCPClient }, resolvedTransport] = await Promise.all([loadMcpSdk(), createTransport(transport)]);
+        const { createMCPClient } = await loadMcpSdk();
         return createMCPClient({
-          transport: resolvedTransport,
+          transport: transport.redirect === undefined ? { ...transport, redirect: 'follow' as const } : transport,
           clientName: 'lifecycle',
           version: '1.0.0',
           onUncaughtError: (error) => {

@@ -295,6 +295,10 @@ function isConnectionAvailable(connection: AgentMcpConnection): boolean {
     return false;
   }
 
+  if (connection.discoveryPending) {
+    return true;
+  }
+
   return (connection.discoveredTools?.length ?? 0) + (connection.sharedDiscoveredTools?.length ?? 0) > 0;
 }
 

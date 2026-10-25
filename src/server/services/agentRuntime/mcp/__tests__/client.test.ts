@@ -35,7 +35,7 @@ jest.mock('server/lib/logger', () => ({
   getLogger: () => ({ info: jest.fn(), warn: (...args: unknown[]) => mockLoggerWarn(...args), error: jest.fn() }),
 }));
 
-import { McpClientManager } from '../client';
+import { McpClientManager, MCP_STDIO_REFUSED_MESSAGE } from '../client';
 
 describe('McpClientManager', () => {
   let manager: McpClientManager;
@@ -179,63 +179,30 @@ describe('McpClientManager', () => {
     expect(mockLoggerWarn).toHaveBeenCalledWith('MCP client uncaught error: plain upstream failure');
   });
 
-  it('wraps stdio transport with the AI SDK stdio helper', async () => {
-    await manager.connect({
-      type: 'stdio',
+  it.each([
+    { type: 'stdio' as const, command: 'sample-command' },
+    {
+      type: 'stdio' as const,
       command: 'sample-command',
       args: ['--serve'],
-      env: { SAMPLE_ENV: '1' },
-    });
+      env: { MCP_TOKEN: 'secret-value' },
+    },
+  ])('refuses stdio before constructing a transport or connecting: %j', async (transport) => {
+    await expect(manager.connect(transport)).rejects.toThrow(MCP_STDIO_REFUSED_MESSAGE);
 
-    expect(mockExperimentalStdioTransport).toHaveBeenCalledWith({
-      command: 'sample-command',
-      args: ['--serve'],
-      env: { SAMPLE_ENV: '1' },
-    });
-    expect(mockCreateMCPClient).toHaveBeenCalledWith(
-      expect.objectContaining({
-        transport: { transport: 'stdio' },
-      })
-    );
+    expect(mockExperimentalStdioTransport).not.toHaveBeenCalled();
+    expect(mockCreateMCPClient).not.toHaveBeenCalled();
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
+    await expect(manager.listTools()).rejects.toThrow('MCP client not connected. Call connect() first.');
   });
 
-  it('uses empty stdio arguments and redacts stdio environment secrets from uncaught errors', async () => {
-    mockCreateMCPClient.mockImplementationOnce(async (options: { onUncaughtError?: (error: Error) => void }) => {
-      options.onUncaughtError?.(new Error('stdio failed with STDIO_SECRET_VALUE and abc and ******'));
-      return {
-        listTools: mockListTools,
-        callTool: mockCallTool,
-        close: mockClose,
-      };
-    });
-
-    await manager.connect({
-      type: 'stdio',
-      command: 'sample-command',
-      env: { MCP_TOKEN: 'STDIO_SECRET_VALUE', SHORT_VALUE: 'abc', ALREADY_REDACTED: '******' },
-    });
-
-    expect(mockExperimentalStdioTransport).toHaveBeenCalledWith({
-      command: 'sample-command',
-      args: [],
-      env: { MCP_TOKEN: 'STDIO_SECRET_VALUE', SHORT_VALUE: 'abc', ALREADY_REDACTED: '******' },
-    });
-    expect(mockLoggerWarn).toHaveBeenCalledWith(
-      'MCP client uncaught error: stdio failed with ****** and abc and ******'
-    );
-  });
-
-  it('handles a non-Error stdio callback when no environment is configured', async () => {
+  it('handles a non-Error callback when no transport secrets are configured', async () => {
     mockCreateMCPClient.mockImplementationOnce(async (options: { onUncaughtError?: (error: unknown) => void }) => {
       options.onUncaughtError?.('plain string failure');
-      return {
-        listTools: mockListTools,
-        callTool: mockCallTool,
-        close: mockClose,
-      };
+      return { listTools: mockListTools, callTool: mockCallTool, close: mockClose };
     });
 
-    await manager.connect({ type: 'stdio', command: 'sample-command' });
+    await manager.connect({ type: 'http', url: 'https://mcp.example.com/mcp' });
 
     expect(mockLoggerWarn).toHaveBeenCalledWith('MCP client uncaught error: plain string failure');
   });

@@ -20,12 +20,13 @@ import { verifyAuth } from 'server/lib/auth';
 import { bearerChallenge } from 'server/lib/appError';
 import { bearerApiKey } from 'server/lib/apiTokenShape';
 import { ErrorResponse } from 'server/lib/response';
+import { AUTHENTICATION_UNAVAILABLE, isInteractiveAuthUnavailable, isLocalAuthDisabled } from 'server/lib/serverAccess';
 
 const encode = (obj: unknown) => Buffer.from(JSON.stringify(obj ?? {}), 'utf8').toString('base64url');
 const MCP_OAUTH_CALLBACK_PATH = /^\/api\/v2\/ai\/agent\/mcp-connections\/[^/]+\/oauth\/callback$/;
 const MAX_AUTHORIZATION_HEADER_LENGTH = 16384;
 
-function authFailure(request: NextRequest, status: 401 | 500, message: string, code?: string): NextResponse {
+function authFailure(request: NextRequest, status: 401 | 500 | 503, message: string, code?: string): NextResponse {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
   if (status === 401) {
     headers['WWW-Authenticate'] = bearerChallenge(code);
@@ -60,15 +61,19 @@ export const authMiddleware: Middleware = async (request, next) => {
     return authFailure(request, 401, 'Invalid Authorization header.', 'invalid_credential');
   }
 
-  if (process.env.ENABLE_AUTH !== 'true') {
-    return forwardWithoutUser(request, next);
-  }
-
   if (request.method === 'GET' && /^\/api\/v2\/sites\/browser\/open\/[a-z0-9-]{1,64}$/.test(request.nextUrl.pathname)) {
     return forwardWithoutUser(request, next);
   }
 
   if (MCP_OAUTH_CALLBACK_PATH.test(request.nextUrl.pathname)) {
+    return forwardWithoutUser(request, next);
+  }
+
+  if (isInteractiveAuthUnavailable()) {
+    return authFailure(request, 503, AUTHENTICATION_UNAVAILABLE.message, AUTHENTICATION_UNAVAILABLE.code);
+  }
+
+  if (isLocalAuthDisabled()) {
     return forwardWithoutUser(request, next);
   }
 

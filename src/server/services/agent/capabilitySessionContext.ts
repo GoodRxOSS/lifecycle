@@ -109,7 +109,19 @@ function addRepoFullName(repos: Set<string>, value: unknown) {
   }
 }
 
-/** SECURITY: every diagnostic tool is locked to this scope (namespace, full repo set, build UUID, PR id, DB scope) from the authoritative Build row; falls back to session repos if it can't load. */
+export const BUILD_SCOPE_LOOKUP_FAILED_MESSAGE = 'Environment details could not be loaded. Try again in a moment.';
+export const BUILD_SCOPE_BUILD_MISSING_MESSAGE = 'The environment for this session could not be found.';
+
+export class LifecycleDiagnosticBuildScopeError extends Error {
+  readonly code = 'build_scope_unavailable';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'LifecycleDiagnosticBuildScopeError';
+  }
+}
+
+// SECURITY: build-dependent tools require scope from the authoritative Build row.
 async function resolveLifecycleDiagnosticBuildScope(session: AgentSession): Promise<LifecycleDiagnosticBuildScope> {
   const repos = new Set<string>();
   // Always include repos already known on the session as a baseline.
@@ -133,50 +145,53 @@ async function resolveLifecycleDiagnosticBuildScope(session: AgentSession): Prom
     return scope;
   }
 
+  let build: Build | undefined;
   try {
-    const build = await Build.query()
+    build = await Build.query()
       .findOne({ uuid: session.buildUuid })
       .withGraphFetched('[pullRequest.repository, deploys.repository]');
-    if (!build) {
-      return scope;
-    }
-
-    addRepoFullName(repos, build.pullRequest?.repository?.fullName);
-    addRepoFullName(repos, build.pullRequest?.fullName);
-    for (const deploy of build.deploys || []) {
-      addRepoFullName(repos, deploy.repository?.fullName);
-    }
-
-    const pullRequestId =
-      typeof (build as { pullRequestId?: number | null }).pullRequestId === 'number'
-        ? (build as { pullRequestId?: number | null }).pullRequestId ?? null
-        : build.pullRequest?.id ?? null;
-    const repositoryIds = [
-      ...new Set(
-        [build.pullRequest?.repository?.id, ...(build.deploys || []).map((deploy) => deploy.repository?.id)].filter(
-          (id): id is number => typeof id === 'number'
-        )
-      ),
-    ];
-
-    scope.allowedNamespace = build.namespace || null;
-    scope.allowedRepos = [...repos];
-    scope.pullRequestId = pullRequestId;
-    scope.allowedPullRequestNumber =
-      typeof build.pullRequest?.pullRequestNumber === 'number' ? build.pullRequest.pullRequestNumber : null;
-    scope.databaseScope = {
-      buildId: build.id,
-      buildUuid: build.uuid,
-      pullRequestId,
-      environmentId: typeof build.environmentId === 'number' ? build.environmentId : null,
-      repositoryIds,
-    };
   } catch (error) {
     getLogger().warn(
       { error, buildUuid: session.buildUuid },
       `AgentExec: lifecycle diagnostic build scope unavailable buildUuid=${session.buildUuid}`
     );
+    throw new LifecycleDiagnosticBuildScopeError(BUILD_SCOPE_LOOKUP_FAILED_MESSAGE);
   }
+
+  if (!build) {
+    throw new LifecycleDiagnosticBuildScopeError(BUILD_SCOPE_BUILD_MISSING_MESSAGE);
+  }
+
+  addRepoFullName(repos, build.pullRequest?.repository?.fullName);
+  addRepoFullName(repos, build.pullRequest?.fullName);
+  for (const deploy of build.deploys || []) {
+    addRepoFullName(repos, deploy.repository?.fullName);
+  }
+
+  const pullRequestId =
+    typeof (build as { pullRequestId?: number | null }).pullRequestId === 'number'
+      ? (build as { pullRequestId?: number | null }).pullRequestId ?? null
+      : build.pullRequest?.id ?? null;
+  const repositoryIds = [
+    ...new Set(
+      [build.pullRequest?.repository?.id, ...(build.deploys || []).map((deploy) => deploy.repository?.id)].filter(
+        (id): id is number => typeof id === 'number'
+      )
+    ),
+  ];
+
+  scope.allowedNamespace = build.namespace || null;
+  scope.allowedRepos = [...repos];
+  scope.pullRequestId = pullRequestId;
+  scope.allowedPullRequestNumber =
+    typeof build.pullRequest?.pullRequestNumber === 'number' ? build.pullRequest.pullRequestNumber : null;
+  scope.databaseScope = {
+    buildId: build.id,
+    buildUuid: build.uuid,
+    pullRequestId,
+    environmentId: typeof build.environmentId === 'number' ? build.environmentId : null,
+    repositoryIds,
+  };
 
   return scope;
 }

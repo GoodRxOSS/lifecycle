@@ -293,7 +293,25 @@ export default class AgentCapabilityService {
             return null;
           }
 
-          return routedServer;
+          try {
+            const discoveredTools = await mcpConfigService.discoverPendingServerTools({
+              server,
+              transport: routedServer.transport,
+              timeoutMs: workspaceToolDiscoveryTimeoutMs,
+            });
+            return {
+              ...routedServer,
+              discoveredTools,
+              discoveryPending: false,
+              toolDiscoverySource: 'workspace' as const,
+            };
+          } catch (error) {
+            getLogger().warn(
+              { error, sessionId: session.uuid },
+              `AgentExec: workspace gateway discovery failed sessionId=${session.uuid} server=${server.slug}`
+            );
+            return null;
+          }
         })
       )
     ).filter((server): server is ResolvedMcpServer => Boolean(server));
@@ -335,10 +353,10 @@ export default class AgentCapabilityService {
 
     for (const server of resolvedServers) {
       for (const discoveredTool of server.discoveredTools) {
-        const capabilityKey = AgentPolicyService.capabilityForExternalMcpTool(
-          discoveredTool.name,
-          discoveredTool.annotations
-        );
+        const capabilityKey =
+          server.toolDiscoverySource === 'workspace'
+            ? 'external_mcp_write'
+            : AgentPolicyService.capabilityForExternalMcpTool(discoveredTool.name, discoveredTool.annotations);
         const catalogCapabilityId: AgentCapabilityCatalogId =
           capabilityKey === 'external_mcp_read' ? 'external_mcp_read' : 'external_mcp_write';
         if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {

@@ -607,6 +607,38 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[0].id]);
   });
 
+  it('treats MCP servers whose tools are discovered on first session use as available', async () => {
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio-mcp',
+        name: 'Pending stdio MCP',
+        description: 'Runs inside the session workspace.',
+        scope: 'global',
+        connectionRequired: false,
+        configured: false,
+        stale: false,
+        validationError: null,
+        discoveredTools: [],
+        sharedDiscoveredTools: [],
+        discoveryPending: true,
+      },
+    ]);
+
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+
+    expect(state.mcp.connections).toEqual([
+      expect.objectContaining({
+        label: 'Pending stdio MCP',
+        selected: true,
+        available: true,
+      }),
+    ]);
+    expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[0].id]);
+  });
+
   it('marks MCP connections with validation errors unavailable and rejects saved choices', async () => {
     mockListEnabledConnectionsForUser.mockResolvedValue([
       {

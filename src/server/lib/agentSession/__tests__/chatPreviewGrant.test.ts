@@ -21,10 +21,12 @@ import {
   verifyChatPreviewGrant,
 } from 'server/lib/agentSession/chatPreviewGrant';
 import { createCipheriv, createHash, randomBytes } from 'crypto';
+import mainGrantFixtures from '../__fixtures__/mainChatPreviewGrants';
 
 const originalSecret = process.env.CHAT_PREVIEW_GRANT_SECRET;
 const originalEncryptionKey = process.env.ENCRYPTION_KEY;
 const originalEnableAuth = process.env.ENABLE_AUTH;
+const originalAppEnv = process.env.APP_ENV;
 const originalNextAuthSecret = process.env.NEXTAUTH_SECRET;
 const originalGithubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
 const PREVIEW_HOST = '3000--abcdef1234567890.preview.lifecycle.dev';
@@ -49,10 +51,13 @@ describe('chat preview grants', () => {
     process.env.CHAT_PREVIEW_GRANT_SECRET = 'test-preview-secret';
     delete process.env.ENCRYPTION_KEY;
     process.env.ENABLE_AUTH = 'true';
+    process.env.APP_ENV = 'development';
     jest.useFakeTimers().setSystemTime(new Date('2026-06-29T12:00:00.000Z'));
   });
 
   afterEach(() => {
+    if (originalAppEnv === undefined) delete process.env.APP_ENV;
+    else process.env.APP_ENV = originalAppEnv;
     jest.useRealTimers();
     if (originalSecret === undefined) {
       delete process.env.CHAT_PREVIEW_GRANT_SECRET;
@@ -131,6 +136,63 @@ describe('chat preview grants', () => {
         previewHost: PREVIEW_HOST,
       })
     ).toBe(true);
+  });
+
+  it.each(mainGrantFixtures)(
+    'reads the pinned main grant with $name key selection',
+    ({ environment, grant, claims, maxAgeSeconds }) => {
+      for (const key of ['CHAT_PREVIEW_GRANT_SECRET', 'ENCRYPTION_KEY', 'NEXTAUTH_SECRET', 'GITHUB_WEBHOOK_SECRET'])
+        delete process.env[key];
+      Object.assign(process.env, environment);
+      expect(readChatPreviewGrantClaims(grant)).toEqual(claims);
+      expect(
+        verifyChatPreviewGrant(grant, {
+          sessionId: claims.sessionId,
+          port: claims.port,
+          userId: claims.userId,
+          previewHost: claims.previewHost,
+        })
+      ).toBe(true);
+      expect(getChatPreviewGrantMaxAgeSeconds(grant)).toBe(maxAgeSeconds);
+    }
+  );
+
+  it.each(['dev', 'development'])('keeps the original preview local key in %s', (environment) => {
+    for (const key of ['CHAT_PREVIEW_GRANT_SECRET', 'ENCRYPTION_KEY', 'NEXTAUTH_SECRET', 'GITHUB_WEBHOOK_SECRET'])
+      delete process.env[key];
+    process.env.ENABLE_AUTH = 'false';
+    process.env.APP_ENV = environment;
+    const fixture = mainGrantFixtures.find(({ name }) => name === 'local')!;
+    expect(readChatPreviewGrantClaims(fixture.grant)).toEqual(fixture.claims);
+  });
+
+  it('refuses the main fixed local key outside explicit local development', () => {
+    for (const key of ['CHAT_PREVIEW_GRANT_SECRET', 'ENCRYPTION_KEY', 'NEXTAUTH_SECRET', 'GITHUB_WEBHOOK_SECRET'])
+      delete process.env[key];
+    process.env.ENABLE_AUTH = 'false';
+    process.env.APP_ENV = 'production';
+    const fixture = mainGrantFixtures.find(({ name }) => name === 'local')!;
+    expect(readChatPreviewGrantClaims(fixture.grant)).toBeNull();
+    expect(() =>
+      createChatPreviewGrant({ sessionId: 's', userId: 'u', port: 3000, previewHost: PREVIEW_HOST })
+    ).toThrow(/must be configured/);
+  });
+
+  it('rejects truncated tags, extra segments, padding, and noncanonical encodings on main-format grants', () => {
+    const fixture = mainGrantFixtures[0];
+    process.env.CHAT_PREVIEW_GRANT_SECRET = fixture.environment.CHAT_PREVIEW_GRANT_SECRET;
+    const [prefix, iv, ciphertext, tag] = fixture.grant.split('.');
+    for (const length of [4, 8, 12, 13, 14, 15]) {
+      const truncatedTag = Buffer.from(tag, 'base64url').subarray(0, length).toString('base64url');
+      expect(readChatPreviewGrantClaims([prefix, iv, ciphertext, truncatedTag].join('.'))).toBeNull();
+    }
+    expect(readChatPreviewGrantClaims(`${fixture.grant}.extra`)).toBeNull();
+    expect(readChatPreviewGrantClaims(`${fixture.grant}=`)).toBeNull();
+    expect(readChatPreviewGrantClaims([prefix, iv + '=', ciphertext, tag].join('.'))).toBeNull();
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const noncanonicalTag = tag.slice(0, -1) + alphabet[alphabet.indexOf(tag.slice(-1)) + 1];
+    expect(Buffer.from(noncanonicalTag, 'base64url')).toEqual(Buffer.from(tag, 'base64url'));
+    expect(readChatPreviewGrantClaims([prefix, iv, ciphertext, noncanonicalTag].join('.'))).toBeNull();
   });
 
   it('rejects a blank preview host before minting a grant', () => {

@@ -26,6 +26,7 @@ import { authMiddleware } from './auth';
 
 const VALID_TOKEN = `lfc_${'a'.repeat(40)}`;
 const originalEnableAuth = process.env.ENABLE_AUTH;
+const originalAppEnv = process.env.APP_ENV;
 
 const makeRequest = (url: string, headers?: HeadersInit) => new NextRequest(url, { headers });
 
@@ -40,9 +41,12 @@ const forwardedRequest = (next: jest.Mock) => next.mock.calls[0][0] as NextReque
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ENABLE_AUTH = 'true';
+  process.env.APP_ENV = 'development';
 });
 
 afterAll(() => {
+  if (originalAppEnv === undefined) delete process.env.APP_ENV;
+  else process.env.APP_ENV = originalAppEnv;
   if (originalEnableAuth === undefined) {
     delete process.env.ENABLE_AUTH;
   } else {
@@ -295,4 +299,53 @@ describe('authMiddleware JWT verification', () => {
     expect(body.error.code).toBeUndefined();
     expect((result as Response).headers.get('WWW-Authenticate')).toBeNull();
   });
+});
+
+describe('production authentication configuration', () => {
+  it.each([undefined, '', 'false', 'TRUE'])('blocks interactive v2 access for ENABLE_AUTH=%s', async (value) => {
+    process.env.APP_ENV = 'production';
+    if (value === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = value;
+    const { next, result } = await runMiddleware(
+      makeRequest('https://example.test/api/v2/repositories', {
+        'x-user': 'spoofed',
+        authorization: `Bearer ${VALID_TOKEN}`,
+      })
+    );
+    expect(result.status).toBe(503);
+    expect(await result.json()).toMatchObject({ error: { code: 'authentication_unavailable' } });
+    expect(result.headers.get('Cache-Control')).toBe('no-store');
+    expect(next).not.toHaveBeenCalled();
+    expect(mockVerifyAuth).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '/setup',
+    '/api/setup/status',
+    '/api/setup/configure',
+    '/api/setup/callback',
+    '/api/health',
+    '/api/jobs',
+    '/api/webhooks/github',
+    '/_next/static/app.js',
+    '/',
+  ])('preserves the independent route %s', async (path) => {
+    process.env.APP_ENV = 'production';
+    delete process.env.ENABLE_AUTH;
+    const req = makeRequest(`https://example.test${path}`);
+    const { next } = await runMiddleware(req);
+    expect(next).toHaveBeenCalledWith(req);
+    expect(mockVerifyAuth).not.toHaveBeenCalled();
+  });
+
+  it.each(['/api/v2/sites/browser/open/public-site', '/api/v2/ai/agent/mcp-connections/service/oauth/callback'])(
+    'preserves the existing public handler with its own access policy: %s',
+    async (path) => {
+      process.env.APP_ENV = 'production';
+      delete process.env.ENABLE_AUTH;
+      const { next } = await runMiddleware(makeRequest(`https://example.test${path}`, { 'x-user': 'spoofed' }));
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(forwardedRequest(next).headers.get('x-user')).toBeNull();
+    }
+  );
 });

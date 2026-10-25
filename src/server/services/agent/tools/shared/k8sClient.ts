@@ -16,6 +16,9 @@
 
 import * as k8s from '@kubernetes/client-node';
 
+export const K8S_NAMESPACE_SCOPE_UNAVAILABLE_MESSAGE =
+  'Kubernetes access is unavailable because this session is not scoped to an environment namespace.';
+
 export class K8sClient {
   public readonly kc: k8s.KubeConfig;
   public readonly coreApi: k8s.CoreV1Api;
@@ -43,18 +46,14 @@ export class K8sClient {
     return this.allowedNamespace;
   }
 
-  /** Resolve the namespace under build scope: defaults to the scope when omitted, rejects any mismatch; used as-is when no scope is set. */
+  // SECURITY: a caller-supplied namespace cannot replace a missing environment scope.
   resolveNamespace(requested: string | null | undefined): string {
     const allowed = this.allowedNamespace;
-    const requestedTrimmed = requested?.trim() || null;
-
     if (!allowed) {
-      if (!requestedTrimmed) {
-        throw new Error('namespace is required');
-      }
-      return requestedTrimmed;
+      throw new Error(K8S_NAMESPACE_SCOPE_UNAVAILABLE_MESSAGE);
     }
 
+    const requestedTrimmed = requested?.trim() || null;
     if (!requestedTrimmed) {
       return allowed;
     }
