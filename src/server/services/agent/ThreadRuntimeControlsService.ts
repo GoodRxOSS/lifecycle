@@ -31,6 +31,7 @@ import {
 import { getLogger } from 'server/lib/logger';
 import AgentMessageStore, { type RuntimeControlsUpdateChoice } from './MessageStore';
 import AgentPolicyService from './PolicyService';
+import { resolveWorkspaceMcpAdmission } from './workspaceMcpAdmission';
 import AgentRunService from './RunService';
 import AgentSourceService from './SourceService';
 import AgentThreadService, { type AgentThreadRuntimeControlChoicesMetadata } from './ThreadService';
@@ -295,6 +296,10 @@ function isConnectionAvailable(connection: AgentMcpConnection): boolean {
     return false;
   }
 
+  if (connection.discoveryPending) {
+    return true;
+  }
+
   return (connection.discoveredTools?.length ?? 0) + (connection.sharedDiscoveredTools?.length ?? 0) > 0;
 }
 
@@ -333,10 +338,6 @@ function allowedMcpCapabilityIds(context: RuntimeChoiceContext): AgentCapability
         context,
       }).allowed
   );
-}
-
-function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
-  return allowedMcpCapabilityIds(context).length > 0;
 }
 
 function assertDefinitionUsable(definition: AgentDefinitionContract, sourceKind: AgentCapabilitySourceKind): void {
@@ -426,22 +427,42 @@ function buildChoiceState(context: RuntimeChoiceContext): {
     }
   }
 
-  const mcpConnections: AgentThreadRuntimeControlChoice[] = hasAllowedMcpCapability(context)
-    ? context.mcpConnections.map((connection) => {
-        const id = opaqueChoiceId('mcp', `${connection.scope}:${connection.slug}`);
-        const available = isConnectionAvailable(connection);
-        const choice = {
-          id,
-          label: connection.name,
-          description: connection.description || null,
-          required: false,
-          selected: savedMcpChoiceIds ? savedMcpChoiceIds.has(id) : available,
-          available,
-        };
-        lookup.mcpById.set(id, { ...choice, rawConnectionId: `${connection.scope}:${connection.slug}` });
-        return choice;
-      })
-    : [];
+  const mcpCapabilityIds = allowedMcpCapabilityIds(context);
+  const selectedCapabilityIds = [
+    ...mcpCapabilityIds,
+    ...[...lookup.toolsById.values()]
+      .filter((choice) => choice.available && choice.selected)
+      .map((choice) => choice.rawCapabilityId),
+  ];
+  const workspaceMcpAdmission = resolveWorkspaceMcpAdmission({
+    resolvedCapabilityAccess: selectedCapabilityIds.map((capabilityId) =>
+      capabilityAllowed({ capabilityId, definition: context.definition, context })
+    ),
+    definitionOwnerKind: context.definition.owner.kind,
+    sourceKind: context.sourceKind,
+    capabilityPolicy: context.capabilityPolicy,
+    customAgentCreationPolicy: context.customAgentCreationPolicy,
+    approvalPolicy: context.approvalPolicy,
+  });
+  const mcpConnections: AgentThreadRuntimeControlChoice[] =
+    mcpCapabilityIds.length > 0
+      ? context.mcpConnections.map((connection) => {
+          const id = opaqueChoiceId('mcp', `${connection.scope}:${connection.slug}`);
+          const available =
+            isConnectionAvailable(connection) &&
+            (connection.transport.type !== 'stdio' || workspaceMcpAdmission !== null);
+          const choice = {
+            id,
+            label: connection.name,
+            description: connection.description || null,
+            required: false,
+            selected: savedMcpChoiceIds ? savedMcpChoiceIds.has(id) : available,
+            available,
+          };
+          lookup.mcpById.set(id, { ...choice, rawConnectionId: `${connection.scope}:${connection.slug}` });
+          return choice;
+        })
+      : [];
 
   const selectedToolChoiceIds = [
     ...required.filter((choice) => choice.available).map((choice) => choice.id),

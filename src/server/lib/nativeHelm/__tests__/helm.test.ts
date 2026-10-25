@@ -31,7 +31,7 @@ import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { buildDeployJobName } from 'server/lib/kubernetes/jobNames';
 import { waitForJobAndGetLogs } from 'server/lib/nativeBuild/utils';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise } from 'server/lib/shell';
 import { getLogArchivalService } from 'server/services/logArchival';
 import { YamlConfigParser } from 'server/lib/yamlConfigParser';
 import * as YamlService from 'server/models/yaml';
@@ -63,7 +63,7 @@ jest.mock('server/lib/random', () => ({
   randomAlphanumeric: jest.fn().mockReturnValue('k4hlde'),
 }));
 jest.mock('server/lib/shell', () => ({
-  shellPromise: jest.fn(),
+  execFilePromise: jest.fn(),
 }));
 jest.mock('server/lib/nativeBuild/utils', () => {
   const originalModule = jest.requireActual('server/lib/nativeBuild/utils');
@@ -1760,7 +1760,7 @@ describe('Native Helm', () => {
         nativeHelm: {},
       });
 
-      (shellPromise as jest.Mock).mockResolvedValue('');
+      (execFilePromise as jest.Mock).mockResolvedValue('');
       (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({
         logs: 'helm logs',
         success: true,
@@ -1804,10 +1804,18 @@ describe('Native Helm', () => {
       expect(waitForSecretSync).toHaveBeenCalledWith({ 'sample-secret': ['TOKEN'] }, 'testns', 60000, {
         'sample-secret': 'sync-c',
       });
-      expect(shellPromise).toHaveBeenCalledWith(expect.stringContaining('kubectl apply -f '), {
-        timeout: 90_000,
-      });
-      expect(shellPromise).not.toHaveBeenCalledWith(expect.stringContaining('--request-timeout'), expect.anything());
+      expect(execFilePromise).toHaveBeenCalledWith(
+        'kubectl',
+        ['apply', '-f', expect.stringMatching(/\/helm\/[a-f0-9]{64}\.yaml$/)],
+        {
+          timeout: 90_000,
+        }
+      );
+      expect(execFilePromise).not.toHaveBeenCalledWith(
+        'kubectl',
+        expect.arrayContaining(['--request-timeout']),
+        expect.anything()
+      );
       expect(outputPatch.where).toHaveBeenCalledWith({ id: 42, runUUID: 'run-c' });
       expect(archiveLogs).toHaveBeenCalledWith(expect.objectContaining({ jobName: expectedJobName }), 'helm logs');
       expect(result).toEqual({

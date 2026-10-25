@@ -79,10 +79,12 @@ const serviceRecord = (overrides: Record<string, unknown> = {}) => ({
 
 let query: any;
 const originalEnableAuth = process.env.ENABLE_AUTH;
+const originalAppEnv = process.env.APP_ENV;
 
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ENABLE_AUTH = 'true';
+  process.env.APP_ENV = 'development';
   query = {
     findOne: jest.fn(),
     findById: jest.fn().mockReturnThis(),
@@ -94,6 +96,8 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  if (originalAppEnv === undefined) delete process.env.APP_ENV;
+  else process.env.APP_ENV = originalAppEnv;
   if (originalEnableAuth === undefined) {
     delete process.env.ENABLE_AUTH;
   } else {
@@ -363,3 +367,24 @@ test('REST principal retains revocation identity only from verified middleware c
     expiresAt,
   });
 });
+
+it.each([undefined, 'false', 'TRUE'])(
+  'rejects all principal paths before DB access in production with auth=%s',
+  async (value) => {
+    process.env.APP_ENV = 'production';
+    if (value === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = value;
+    for (const req of [
+      request(),
+      request({ 'x-user': encodeUser({ sub: 'spoofed', realm_access: { roles: ['admin'] } }) }),
+      keyRequest(PAT_TOKEN),
+    ]) {
+      await expect(resolvePrincipal(req)).rejects.toMatchObject({
+        httpStatus: 503,
+        code: 'authentication_unavailable',
+      });
+    }
+    expect(ApiToken.query).not.toHaveBeenCalled();
+    expect(mockGetConfig).not.toHaveBeenCalled();
+  }
+);

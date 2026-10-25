@@ -30,6 +30,7 @@ import {
 } from './get-user';
 import type { LifecycleRole } from './roles';
 import { rememberVerifiedOAuthBearer } from './verifiedOAuthBearer';
+import { AUTHENTICATION_UNAVAILABLE, isInteractiveAuthUnavailable } from './serverAccess';
 
 export type PrincipalKind = 'user' | 'personal_key' | 'service_key';
 
@@ -143,8 +144,12 @@ async function resolveKeyPrincipal(token: string): Promise<Principal> {
   };
 }
 
-/** Ordered resolver: API key → middleware-verified x-user session → local-dev fail-open → 401. */
+/** Ordered resolver: API key → middleware-verified x-user session → explicit local development → 401. */
 export async function resolvePrincipal(req: NextRequest): Promise<Principal> {
+  if (isInteractiveAuthUnavailable()) {
+    throw new AppError({ httpStatus: 503, ...AUTHENTICATION_UNAVAILABLE });
+  }
+
   const token = bearerApiKey(req.headers.get('authorization'));
   if (token) {
     return resolveKeyPrincipal(token);

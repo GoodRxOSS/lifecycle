@@ -14,125 +14,34 @@
  * limitations under the License.
  */
 
-import React, { useState } from 'react';
+import Head from 'next/head';
+import React from 'react';
+import type { GetServerSideProps } from 'next';
+import { LIFECYCLE_UI_URL } from 'shared/config';
 
-const SchemaValidatorPage = () => {
-  const [yaml, setYaml] = useState('');
-  const [result, setResult] = useState<{ valid: boolean; error: string[] | null } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [touched, setTouched] = useState(false);
+export const getServerSideProps: GetServerSideProps = async () => ({
+  props: { uiUrl: LIFECYCLE_UI_URL || null },
+});
 
-  const handleChange = async (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value;
-    setYaml(value);
-    setTouched(true);
-    if (!value) {
-      setResult(null);
-      return;
-    }
-    setLoading(true);
-    try {
-      const encodeBase64 = (str: string) => {
-        return Buffer.from(str, 'utf-8').toString('base64');
-      };
-      const encodedContent = encodeBase64(value);
-      const res = await fetch('/api/v1/schema/validate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: encodedContent, source: 'content' }),
-      });
-      const data = await res.json();
-      setResult({ valid: data.valid, error: data.error });
-    } catch (err) {
-      console.error(err);
-      setResult({ valid: false, error: ['Could not reach validation API.'] });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  let borderColor = '#D1D5DB';
-  if (touched && result) {
-    borderColor = result.valid ? '#22C55E' : '#EF4444'; // green-500 or red-500
-  }
-
+export default function SchemaValidatorPage({ uiUrl }: { uiUrl: string | null }) {
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        border: '1px solidrgb(0, 85, 255)',
-        display: 'flex',
-        flexDirection: 'row',
-        fontFamily: "'Inter', 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif",
-        background: '#f9fafb',
-      }}
-    >
-      <div
-        style={{
-          flex: 2,
-          display: 'flex',
-          flexDirection: 'column',
-          padding: '2em',
-          borderRight: '1px solid #e5e7eb',
-          background: '#fff',
-        }}
-      >
-        <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '1em' }}>Schema Validation</h2>
-        <textarea
-          value={yaml}
-          onChange={handleChange}
-          placeholder="Paste or type your YAML schema here..."
-          style={{
-            width: '90%',
-            height: '100%',
-            fontFamily: 'monospace',
-            fontSize: 16,
-            padding: '1em',
-            border: `2px solid ${borderColor}`,
-            borderRadius: 8,
-            background: '#f3f4f6',
-            outline: 'none',
-            transition: 'border-color 0.2s',
-          }}
-        />
-      </div>
-      <div
-        style={{
-          flex: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          padding: '2em',
-          background: '#f9fafb',
-        }}
-      >
-        <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '1em' }}>Result</h2>
-        {loading ? (
-          <div style={{ color: '#888', fontSize: 16 }}>Validating...</div>
-        ) : result ? (
-          result.valid ? (
-            <div style={{ color: '#22C55E', fontWeight: 600, fontSize: 18 }}>Schema is valid ✅</div>
-          ) : (
-            <div>
-              <div style={{ color: '#EF4444', fontWeight: 600, fontSize: 18, marginBottom: 8 }}>
-                Schema is invalid ❌
-              </div>
-              {result.error && (
-                <ul style={{ color: '#b91c1c', fontSize: 15, paddingLeft: 18 }}>
-                  {Array.isArray(result.error) ? (
-                    result.error.map((err, idx) => <li key={idx}>{err}</li>)
-                  ) : typeof result.error === 'string' ? (
-                    <li>{result.error}</li>
-                  ) : null}
-                </ul>
-              )}
-            </div>
-          )
-        ) : (
-          <div style={{ color: '#888', fontSize: 16 }}>Paste a YAML schema to validate.</div>
-        )}
-      </div>
-    </div>
+    <main style={{ maxWidth: 640, margin: '4rem auto', padding: '0 1.5rem', fontFamily: 'sans-serif' }}>
+      <Head>
+        <title>Validate lifecycle.yaml</title>
+      </Head>
+      <h1>Validate lifecycle.yaml</h1>
+      <p>Use the Lifecycle CLI to validate a local file:</p>
+      <pre>
+        <code>lfc schema validate lifecycle.yaml</code>
+      </pre>
+      <p>For a repository branch, sign in with the CLI and run:</p>
+      <pre>
+        <code>lfc schema validate --repo owner/repository --branch branch-name</code>
+      </pre>
+      <p>
+        The API also supports authenticated validation at <code>/api/v2/schema/validate</code>.
+      </p>
+      {uiUrl && <a href={uiUrl}>Open Lifecycle</a>}
+    </main>
   );
-};
-
-export default SchemaValidatorPage;
+}

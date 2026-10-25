@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 GoodRx, Inc.
+ * Copyright 2026 GoodRx, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,38 +13,60 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 import React, { useEffect, useState } from 'react';
 import Head from 'next/head';
-import { useRouter } from 'next/router';
 import Link from 'next/link';
+import { SetupTokenField } from 'src/components/SetupTokenField';
+
+type SetupStatus = {
+  locked: boolean;
+  installed: boolean;
+  created: boolean;
+  restarted: boolean;
+  url: string;
+};
+
+type Result = { tone: 'success' | 'error'; message: string } | null;
 
 export default function SetupComplete() {
-  const router = useRouter();
-  const [appSetup, setAppSetup] = useState<any>(null);
+  const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState({ status: '', message: '' });
+  const [token, setToken] = useState('');
+  const [pending, setPending] = useState(false);
+  const [result, setResult] = useState<Result>(null);
+
   useEffect(() => {
-    if (!router.isReady) return;
-    const { app_setup } = router.query;
-    if (app_setup) {
-      try {
-        setAppSetup(JSON.parse(String(app_setup)));
-        setLoading(false);
-      } catch {
-        setAppSetup(null);
-        setLoading(false);
+    fetch('/api/setup/status')
+      .then((res) => res.json())
+      .then((payload) => setStatus(payload?.data ?? null))
+      .catch(() => setStatus(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleApply = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPending(true);
+    setResult(null);
+    try {
+      const response = await fetch('/api/setup/configure', {
+        method: 'POST',
+        headers: { 'X-Setup-Token': token.trim() },
+      });
+      const payload = await response.json();
+      if (response.ok) {
+        setResult({
+          tone: 'success',
+          message: 'Deployment restart requested. Wait for the deployments to become ready.',
+        });
+      } else {
+        setResult({ tone: 'error', message: payload?.error?.message || 'Something went wrong. Try again.' });
       }
-    } else {
-      fetch('/api/v1/setup/status')
-        .then((res) => res.json())
-        .then((data) => {
-          setAppSetup(data);
-          setLoading(false);
-        })
-        .catch(() => setLoading(false));
+    } catch {
+      setResult({ tone: 'error', message: 'Lifecycle could not be reached. Try again.' });
+    } finally {
+      setPending(false);
     }
-  }, [router.isReady, router.query]);
+  };
 
   if (loading) {
     return (
@@ -54,22 +76,18 @@ export default function SetupComplete() {
     );
   }
 
-  const handleApply = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/v1/setup/configure');
-      const data = await res.json();
-      if (res.ok) {
-        setStatus({ status: 'success', message: data.message });
-      } else {
-        setStatus({ status: 'error', message: data.error });
-      }
-    } catch (error) {
-      setStatus({ status: 'error', message: 'An unexpected error occurred.' });
-    } finally {
-      setLoading(false);
-    }
-  };
+  if (status?.locked) {
+    return (
+      <main style={{ maxWidth: 560, margin: '4rem auto', padding: '0 1.5rem', fontFamily: 'sans-serif' }}>
+        <h1>GitHub App setup is locked</h1>
+        <p>Manage the configured GitHub App through your installation settings.</p>
+        <Link href="/">Home</Link>
+      </main>
+    );
+  }
+
+  const done = result?.tone === 'success' || Boolean(status?.restarted);
+  const disabled = pending || done;
 
   return (
     <div
@@ -83,7 +101,7 @@ export default function SetupComplete() {
       }}
     >
       <Head>
-        <title>GitHub App Setup Complete</title>
+        <title>Complete GitHub App setup</title>
       </Head>
       <main
         style={{
@@ -115,76 +133,87 @@ export default function SetupComplete() {
               textAlign: 'center',
             }}
           >
-            GitHub app installed.
+            GitHub App installed
           </h3>
           <div style={{ color: '#333', fontSize: 16, marginBottom: 18, textAlign: 'center' }}>
-            {appSetup?.url ? (
+            {status?.url ? (
               <>
-                <span>View your GitHub app: </span>
+                <span>View your GitHub App: </span>
                 <a
-                  href={`${appSetup.url}/installations/new`}
+                  href={`${status.url}/installations/new`}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{ color: '#0366d6', textDecoration: 'underline', wordBreak: 'break-all' }}
                 >
-                  {appSetup.url}
+                  {status.url}
                 </a>
               </>
             ) : (
               <span>
-                GitHub app setup is complete and secrets are applied to <code>lifecycle-app-secrets</code>.
+                GitHub App settings are saved in <code>lifecycle-app-secrets</code>.
               </span>
             )}
           </div>
-          <div style={{ display: 'flex', gap: '1em', justifyContent: 'center', marginTop: '1.5em' }}>
-            <button
-              onClick={handleApply}
-              style={{
-                padding: '0.75em 2em',
-                background: '#111',
-                color: '#fff',
-                borderRadius: '999px',
-                fontWeight: 600,
-                textDecoration: 'none',
-                fontSize: '1.1rem',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-                opacity: status?.status || appSetup?.restarted ? 0.5 : 1,
-                cursor: status?.status || appSetup?.restarted ? 'not-allowed' : 'pointer',
-              }}
-              disabled={Boolean(status?.status || appSetup?.restarted)}
-            >
-              Configure and Restart
-            </button>
-            <Link
-              href="/"
-              style={{
-                padding: '0.75em 2em',
-                background: '#fff',
-                color: '#111',
-                border: '2px solid #eee',
-                borderRadius: '999px',
-                fontWeight: 600,
-                textDecoration: 'none',
-                fontSize: '1.1rem',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              }}
-            >
-              Home
-            </Link>
-          </div>
+          <form onSubmit={handleApply}>
+            <SetupTokenField value={token} onChange={setToken} />
+            <div style={{ display: 'flex', gap: '1em', justifyContent: 'center', marginTop: '1.5em' }}>
+              <button
+                type="submit"
+                style={{
+                  padding: '0.75em 2em',
+                  background: '#111',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '999px',
+                  fontWeight: 600,
+                  textDecoration: 'none',
+                  fontSize: '1.1rem',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                  opacity: disabled ? 0.5 : 1,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                }}
+                disabled={disabled}
+              >
+                Configure and restart
+              </button>
+              <Link
+                href="/"
+                style={{
+                  padding: '0.75em 2em',
+                  background: '#fff',
+                  color: '#111',
+                  border: '2px solid #eee',
+                  borderRadius: '999px',
+                  fontWeight: 600,
+                  textDecoration: 'none',
+                  fontSize: '1.1rem',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                }}
+              >
+                Home
+              </Link>
+            </div>
+          </form>
           <div style={{ color: '#666', fontSize: 14, marginTop: 18, textAlign: 'center', padding: '1em 2em 0 2em' }}>
-            {!(status?.status === 'success') && (
-              <span>
-                You can also manually restart the <code>lifecycle-web</code> and <code>lifecycle-worker</code> 
-                deployments for the changes to take effect.
-              </span>
-            )}
-            {status.status === 'error' && <div style={{ color: '#f00', marginTop: 18 }}>{status.message}</div>}
-            {status.status === 'success' && (
-              <div style={{ color: 'green', marginTop: 18 }}>
-                Deployment restarted successfully. Changes will take effect shortly.
-              </div>
-            )}
+            <div style={{ minHeight: 40 }}>
+              {!done && (
+                <span>
+                  You can also manually restart the <code>lifecycle-web</code> and <code>lifecycle-worker</code>{' '}
+                  deployments for the changes to take effect.
+                </span>
+              )}
+            </div>
+            <div
+              role="status"
+              style={{
+                minHeight: 40,
+                marginTop: 18,
+                color: result?.tone === 'error' ? '#b00020' : 'green',
+                visibility: result ? 'visible' : 'hidden',
+              }}
+            >
+              {result?.message ?? ''}
+            </div>
           </div>
         </div>
       </main>

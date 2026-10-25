@@ -28,6 +28,12 @@ import AgentPolicyService from './PolicyService';
 import type { ResolvedAgentCapabilityAccess } from './PolicyService';
 import type { AgentApprovalPolicy } from './types';
 import type { AgentCapabilityCatalogId } from './capabilityCatalog';
+import type { AgentDefinitionOwnerKind } from './agentDefinitionTypes';
+import {
+  canDiscoverWorkspaceMcp,
+  resolveWorkspaceMcpAdmission,
+  workspaceMcpApprovalMode,
+} from './workspaceMcpAdmission';
 import AgentRuntimeConfigService from 'server/services/agentRuntime/config/agentRuntimeConfig';
 import { buildAgentToolKey } from './toolKeys';
 import { registerLifecycleDiagnosticFixTools, registerLifecycleDiagnosticReadTools } from './diagnosticTools';
@@ -102,6 +108,7 @@ type BuildToolSetOptions = {
   selectedRuntimeMcpConnectionRefs?: string[];
   autoProvisionWorkspace?: boolean;
   agentDefinitionId?: string;
+  agentDefinitionOwnerKind?: AgentDefinitionOwnerKind;
   agentSourceKind?: string;
 };
 
@@ -154,6 +161,7 @@ export default class AgentCapabilityService {
     selectedRuntimeMcpConnectionRefs,
     autoProvisionWorkspace = true,
     agentDefinitionId,
+    agentDefinitionOwnerKind,
     agentSourceKind,
   }: BuildToolSetOptions): Promise<{
     tools: ToolSet;
@@ -262,9 +270,22 @@ export default class AgentCapabilityService {
     ]);
     chatWorkspaceRuntimeReady = isChatWorkspaceRuntimeReady(runtimeSession);
     const selectedRuntimeMcpRefs = selectedMcpConnectionRefs(selectedRuntimeMcpConnectionRefs);
-    const selectedRepoServers = selectedRuntimeMcpRefs
+    const selectedConnections = selectedRuntimeMcpRefs
       ? repoServers.filter((server) => selectedRuntimeMcpRefs.has(`${server.scope}:${server.slug}`))
       : repoServers;
+    const workspaceMcpAdmission = resolveWorkspaceMcpAdmission({
+      resolvedCapabilityAccess,
+      definitionOwnerKind: agentDefinitionOwnerKind,
+      sourceKind: agentSourceKind,
+      capabilityPolicy: effectiveAgentConfig.capabilityPolicy,
+      customAgentCreationPolicy: effectiveAgentConfig.customAgentCreationPolicy,
+      approvalPolicy,
+    });
+    const selectedRepoServers = selectedConnections.filter(
+      (server) =>
+        !usesSessionWorkspaceGatewayExecution(server.transport) ||
+        canDiscoverWorkspaceMcp(workspaceMcpAdmission, server.slug, approvalPolicy, toolRules)
+    );
     // Resolve the session-scoped gateway endpoint once; per-server resolution would issue N parallel lookups.
     const gatewayEndpoint =
       workspaceGatewayServer &&
@@ -273,9 +294,9 @@ export default class AgentCapabilityService {
         : null;
     const resolvedRepoServers = (
       await Promise.all(
-        selectedRepoServers.map(async (server) => {
+        selectedRepoServers.map(async (server): Promise<ResolvedMcpServer | null> => {
           if (!usesSessionWorkspaceGatewayExecution(server.transport)) {
-            return server;
+            return { ...server, toolDiscoverySource: undefined };
           }
 
           if (!workspaceGatewayServer) {
@@ -293,7 +314,25 @@ export default class AgentCapabilityService {
             return null;
           }
 
-          return routedServer;
+          try {
+            const discoveredTools = await mcpConfigService.discoverPendingServerTools({
+              server,
+              transport: routedServer.transport,
+              timeoutMs: workspaceToolDiscoveryTimeoutMs,
+            });
+            return {
+              ...routedServer,
+              discoveredTools,
+              discoveryPending: false,
+              toolDiscoverySource: 'workspace' as const,
+            };
+          } catch (error) {
+            getLogger().warn(
+              { error, sessionId: session.uuid },
+              `AgentExec: workspace gateway discovery failed sessionId=${session.uuid} server=${server.slug}`
+            );
+            return null;
+          }
         })
       )
     ).filter((server): server is ResolvedMcpServer => Boolean(server));
@@ -334,23 +373,31 @@ export default class AgentCapabilityService {
     }
 
     for (const server of resolvedServers) {
+      const workspaceOrigin = server.toolDiscoverySource === 'workspace';
+      if (workspaceOrigin && !workspaceMcpAdmission) continue;
       for (const discoveredTool of server.discoveredTools) {
-        const capabilityKey = AgentPolicyService.capabilityForExternalMcpTool(
-          discoveredTool.name,
-          discoveredTool.annotations
-        );
+        const capabilityKey = workspaceOrigin
+          ? 'external_mcp_write'
+          : AgentPolicyService.capabilityForExternalMcpTool(discoveredTool.name, discoveredTool.annotations);
         const catalogCapabilityId: AgentCapabilityCatalogId =
-          capabilityKey === 'external_mcp_read' ? 'external_mcp_read' : 'external_mcp_write';
+          workspaceOrigin && workspaceMcpAdmission
+            ? workspaceMcpAdmission.catalogCapabilityId
+            : capabilityKey === 'external_mcp_read'
+            ? 'external_mcp_read'
+            : 'external_mcp_write';
         if (!isCatalogCapabilityAllowed(resolvedCapabilityAccess, catalogCapabilityId)) {
           continue;
         }
 
         const toolName = buildAgentToolKey(server.slug, discoveredTool.name);
-        const mode = resolveToolApprovalMode({
-          toolRules,
-          toolKey: toolName,
-          capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
-        });
+        const mode =
+          workspaceOrigin && workspaceMcpAdmission
+            ? workspaceMcpApprovalMode(workspaceMcpAdmission, approvalPolicy, toolRules, toolName)
+            : resolveToolApprovalMode({
+                toolRules,
+                toolKey: toolName,
+                capabilityMode: AgentPolicyService.modeForCapability(approvalPolicy, capabilityKey),
+              });
 
         if (mode === 'deny') {
           continue;

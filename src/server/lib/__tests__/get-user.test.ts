@@ -36,9 +36,16 @@ function makeRequest(userClaims?: Record<string, unknown>): NextRequest {
 
 describe('get-user helpers', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;
+  const originalAppEnv = process.env.APP_ENV;
   const originalLocalDevUserId = process.env.LOCAL_DEV_USER_ID;
 
+  beforeEach(() => {
+    process.env.APP_ENV = 'development';
+  });
+
   const restoreEnv = () => {
+    if (originalAppEnv === undefined) delete process.env.APP_ENV;
+    else process.env.APP_ENV = originalAppEnv;
     if (originalEnableAuth === undefined) {
       delete process.env.ENABLE_AUTH;
     } else {
@@ -54,6 +61,19 @@ describe('get-user helpers', () => {
 
   afterEach(() => {
     restoreEnv();
+  });
+
+  it.each([undefined, 'false', 'TRUE'])('never creates an identity outside local development with auth=%s', (value) => {
+    process.env.APP_ENV = 'production';
+    if (value === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = value;
+    for (const claims of [undefined, { sub: 'spoofed', realm_access: { roles: ['admin'] } }]) {
+      const request = makeRequest(claims);
+      expect(getIdentityFromClaims(claims ?? null)).toBeNull();
+      expect(getRequestUserSub(request)).toBeNull();
+      expect(getRequestUserIdentity(request)).toBeNull();
+      expect(() => requireRequestUserIdentity(request)).toThrow(UnauthorizedError);
+    }
   });
 
   it('retains only the configured external issuer from verified claims', () => {

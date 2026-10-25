@@ -247,6 +247,15 @@ export class McpConfigService {
       const authConfig = resolveAuthConfig(config.authConfig, config.preset);
       const connectionRequired = requiresUserConnection(authConfig);
       const state = connectionStates.get(buildConnectionKey(config.scope, config.slug));
+      const workspaceDiscovery = usesSessionWorkspaceGatewayExecution(config.transport);
+      const discoveredTools = workspaceDiscovery
+        ? []
+        : connectionRequired
+        ? state?.discoveredTools || []
+        : config.sharedDiscoveredTools || [];
+      const connectionUsable = connectionRequired
+        ? Boolean(state?.configured) && !state?.stale && (workspaceDiscovery || !state?.validationError)
+        : true;
 
       return {
         slug: config.slug,
@@ -261,11 +270,12 @@ export class McpConfigService {
         configured: state?.configured ?? false,
         stale: state?.stale ?? false,
         configuredFieldKeys: state?.configuredFieldKeys ?? [],
-        validationError: state?.validationError ?? null,
-        validatedAt: state?.validatedAt ?? null,
+        validationError: workspaceDiscovery && connectionUsable ? null : state?.validationError ?? null,
+        validatedAt: workspaceDiscovery ? null : state?.validatedAt ?? null,
         updatedAt: state?.updatedAt ?? null,
-        discoveredTools: connectionRequired ? state?.discoveredTools || [] : config.sharedDiscoveredTools || [],
-        sharedDiscoveredTools: connectionRequired ? [] : config.sharedDiscoveredTools || [],
+        discoveredTools,
+        sharedDiscoveredTools: connectionRequired || workspaceDiscovery ? [] : config.sharedDiscoveredTools || [],
+        discoveryPending: connectionUsable && workspaceDiscovery,
       };
     });
   }
@@ -308,8 +318,10 @@ export class McpConfigService {
         compiledUserConfig = compileFieldConnectionConfig(authConfig.schema, connectionState.state.values);
         const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, compiledUserConfig);
         resolvedTransport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig);
+        const discoveryPending = usesSessionWorkspaceGatewayExecution(resolvedTransport);
+        const discoveredTools = discoveryPending ? [] : connectionState.discoveredTools || [];
 
-        if ((connectionState.discoveredTools || []).length === 0) {
+        if (discoveredTools.length === 0 && !discoveryPending) {
           return [];
         }
 
@@ -322,7 +334,8 @@ export class McpConfigService {
             timeout: config.timeout,
             defaultArgs: compiledConfig.defaultArgs,
             env: compiledConfig.env,
-            discoveredTools: connectionState.discoveredTools || [],
+            discoveredTools,
+            ...(discoveryPending ? { discoveryPending } : {}),
           },
         ];
       }
@@ -374,9 +387,10 @@ export class McpConfigService {
 
       const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, undefined);
       resolvedTransport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig);
-      const discoveredTools = config.sharedDiscoveredTools || [];
+      const discoveryPending = usesSessionWorkspaceGatewayExecution(resolvedTransport);
+      const discoveredTools = discoveryPending ? [] : config.sharedDiscoveredTools || [];
 
-      if (discoveredTools.length === 0) {
+      if (discoveredTools.length === 0 && !discoveryPending) {
         return [];
       }
 
@@ -390,6 +404,7 @@ export class McpConfigService {
           defaultArgs: compiledConfig.defaultArgs,
           env: compiledConfig.env,
           discoveredTools,
+          ...(discoveryPending ? { discoveryPending } : {}),
         },
       ];
     });
@@ -425,12 +440,42 @@ export class McpConfigService {
     }
   }
 
+  async discoverPendingServerTools({
+    server,
+    transport,
+    timeoutMs,
+  }: {
+    server: ResolvedMcpServer;
+    transport: McpResolvedTransportConfig;
+    timeoutMs: number;
+  }): Promise<McpDiscoveredTool[]> {
+    // Workspace processes are user-controlled. Their tool catalog and failures belong only to this run.
+    try {
+      const discoveredTools = await this.discoverTools(transport, timeoutMs);
+      if (discoveredTools.length === 0) {
+        throw new Error(`MCP validation failed for ${server.slug}: server returned 0 tools`);
+      }
+      return discoveredTools;
+    } catch (error) {
+      throw new Error(
+        sanitizeMcpErrorMessage(error, [
+          { compiledConfig: { env: server.env, defaultArgs: server.defaultArgs }, transport: server.transport },
+          { transport },
+        ])
+      );
+    }
+  }
+
   async refreshSharedDiscoveredTools(
     config: Pick<
       McpServerConfig,
       'id' | 'slug' | 'preset' | 'transport' | 'sharedConfig' | 'authConfig' | 'timeout' | 'sharedDiscoveredTools'
     >
   ): Promise<McpDiscoveredTool[]> {
+    if (usesSessionWorkspaceGatewayExecution(config.transport)) {
+      return [];
+    }
+
     const authConfig = resolveAuthConfig(config.authConfig, config.preset);
     const discoveredTools = await this.validateSharedDiscovery(config.transport, config.sharedConfig, authConfig, {
       timeoutMs: config.timeout,
@@ -483,6 +528,11 @@ export class McpConfigService {
     const connectionRequired = requiresUserConnection(authConfig);
     if (connectionRequired) {
       getLogger().info(`MCP: shared discovery deferred transport=${transport.type} reason=user_connection_required`);
+      return [];
+    }
+
+    if (usesSessionWorkspaceGatewayExecution(transport)) {
+      getLogger().info(`MCP: shared discovery deferred transport=${transport.type} reason=session_workspace_execution`);
       return [];
     }
 

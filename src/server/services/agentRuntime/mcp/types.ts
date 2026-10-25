@@ -257,6 +257,8 @@ export interface ResolvedMcpServer {
   defaultArgs: Record<string, string>;
   env: Record<string, string>;
   discoveredTools: McpDiscoveredTool[];
+  discoveryPending?: boolean;
+  toolDiscoverySource?: 'workspace';
 }
 
 export interface AgentMcpConnection {
@@ -277,4 +279,5 @@ export interface AgentMcpConnection {
   updatedAt: string | null;
   discoveredTools: McpDiscoveredTool[];
   sharedDiscoveredTools: McpDiscoveredTool[];
+  discoveryPending: boolean;
 }

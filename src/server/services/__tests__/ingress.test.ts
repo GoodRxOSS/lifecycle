@@ -43,7 +43,7 @@ jest.mock('server/lib/logger', () => ({
   },
 }));
 
-jest.mock('server/lib/shell', () => ({ shellPromise: jest.fn() }));
+jest.mock('server/lib/shell', () => ({ execFilePromise: jest.fn() }));
 
 jest.mock('fs', () => {
   const actualFs = jest.requireActual('fs');
@@ -72,7 +72,7 @@ jest.mock('server/services/globalConfig', () => ({
 
 import yaml from 'js-yaml';
 import { withLogContext } from 'server/lib/logger';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise } from 'server/lib/shell';
 import IngressService from '../ingress';
 
 const queueManager = {
@@ -100,7 +100,7 @@ describe('IngressService', () => {
       lifecycleDefaults: {},
       domainDefaults: { altHttp: [] },
     });
-    (shellPromise as jest.Mock).mockResolvedValue(undefined);
+    (execFilePromise as jest.Mock).mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
   });
@@ -133,7 +133,25 @@ describe('IngressService', () => {
     const service = new IngressService({} as any, {} as any, {} as any, queueManager as any);
 
     await expect(service.updateIngressManifest()).resolves.toBe(true);
-    expect(shellPromise).not.toHaveBeenCalled();
+    expect(execFilePromise).not.toHaveBeenCalled();
+  });
+
+  test('keeps manifest names inside the temporary directory without changing resource data', async () => {
+    const service = new IngressService({} as any, {} as any, {} as any, queueManager as any);
+    const name = '../../outside';
+    const namespace = '--context=other';
+    const manifest = 'kind: Ingress\nmetadata:\n  name: original';
+    await expect((service as any).applyManifests(manifest, name, namespace)).resolves.toBe(true);
+    const path = mockWriteFile.mock.calls[0][0];
+    expect(path).toMatch(/\/global-ingress\/[a-f0-9]{64}\.yaml$/);
+    expect(mockWriteFile).toHaveBeenCalledWith(path, manifest, 'utf8');
+    expect(execFilePromise).toHaveBeenCalledWith('kubectl', ['apply', '-f', path, `--namespace=${namespace}`], {
+      timeout: 90_000,
+    });
+    await (service as any).applyManifests(manifest, name, namespace);
+    expect(mockWriteFile.mock.calls[1][0]).toBe(path);
+    await (service as any).applyManifests(manifest, name, 'another-namespace');
+    expect(mockWriteFile.mock.calls[2][0]).not.toBe(path);
   });
 
   test('cleans up every service ingress and tolerates an already-missing ingress', async () => {
@@ -145,7 +163,7 @@ describe('IngressService', () => {
       services: { BuildService: { configurationsForBuildId, getNamespace } },
     };
     const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
-    (shellPromise as jest.Mock)
+    (execFilePromise as jest.Mock)
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('api ingress not found'));
 
@@ -172,8 +190,18 @@ describe('IngressService', () => {
     );
     expect(configurationsForBuildId).toHaveBeenCalledWith(7, true);
     expect(getNamespace).toHaveBeenCalledWith({ id: 7 });
-    expect(shellPromise).toHaveBeenCalledWith('kubectl delete ingress ingress-web-build-1 --namespace env-build-1');
-    expect(shellPromise).toHaveBeenCalledWith('kubectl delete ingress ingress-api-build-1 --namespace env-build-1');
+    expect(execFilePromise).toHaveBeenCalledWith('kubectl', [
+      'delete',
+      'ingress',
+      'ingress-web-build-1',
+      '--namespace=env-build-1',
+    ]);
+    expect(execFilePromise).toHaveBeenCalledWith('kubectl', [
+      'delete',
+      'ingress',
+      'ingress-api-build-1',
+      '--namespace=env-build-1',
+    ]);
     expect(mockLoggerWarn).toHaveBeenCalledWith('Error: api ingress not found');
     expect(mockLoggerInfo).toHaveBeenCalledWith('Ingress: cleaned up');
   });
@@ -189,7 +217,7 @@ describe('IngressService', () => {
     };
     const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
     const error = new Error('shell unavailable');
-    (shellPromise as jest.Mock).mockImplementationOnce(() => {
+    (execFilePromise as jest.Mock).mockImplementationOnce(() => {
       throw error;
     });
 
@@ -238,7 +266,7 @@ describe('IngressService', () => {
       recursive: true,
     });
     expect(mockWriteFile).toHaveBeenCalledWith(
-      expect.stringContaining('/global-ingress/7-0-nginx-ingress.yaml'),
+      expect.stringMatching(/\/global-ingress\/[a-f0-9]{64}\.yaml$/),
       expect.any(String),
       'utf8'
     );
@@ -263,8 +291,9 @@ describe('IngressService', () => {
         expect.objectContaining({ host: 'web-build-1.preview.example.test' }),
       ])
     );
-    expect(shellPromise).toHaveBeenCalledWith(
-      expect.stringMatching(/^kubectl apply -f .*7-0-nginx-ingress\.yaml --namespace env-build-1$/),
+    expect(execFilePromise).toHaveBeenCalledWith(
+      'kubectl',
+      ['apply', '-f', mockWriteFile.mock.calls[0][0], '--namespace=env-build-1'],
       { timeout: 90_000 }
     );
     expect(mockLoggerInfo).toHaveBeenCalledWith('Ingress: created');
@@ -322,7 +351,7 @@ describe('IngressService', () => {
       },
     };
     const error = new Error('route rejected');
-    (shellPromise as jest.Mock).mockRejectedValueOnce(error);
+    (execFilePromise as jest.Mock).mockRejectedValueOnce(error);
     const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
 
     await expect(service.createOrUpdateIngressForBuild({ data: { buildId: 7 } })).resolves.toBeUndefined();
@@ -353,7 +382,7 @@ describe('IngressService', () => {
     };
     mockGetAllConfigs.mockResolvedValueOnce({});
     const applyError = new Error('route rejected');
-    (shellPromise as jest.Mock).mockRejectedValueOnce(applyError);
+    (execFilePromise as jest.Mock).mockRejectedValueOnce(applyError);
     const service = new IngressService(db as any, {} as any, {} as any, queueManager as any);
     const recordFailure = jest
       .spyOn(service as any, 'recordIngressFailureOnBuild')

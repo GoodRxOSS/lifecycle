@@ -100,10 +100,10 @@ describe('nativeBuild/utils', () => {
     const branchOnly = createCloneScript('GoodRxOSS/lifecycle', 'main');
     const exactSha = createCloneScript('GoodRxOSS/lifecycle', 'feature/test', 'abcdef123');
 
-    expect(branchOnly).toContain('git clone --depth 1 --single-branch --progress -b main');
-    expect(branchOnly).not.toContain('git fetch --depth 1 --progress origin');
-    expect(exactSha).toContain('git fetch --depth 1 --progress origin abcdef123');
-    expect(exactSha).toContain('git checkout abcdef123');
+    expect(branchOnly).toContain("git clone --depth 1 --single-branch --progress -b 'main' --");
+    expect(branchOnly).not.toContain('git fetch --depth 1 --progress -- origin');
+    expect(exactSha).toContain("git fetch --depth 1 --progress -- origin 'abcdef123'");
+    expect(exactSha).toContain("git checkout --end-of-options 'abcdef123'");
   });
 
   describe('createGitCloneContainer', () => {
@@ -113,7 +113,7 @@ describe('nativeBuild/utils', () => {
       expect(container.name).toBe('git-clone');
       expect(container.image).toBe('alpine/git:latest');
       expect(container.command).toEqual(['sh', '-c']);
-      expect(container.args[0]).toContain('git fetch --depth 1 --progress origin abc123def456');
+      expect(container.args[0]).toContain("git fetch --depth 1 --progress -- origin 'abc123def456'");
       expect(container.args[0]).toContain('owner/repo');
       expect(container.args[0]).toContain('git checkout FETCH_HEAD');
 
@@ -134,10 +134,10 @@ describe('nativeBuild/utils', () => {
         'github-token-123'
       );
 
-      expect(container.args[0]).toContain('safe.directory /workspace/lifecycle-ui');
-      expect(container.args[0]).toContain('git init /workspace/lifecycle-ui');
+      expect(container.args[0]).toContain("safe.directory '/workspace/lifecycle-ui'");
+      expect(container.args[0]).toContain("git init -- '/workspace/lifecycle-ui'");
       expect(container.args[0]).toContain('GoodRxOSS/lifecycle-ui.git');
-      expect(container.args[0]).toContain('git fetch --depth 1 --progress origin feature/test');
+      expect(container.args[0]).toContain("git fetch --depth 1 --progress -- origin 'feature/test'");
       expect(container.env).toEqual([
         { name: 'GIT_USERNAME', value: 'x-access-token' },
         { name: 'GIT_PASSWORD', value: 'github-token-123' },
@@ -268,5 +268,85 @@ describe('nativeBuild/utils', () => {
       expect(envVars).toContainEqual({ name: 'WORKERS', value: '4' });
       expect(envVars).toContainEqual({ name: 'APP_NAME', value: 'my-app' });
     });
+  });
+});
+
+describe('clone script shell boundary', () => {
+  const { execFileSync, spawnSync } = require('child_process');
+  const { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } = require('fs');
+  const { tmpdir } = require('os');
+  const { join } = require('path');
+  let directory: string;
+  let log: string;
+  let env: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'lfc-clone-'));
+    log = join(directory, 'args.jsonl');
+    writeFileSync(
+      join(directory, 'git'),
+      `#!${process.execPath}\nconst fs=require('fs'); const args=process.argv.slice(2); fs.appendFileSync(process.env.ARGV_LOG, JSON.stringify(args)+'\\n'); if(args[0]===process.env.FAIL_GIT_COMMAND) process.exit(7);`,
+      { mode: 0o755 }
+    );
+    env = {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      ARGV_LOG: log,
+      GIT_USERNAME: 'synthetic-user',
+      GIT_PASSWORD: "fake'$(id)",
+    };
+  });
+  afterEach(() => rmSync(directory, { recursive: true, force: true }));
+  const run = (script: string) => {
+    execFileSync('/bin/sh', ['-c', `cd() { :; }; ${script}`], { env });
+    return readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  };
+
+  it.each(['feature/$(id)', "release/o'hare#雪", 'topic/`uname`;test'])(
+    'preserves Git-valid ref %s without expansion',
+    (branch) => {
+      execFileSync('git', ['check-ref-format', '--branch', branch]);
+      const calls = run(createCloneScript('org/repo', branch, 'abc123'));
+      expect(calls).toEqual([
+        [
+          'clone',
+          '--depth',
+          '1',
+          '--single-branch',
+          '--progress',
+          '-b',
+          branch,
+          '--',
+          "https://synthetic-user:fake'$(id)@github.com/org/repo.git",
+          '/workspace',
+        ],
+        ['fetch', '--depth', '1', '--progress', '--', 'origin', 'abc123'],
+        ['checkout', '--end-of-options', 'abc123'],
+      ]);
+    }
+  );
+
+  it('keeps repository, revision and target directory out of the shell grammar', () => {
+    const marker = join(directory, 'unexpected');
+    const value = `quote' ; touch ${marker}; #`;
+    const container = createRepoSpecificGitCloneContainer(value, '--upload-pack=unexpected', value, 'u', 't');
+    const calls = run(container.args[0]);
+    expect(calls[0]).toEqual(['config', '--global', '--add', 'safe.directory', value]);
+    expect(calls[1]).toEqual(['init', '--', value]);
+    expect(calls[2]).toEqual(['remote', 'add', 'origin', `https://synthetic-user:fake'$(id)@github.com/${value}.git`]);
+    expect(calls[3]).toEqual(['fetch', '--depth', '1', '--progress', '--', 'origin', '--upload-pack=unexpected']);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('quotes the main build clone container revision and stops after a failed fetch', () => {
+    const revision = "ref'$(id)";
+    const container = createGitCloneContainer('org/repo', revision, 'u', 't');
+    const result = spawnSync('/bin/sh', ['-c', `cd() { :; }; ${container.args[0]}`], {
+      env: { ...env, FAIL_GIT_COMMAND: 'fetch' },
+    });
+    expect(result.status).toBe(7);
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    expect(calls[calls.length - 1]).toEqual(['fetch', '--depth', '1', '--progress', '--', 'origin', revision]);
+    expect(calls.some((args) => args[0] === 'checkout')).toBe(false);
   });
 });

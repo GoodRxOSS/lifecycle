@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-const mockShellPromise = jest.fn();
+const mockExecute = jest.fn();
 const mockGetAllConfigs = jest.fn();
 const mockProcessSecretRefs = jest.fn();
 const mockWaitForSecretSync = jest.fn();
@@ -30,7 +30,9 @@ const mockWithLogContext = jest.fn((_ctx, fn) => fn());
 const mockDeployQuery = jest.fn();
 
 jest.mock('server/lib/shell', () => ({
-  shellPromise: (...args: any[]) => mockShellPromise(...args),
+  redactCommandOutput: jest.requireActual('server/lib/shell').redactCommandOutput,
+  shellPromise: (...args: any[]) => mockExecute(...args),
+  execFilePromise: (...args: any[]) => mockExecute(...args),
 }));
 
 jest.mock('server/lib/logger', () => ({
@@ -140,7 +142,7 @@ describe('codefresh cli external secret resolution', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockDeployQuery.mockReset();
-    mockShellPromise.mockResolvedValue('codefresh-run-id\n');
+    mockExecute.mockResolvedValue('codefresh-run-id\n');
     mockGetAllConfigs.mockResolvedValue({ secretProviders });
     mockProcessSecretRefs.mockImplementation(({ secretRefs }) => ({
       secretRefs,
@@ -167,20 +169,21 @@ describe('codefresh cli external secret resolution', () => {
 
     await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).resolves.toBe('codefresh-run-id');
 
-    const [command, options] = mockShellPromise.mock.calls[0];
-    expect(command).toContain("-v 'API_TOKEN'='resolved-token'");
+    const [file, command, options] = mockExecute.mock.calls[0];
+    expect(file).toBe('codefresh');
+    expect(command).toContain('--variable=API_TOKEN=resolved-token');
     expect(mockCreateOrUpdateNamespace).toHaveBeenCalledWith({
       name: 'env-build-uuid',
       buildUUID: 'build-uuid',
       staticEnv: false,
       waitForReady: true,
     });
-    expect(options.redactCommand).toContain("-v 'API_TOKEN'='[REDACTED]'");
+    expect(options.redactCommand).toContain("'--variable=API_TOKEN=[REDACTED]'");
     expect(options.redactCommand).not.toContain('resolved-token');
     expect(mockLoggerDebug.mock.calls.map(([message]) => message).join('\n')).not.toContain('resolved-token');
   });
 
-  test('shell-quotes resolved secret values before invoking Codefresh', async () => {
+  test('passes resolved secret values as one literal Codefresh argument', async () => {
     mockReadNamespacedSecret.mockResolvedValue({
       body: {
         data: {
@@ -192,21 +195,44 @@ describe('codefresh cli external secret resolution', () => {
 
     await codefreshDeploy(deploy, deploy.build, deploy.deployable);
 
-    const [command, options] = mockShellPromise.mock.calls[0];
-    expect(command).toContain("-v 'API_TOKEN'='resolved'\\''token $(echo bad)'");
-    expect(command).not.toContain("resolved'token $(echo bad)");
-    expect(options.redactCommand).toContain("-v 'API_TOKEN'='[REDACTED]'");
+    const [file, command, options] = mockExecute.mock.calls[0];
+    expect(file).toBe('codefresh');
+    expect(command).toContain("--variable=API_TOKEN=resolved'token $(echo bad)");
+    expect(options.redactCommand).toContain("'--variable=API_TOKEN=[REDACTED]'");
   });
 
   test('uses an immutable source ref for Codefresh while preserving the branch default', async () => {
     const deploy = createDeploy({ env: { API_URL: 'https://example.invalid' } });
 
     await codefreshDeploy(deploy, deploy.build, deploy.deployable, 'immutable-sha');
-    expect(mockShellPromise.mock.calls[0][0]).toContain("-b 'immutable-sha'");
+    expect(mockExecute.mock.calls[0][1][2]).toEqual('--branch=immutable-sha');
 
-    mockShellPromise.mockClear();
+    mockExecute.mockClear();
     await codefreshDeploy(deploy, deploy.build, deploy.deployable);
-    expect(mockShellPromise.mock.calls[0][0]).toContain("-b 'feature-branch'");
+    expect(mockExecute.mock.calls[0][1][2]).toEqual('--branch=feature-branch');
+  });
+
+  test('passes deploy and destroy triggers as one literal argument', async () => {
+    const trigger = "deploy' $(id); --extra\nnext";
+    const deploy = createDeploy({
+      env: { API_URL: 'https://example.invalid' },
+      deployable: { ...createDeploy().deployable, deployTrigger: trigger, destroyTrigger: trigger },
+    });
+    await codefreshDeploy(deploy, deploy.build, deploy.deployable);
+    await codefreshDestroy(deploy);
+    expect(mockExecute).toHaveBeenCalledTimes(2);
+    for (const [file, args] of mockExecute.mock.calls) {
+      expect(file).toBe('codefresh');
+      expect(args.slice(-2)).toEqual([`--trigger=${trigger}`, '-d']);
+    }
+  });
+
+  test('redacts an echoed secret from debug output while preserving returned stdout', async () => {
+    const deploy = createDeploy();
+    mockExecute.mockResolvedValueOnce('resolved-token\n');
+    await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).resolves.toBe('resolved-token');
+    expect(mockExecute.mock.calls[0][2].redactValues).toContain('resolved-token');
+    expect(mockLoggerDebug.mock.calls.map(([message]) => message).join('\n')).not.toContain('resolved-token');
   });
 
   test('resolves destroy env secret refs before invoking Codefresh and cleans up synced resources', async () => {
@@ -224,17 +250,18 @@ describe('codefresh cli external secret resolution', () => {
 
     await expect(codefreshDestroy(deploy)).resolves.toBe('codefresh-run-id');
 
-    const [command, options] = mockShellPromise.mock.calls[0];
-    expect(command).toContain("codefresh run 'deployable/destroy' -b 'deployable-branch'");
-    expect(command).toContain("-v 'BUILD_UUID'='build-uuid'");
-    expect(command).toContain("-v 'API_TOKEN'='resolved-token'");
-    expect(options.redactCommand).toContain("-v 'API_TOKEN'='[REDACTED]'");
+    const [file, command, options] = mockExecute.mock.calls[0];
+    expect(file).toBe('codefresh');
+    expect(command.slice(0, 3)).toEqual(['run', 'deployable/destroy', '--branch=deployable-branch']);
+    expect(command).toContain('--variable=BUILD_UUID=build-uuid');
+    expect(command).toContain('--variable=API_TOKEN=resolved-token');
+    expect(options.redactCommand).toContain("'--variable=API_TOKEN=[REDACTED]'");
     expect(mockDeleteExternalSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
     expect(mockDeleteNamespacedSecret).toHaveBeenCalledWith('example-service-aws-secrets', 'env-build-uuid');
   });
 
   test('cleans up synced resources when Codefresh destroy fails', async () => {
-    mockShellPromise.mockRejectedValueOnce(new Error('destroy failed'));
+    mockExecute.mockRejectedValueOnce(new Error('destroy failed'));
     const deploy = createDeploy({
       env: {},
       build: {
@@ -267,11 +294,12 @@ describe('codefresh cli external secret resolution', () => {
 
     await codefreshDeploy(deploy, deploy.build, deploy.deployable);
 
-    const [command, options] = mockShellPromise.mock.calls[0];
+    const [file, command, options] = mockExecute.mock.calls[0];
+    expect(file).toBe('codefresh');
     expect(command).toContain(
-      `-v 'CONFIG'='${JSON.stringify({ credentials: { token: 'nested-token' }, mode: 'test' })}'`
+      `--variable=CONFIG=${JSON.stringify({ credentials: { token: 'nested-token' }, mode: 'test' })}`
     );
-    expect(options.redactCommand).toContain("-v 'CONFIG'='[REDACTED]'");
+    expect(options.redactCommand).toContain("'--variable=CONFIG=[REDACTED]'");
   });
 
   test('preserves no-secret behavior without loading secret provider config', async () => {
@@ -285,7 +313,7 @@ describe('codefresh cli external secret resolution', () => {
 
     expect(mockGetAllConfigs).not.toHaveBeenCalled();
     expect(mockProcessSecretRefs).not.toHaveBeenCalled();
-    expect(mockShellPromise.mock.calls[0][0]).toContain("-v 'API_URL'='https://example.invalid'");
+    expect(mockExecute.mock.calls[0][1]).toContain('--variable=API_URL=https://example.invalid');
   });
 
   test('fails before invoking Codefresh when a secret provider is missing', async () => {
@@ -296,7 +324,7 @@ describe('codefresh cli external secret resolution', () => {
       'external secret providers are not configured'
     );
 
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
   });
 
   test('propagates CLI teardown failures so the owning delete worker can retry', async () => {
@@ -364,7 +392,7 @@ describe('generic CLI deploy lifecycle', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockDeployQuery.mockReset();
-    mockShellPromise.mockReset().mockResolvedValue('command-output');
+    mockExecute.mockReset().mockResolvedValue('command-output');
     mockGetAllConfigs.mockReset().mockResolvedValue(databaseSettings);
   });
 
@@ -380,7 +408,7 @@ describe('generic CLI deploy lifecycle', () => {
       { deployUuid: 'aurora-restore-deploy-uuid', serviceName: 'aurora-restore-service' },
       expect.any(Function)
     );
-    expect(mockShellPromise).toHaveBeenCalledWith(
+    expect(mockExecute).toHaveBeenCalledWith(
       `AWS_REGION=us-east-1 pnpm run babel-node -- scripts/aurora-helper.ts deploy --stackName build-uuid-build-sha --serviceName aurora-restore-service --buildUUID build-uuid --restore latest --settings '${JSON.stringify(
         databaseSettings.auroraRestoreSettings
       )}'`
@@ -390,7 +418,7 @@ describe('generic CLI deploy lifecycle', () => {
   test('cliDeploy fetches relations and propagates shell failures', async () => {
     const failure = new Error('helper failed');
     const deploy = createCliDeploy();
-    mockShellPromise.mockRejectedValueOnce(failure);
+    mockExecute.mockRejectedValueOnce(failure);
 
     await expect(cliDeploy(deploy)).rejects.toBe(failure);
 
@@ -409,7 +437,7 @@ describe('generic CLI deploy lifecycle', () => {
 
     await deleteDeploy(deploy);
 
-    expect(mockShellPromise).toHaveBeenCalledWith(
+    expect(mockExecute).toHaveBeenCalledWith(
       `AWS_REGION=us-west-2 pnpm run babel-node -- scripts/rds-helper.ts destroy --stackName build-uuid-build-sha --serviceName rds-service --buildUUID build-uuid --snapshot latest --settings '${JSON.stringify(
         databaseSettings.rdsRestoreSettings
       )}'`
@@ -421,19 +449,16 @@ describe('generic CLI deploy lifecycle', () => {
     ['failed', false],
     [undefined, undefined],
   ])('waitForCodefresh maps status %p to %p', async (status, expected) => {
-    mockShellPromise.mockResolvedValueOnce(undefined).mockResolvedValueOnce(status);
+    mockExecute.mockResolvedValueOnce(undefined).mockResolvedValueOnce(status);
 
     await expect(waitForCodefresh('codefresh-id')).resolves.toBe(expected);
 
-    expect(mockShellPromise).toHaveBeenNthCalledWith(1, 'codefresh wait -t 60 codefresh-id');
-    expect(mockShellPromise).toHaveBeenNthCalledWith(
-      2,
-      'codefresh get build codefresh-id --output json | jq -r ".status"'
-    );
+    expect(mockExecute).toHaveBeenNthCalledWith(1, 'codefresh wait -t 60 codefresh-id');
+    expect(mockExecute).toHaveBeenNthCalledWith(2, 'codefresh get build codefresh-id --output json | jq -r ".status"');
   });
 
   test('waitForCodefresh translates CLI failures into the public pipeline error', async () => {
-    mockShellPromise.mockRejectedValueOnce(new Error('timed out'));
+    mockExecute.mockRejectedValueOnce(new Error('timed out'));
 
     await expect(waitForCodefresh('codefresh-id')).rejects.toThrow(
       'Codefresh Pipeline Failure. Status was Error: timed out'
@@ -459,7 +484,7 @@ describe('generic CLI deploy lifecycle', () => {
     const withGraphFetched = jest.fn().mockResolvedValue([codefresh, aurora, inactive, docker]);
     const where = jest.fn(() => ({ withGraphFetched }));
     mockDeployQuery.mockReturnValue({ where });
-    mockShellPromise.mockResolvedValue('destroy-id\n');
+    mockExecute.mockResolvedValue('destroy-id\n');
 
     await deleteBuild({ id: 42, uuid: 'build-uuid' } as any);
 
@@ -467,10 +492,10 @@ describe('generic CLI deploy lifecycle', () => {
     expect(mockWithLogContext).toHaveBeenCalledTimes(2);
     expect(codefresh.$query().patch).toHaveBeenCalledWith({ sha: null });
     expect(
-      mockShellPromise.mock.calls.some(([command]) => command.includes("codefresh run 'deployable/destroy'"))
+      mockExecute.mock.calls.some(([file, args]) => file === 'codefresh' && args.includes('deployable/destroy'))
     ).toBe(true);
     expect(
-      mockShellPromise.mock.calls.some(([command]) =>
+      mockExecute.mock.calls.some(([command]) =>
         command.includes('scripts/aurora-helper.ts destroy --stackName build-uuid-build-sha')
       )
     ).toBe(true);
@@ -486,7 +511,7 @@ describe('generic CLI deploy lifecycle', () => {
 
     await deleteBuild({ id: 42, uuid: 'build-uuid' } as any);
 
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
     expect(mockLoggerInfo).not.toHaveBeenCalledWith('CLI: deleting');
   });
 
@@ -499,15 +524,15 @@ describe('generic CLI deploy lifecycle', () => {
         destroyTrigger: undefined,
       },
     });
-    mockShellPromise.mockResolvedValueOnce('deploy-id\n');
+    mockExecute.mockResolvedValueOnce('deploy-id\n');
 
     await expect(codefreshDeploy(deploy, deploy.build, deploy.deployable)).resolves.toBe('deploy-id');
-    expect(mockShellPromise.mock.calls[0][0]).not.toContain('--trigger');
+    expect(mockExecute.mock.calls[0][1].some((arg: string) => arg.startsWith('--trigger='))).toBe(false);
 
-    mockShellPromise.mockClear();
-    mockShellPromise.mockResolvedValueOnce(undefined);
+    mockExecute.mockClear();
+    mockExecute.mockResolvedValueOnce(undefined);
     await expect(codefreshDestroy(deploy)).resolves.toBeUndefined();
-    expect(mockShellPromise.mock.calls[0][0]).not.toContain('--trigger');
+    expect(mockExecute.mock.calls[0][1].some((arg: string) => arg.startsWith('--trigger='))).toBe(false);
     expect(mockDeleteExternalSecret).not.toHaveBeenCalled();
     expect(mockUpdateLogContext).toHaveBeenCalledWith({ buildUuid: 'build-uuid' });
   });

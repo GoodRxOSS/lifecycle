@@ -117,6 +117,8 @@ jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
 
 import AgentThreadRuntimeControlsService, { AgentThreadRuntimeControlsError } from '../ThreadRuntimeControlsService';
 import { SYSTEM_AGENT_DEFINITIONS } from '../systemAgentDefinitions';
+import { DEFAULT_AGENT_APPROVAL_POLICY } from '../types';
+import type AgentThread from 'server/models/AgentThread';
 
 const userIdentity = {
   userId: 'sample-user',
@@ -199,6 +201,7 @@ function mockBaseContext() {
   mockListEnabledConnectionsForUser.mockResolvedValue([
     {
       slug: 'sample-mcp',
+      transport: { type: 'http', url: 'https://mcp.example.test' },
       name: 'Sample MCP',
       description: 'Provides sample context.',
       scope: 'global',
@@ -580,6 +583,7 @@ describe('AgentThreadRuntimeControlsService', () => {
     mockListEnabledConnectionsForUser.mockResolvedValue([
       {
         slug: 'shared-sample-mcp',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'Shared Sample MCP',
         description: 'Provides shared sample context.',
         scope: 'global',
@@ -607,10 +611,259 @@ describe('AgentThreadRuntimeControlsService', () => {
     expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[0].id]);
   });
 
+  it('treats MCP servers whose tools are discovered on first session use as available', async () => {
+    mockGetSelectedAgentDefinitionId.mockReturnValue('system.agent');
+    mockGetSystemAgentDefinition.mockResolvedValue(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio-mcp',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        name: 'Pending stdio MCP',
+        description: 'Runs inside the session workspace.',
+        scope: 'global',
+        connectionRequired: false,
+        configured: false,
+        stale: false,
+        validationError: null,
+        discoveredTools: [],
+        sharedDiscoveredTools: [],
+        discoveryPending: true,
+      },
+    ]);
+
+    const state = await AgentThreadRuntimeControlsService.getState({
+      threadId: 'thread-1',
+      userIdentity,
+    });
+
+    expect(state.mcp.connections).toEqual([
+      expect.objectContaining({
+        label: 'Pending stdio MCP',
+        selected: true,
+        available: true,
+      }),
+    ]);
+    expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[0].id]);
+  });
+
+  it.each([
+    { agentId: 'custom.sample-agent', sourceKind: 'workspace_session', disabled: false },
+    { agentId: 'system.debug', sourceKind: 'build_context_chat', disabled: false },
+    { agentId: 'system.agent', sourceKind: 'workspace_session', disabled: true },
+  ])('keeps stdio unavailable without an allowed write capability: %j', async ({ agentId, sourceKind, disabled }) => {
+    mockGetSelectedAgentDefinitionId.mockReturnValue(agentId);
+    mockInferDefaultAgentSourceKind.mockReturnValue(sourceKind);
+    mockGetSystemAgentDefinition.mockResolvedValue(
+      SYSTEM_AGENT_DEFINITIONS[agentId as keyof typeof SYSTEM_AGENT_DEFINITIONS]
+    );
+    mockResolveSessionContext.mockResolvedValue({
+      repoFullName: 'example-org/example-repo',
+      approvalPolicy: { defaultMode: 'allow', rules: {} },
+      capabilityPolicy: disabled ? { availability: { external_mcp_write: 'disabled' } } : undefined,
+    });
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio',
+        name: 'Pending stdio',
+        scope: 'global',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        discoveryPending: true,
+      },
+      {
+        slug: 'cached-stdio',
+        name: 'Cached stdio',
+        scope: 'global',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        discoveredTools: [{ name: 'readSample', annotations: { readOnlyHint: true } }],
+      },
+      {
+        slug: 'http-read',
+        name: 'HTTP read',
+        scope: 'global',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
+        discoveredTools: [{ name: 'readSample', annotations: { readOnlyHint: true } }],
+      },
+    ]);
+
+    const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    expect(state.mcp.connections).toEqual([
+      expect.objectContaining({ label: 'Pending stdio', available: false, selected: false }),
+      expect.objectContaining({ label: 'Cached stdio', available: false, selected: false }),
+      expect.objectContaining({ label: 'HTTP read', available: true, selected: true }),
+    ]);
+    expect(state.mcp.selectedChoiceIds).toEqual([state.mcp.connections[2].id]);
+    await expect(
+      AgentThreadRuntimeControlsService.patchChoices({
+        threadId: 'thread-1',
+        userIdentity,
+        mcpChoiceIds: [state.mcp.connections[0].id],
+      })
+    ).rejects.toMatchObject({ code: 'policy_denied' });
+  });
+
+  it.each([
+    { availability: 'admin_only', available: false },
+    { availability: 'all_users', available: true },
+  ])(
+    'respects write availability for a custom definition that already declares write: %j',
+    async ({ availability, available }) => {
+      mockGetUserDefinition.mockResolvedValue({
+        ...customDefinition,
+        optionalCapabilityRefs: [...customDefinition.optionalCapabilityRefs, 'external_mcp_write'],
+      });
+      mockResolveSessionContext.mockResolvedValue({
+        repoFullName: 'example-org/example-repo',
+        approvalPolicy: { defaultMode: 'require_approval', rules: {} },
+        capabilityPolicy: { availability: { external_mcp_write: availability } },
+      });
+      mockListEnabledConnectionsForUser.mockResolvedValue([
+        {
+          slug: 'pending-stdio',
+          name: 'Pending stdio',
+          scope: 'global',
+          transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+          discoveryPending: true,
+        },
+      ]);
+      const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+      expect(state.mcp.connections[0]).toMatchObject({ available, selected: available });
+    }
+  );
+
+  it('excludes a saved stdio selection from admission after write availability is disabled', async () => {
+    mockGetSelectedAgentDefinitionId.mockReturnValue('system.agent');
+    mockGetSystemAgentDefinition.mockResolvedValue(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio',
+        name: 'Pending stdio',
+        scope: 'global',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        discoveryPending: true,
+      },
+    ]);
+    const original = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    mockGetRuntimeControlChoices.mockReturnValue({
+      version: 1,
+      toolChoiceIds: [],
+      mcpChoiceIds: [original.mcp.connections[0].id],
+    });
+    const capabilityPolicy = { availability: { external_mcp_write: 'disabled' as const } };
+    const approvalPolicy = DEFAULT_AGENT_APPROVAL_POLICY;
+    mockResolveSessionContext.mockResolvedValue({ capabilityPolicy, approvalPolicy });
+    const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    expect(state.mcp.connections[0]).toMatchObject({ selected: true, available: false });
+    expect(state.mcp.selectedChoiceIds).toEqual([]);
+    const choices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
+      thread: thread as unknown as AgentThread,
+      userIdentity,
+      definition: SYSTEM_AGENT_DEFINITIONS['system.develop'],
+      sourceKind: 'workspace_session',
+      capabilityPolicy,
+      approvalPolicy,
+      customAgentCreationPolicy: undefined,
+    });
+    expect(choices.selectedRuntimeMcpConnectionRefs).toEqual([]);
+    expect(choices.selectedRuntimeCapabilityIds).not.toContain('external_mcp_write');
+  });
+
+  it.each([
+    { availability: 'admin_only', reserved: false, available: false },
+    { availability: 'all_users', reserved: false, available: true },
+    { availability: 'all_users', reserved: true, available: false },
+  ])(
+    'checks effective write authority for a custom workspace fallback: %j',
+    async ({ availability, reserved, available }) => {
+      mockGetUserDefinition.mockResolvedValue({
+        ...customDefinition,
+        optionalCapabilityRefs: [...customDefinition.optionalCapabilityRefs, 'workspace_shell'],
+      });
+      mockResolveSessionContext.mockResolvedValue({
+        approvalPolicy: DEFAULT_AGENT_APPROVAL_POLICY,
+        capabilityPolicy: { availability: { external_mcp_write: availability } },
+        customAgentCreationPolicy: reserved
+          ? { capabilityAvailability: { external_mcp_write: 'reserved' } }
+          : undefined,
+      });
+      mockListEnabledConnectionsForUser.mockResolvedValue([
+        {
+          slug: 'pending-stdio',
+          name: 'Pending stdio',
+          scope: 'global',
+          transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+          discoveryPending: true,
+        },
+      ]);
+      const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+      expect(state.mcp.connections[0]).toMatchObject({ available, selected: available });
+    }
+  );
+
+  it('withholds a saved stdio selection when optional workspace shell is deselected', async () => {
+    const definition = {
+      ...customDefinition,
+      optionalCapabilityRefs: [...customDefinition.optionalCapabilityRefs, 'workspace_shell'],
+    };
+    const capabilityPolicy = { availability: { external_mcp_write: 'all_users' as const } };
+    mockGetUserDefinition.mockResolvedValue(definition);
+    mockResolveSessionContext.mockResolvedValue({ approvalPolicy: DEFAULT_AGENT_APPROVAL_POLICY, capabilityPolicy });
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio',
+        name: 'Pending stdio',
+        scope: 'global',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        discoveryPending: true,
+      },
+    ]);
+    const original = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    expect(original.mcp.connections[0]).toMatchObject({ available: true, selected: true });
+    mockGetRuntimeControlChoices.mockReturnValue({
+      version: 1,
+      toolChoiceIds: [],
+      mcpChoiceIds: [original.mcp.connections[0].id],
+    });
+    const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    expect(state.mcp.connections[0]).toMatchObject({ available: false, selected: true });
+    expect(state.mcp.selectedChoiceIds).toEqual([]);
+    const choices = await AgentThreadRuntimeControlsService.resolveRunAdmissionChoices({
+      thread: thread as unknown as AgentThread,
+      userIdentity,
+      definition: definition as any,
+      sourceKind: 'workspace_session',
+      approvalPolicy: DEFAULT_AGENT_APPROVAL_POLICY,
+      capabilityPolicy,
+      customAgentCreationPolicy: undefined,
+    });
+    expect(choices.selectedRuntimeCapabilityIds).not.toContain('workspace_shell');
+    expect(choices.selectedRuntimeMcpConnectionRefs).toEqual([]);
+  });
+
+  it('does not treat a write approval deny as unavailable when exact tool rules can override it', async () => {
+    mockGetSelectedAgentDefinitionId.mockReturnValue('system.agent');
+    mockGetSystemAgentDefinition.mockResolvedValue(SYSTEM_AGENT_DEFINITIONS['system.agent']);
+    mockResolveSessionContext.mockResolvedValue({
+      repoFullName: 'example-org/example-repo',
+      approvalPolicy: { defaultMode: 'allow', rules: { external_mcp_write: 'deny' } },
+    });
+    mockListEnabledConnectionsForUser.mockResolvedValue([
+      {
+        slug: 'pending-stdio',
+        name: 'Pending stdio',
+        scope: 'global',
+        transport: { type: 'stdio', command: 'node', args: ['server.mjs'] },
+        discoveryPending: true,
+      },
+    ]);
+    const state = await AgentThreadRuntimeControlsService.getState({ threadId: 'thread-1', userIdentity });
+    expect(state.mcp.connections[0]).toMatchObject({ available: true, selected: true });
+  });
+
   it('marks MCP connections with validation errors unavailable and rejects saved choices', async () => {
     mockListEnabledConnectionsForUser.mockResolvedValue([
       {
         slug: 'broken-sample-mcp',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'Broken Sample MCP',
         description: 'Broken sample context.',
         scope: 'global',
@@ -654,6 +907,7 @@ describe('AgentThreadRuntimeControlsService', () => {
     mockListEnabledConnectionsForUser.mockResolvedValue([
       {
         slug: 'needs-setup',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'Needs setup',
         description: 'Not configured.',
         scope: 'global',
@@ -666,6 +920,7 @@ describe('AgentThreadRuntimeControlsService', () => {
       },
       {
         slug: 'stale-connection',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'Stale connection',
         description: 'Needs refresh.',
         scope: 'global',
@@ -678,6 +933,7 @@ describe('AgentThreadRuntimeControlsService', () => {
       },
       {
         slug: 'no-tools',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'No tools',
         description: 'Connected but empty.',
         scope: 'global',
@@ -690,6 +946,7 @@ describe('AgentThreadRuntimeControlsService', () => {
       },
       {
         slug: 'available-without-description',
+        transport: { type: 'http', url: 'https://mcp.example.test' },
         name: 'Available without description',
         description: null,
         scope: 'global',
