@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -218,6 +218,38 @@ test('workspace command captures file changes after operation completion', async
   assert.equal(result.fileChanges.length, 1);
   assert.equal(result.fileChanges[0].path, 'sample.txt');
   assert.equal(result.fileChanges[0].kind, 'edited');
+});
+
+test('workspace command captures regular files without reading directory symlink aliases', async () => {
+  const directory = resolve(workspaceRoot, 'capture-directory');
+  const directoryAlias = resolve(workspaceRoot, 'capture-directory-link');
+  const rootAlias = resolve(workspaceRoot, 'capture-root-link');
+  const fileAlias = resolve(workspaceRoot, 'capture-file-link.txt');
+  await mkdir(directory);
+  await writeFile(resolve(directory, 'value.txt'), 'before\n', 'utf8');
+  await symlink(directory, directoryAlias);
+  await symlink(workspaceRoot, rootAlias);
+  await symlink(resolve(directory, 'value.txt'), fileAlias);
+
+  try {
+    const result = await gateway.runWorkspaceCommand({
+      command: 'printf "after\\n" > capture-file-link.txt; printf "executed"',
+      captureFileChanges: true,
+    });
+
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.stdout, 'executed');
+    assert.equal(await readFile(resolve(directory, 'value.txt'), 'utf8'), 'after\n');
+    assert.equal(result.fileChanges.length, 1);
+    assert.equal(result.fileChanges[0].path, 'capture-directory/value.txt');
+    assert.equal(result.fileChanges[0].kind, 'edited');
+    assert.match(result.fileChanges[0].unifiedDiff, /-before\n\+after/);
+  } finally {
+    await rm(directoryAlias, { force: true });
+    await rm(rootAlias, { force: true });
+    await rm(fileAlias, { force: true });
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('workspace command rejects a cwd symlink that resolves outside the workspace', async () => {
