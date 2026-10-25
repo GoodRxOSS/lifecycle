@@ -40,6 +40,15 @@ import { LIFECYCLE_MODE } from './src/shared/config';
 import { isMcpServingProcess } from './src/server/mcp/config';
 import { handleMcpHttpRequest as mcpHttpRequestHandler } from './src/server/mcp/handler';
 import { createLifecycleMcpRegistry } from './src/server/mcp/tools';
+import {
+  AUTHENTICATION_UNAVAILABLE,
+  canServeLogs,
+  isInteractiveAuthUnavailable,
+  isLocalAuthDisabled,
+  isLogHttpPath,
+  isWorkerProbe,
+} from './src/server/lib/serverAccess';
+import { readLogStreamTicketClaims, type LogStreamTarget } from './src/server/lib/logStreamTicket';
 import { streamK8sLogs, AbortHandle } from './src/server/lib/k8sStreamer';
 import SitesService from './src/server/services/sites';
 import { handleSitesRequest } from './src/server/lib/sites/gateway';
@@ -72,6 +81,10 @@ import {
   type ChatPreviewPathMatch,
 } from './src/server/lib/agentSession/chatPreviewProxy';
 import { verifyChatPreviewGrant } from './src/server/lib/agentSession/chatPreviewGrant';
+import {
+  createWorkspaceEditorGrant,
+  verifyWorkspaceEditorGrant,
+} from './src/server/lib/agentSession/workspaceEditorGrant';
 import { parseChatPreviewHost } from './src/server/lib/agentSession/chatPreviewFactory';
 import { resolveChatPreviewSessionForHost } from './src/server/lib/agentSession/chatPreviewHostResolver';
 
@@ -179,8 +192,8 @@ async function isAuthorizedChatPreviewRequest(
   match: ChatPreviewPathMatch,
   queryGrant?: string | null
 ): Promise<boolean> {
-  // Auth disabled (local dev) keeps the editor's behavior: open, same as that proxy.
-  if (process.env.ENABLE_AUTH !== 'true') {
+  if (isInteractiveAuthUnavailable()) return false;
+  if (isLocalAuthDisabled()) {
     return true;
   }
 
@@ -202,33 +215,6 @@ function getSessionWorkspaceEditorCookiePath(sessionId: string): string {
   return `${SESSION_WORKSPACE_EDITOR_PATH_PREFIX}${encodeURIComponent(sessionId)}`;
 }
 
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  const payloadSegment = token.split('.')[1];
-  if (!payloadSegment) {
-    return null;
-  }
-
-  try {
-    const normalizedPayload = payloadSegment.replace(/-/g, '+').replace(/_/g, '/');
-    const paddedPayload = normalizedPayload.padEnd(
-      normalizedPayload.length + ((4 - (normalizedPayload.length % 4)) % 4),
-      '='
-    );
-    return JSON.parse(Buffer.from(paddedPayload, 'base64').toString('utf8')) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-function getJwtCookieMaxAgeSeconds(token: string): number | null {
-  const exp = decodeJwtPayload(token)?.exp;
-  if (typeof exp !== 'number' || !Number.isFinite(exp)) {
-    return null;
-  }
-
-  return Math.max(Math.floor(exp - Date.now() / 1000), 0);
-}
-
 function isSendableCloseCode(code?: number): code is number {
   if (typeof code !== 'number') {
     return false;
@@ -241,14 +227,18 @@ function isSendableCloseCode(code?: number): code is number {
   return ![1004, 1005, 1006, 1015].includes(code);
 }
 
-function buildSessionWorkspaceEditorCookie(request: IncomingMessage, sessionId: string, token: string): string {
+function buildSessionWorkspaceEditorCookie(
+  request: IncomingMessage,
+  sessionId: string,
+  grant: string,
+  maxAgeSeconds: number
+): string {
   const isSecure =
     request.headers['x-forwarded-proto'] === 'https' || (request.socket as { encrypted?: boolean }).encrypted === true;
-  const maxAgeSeconds = getJwtCookieMaxAgeSeconds(token);
   const cookieParts = [
-    `${SESSION_WORKSPACE_EDITOR_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    `${SESSION_WORKSPACE_EDITOR_COOKIE_NAME}=${encodeURIComponent(grant)}`,
     `Path=${getSessionWorkspaceEditorCookiePath(sessionId)}`,
-    ...(maxAgeSeconds === null ? [] : [`Max-Age=${maxAgeSeconds}`]),
+    `Max-Age=${maxAgeSeconds}`,
     'HttpOnly',
     'SameSite=Lax',
   ];
@@ -293,7 +283,6 @@ function buildSessionWorkspaceEditorServiceUrl(
 type SessionWorkspaceEditorTarget = {
   url: URL;
   headers?: Record<string, string>;
-  // SECURITY: remote (untrusted) editor backends must not receive Lifecycle credentials nor set cookies on our origin.
   isRemote: boolean;
 };
 
@@ -528,7 +517,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
 
   try {
     const queryToken = typeof parsedUrl.query.token === 'string' ? parsedUrl.query.token : null;
-    const session = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
+    const { session } = await resolveOwnedAgentSession(request, match.sessionId, queryToken);
 
     if (clientClosedEarly) {
       return;
@@ -546,7 +535,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
       true
     );
     const targetUrl = target.url;
-    const proxyHeaders = buildProxyHeaders(request, targetUrl, forwardedPrefix, target.headers, true, target.isRemote);
+    const proxyHeaders = buildProxyHeaders(request, targetUrl, forwardedPrefix, target.headers, true, true);
 
     const upstreamUrl = toUpgradeRequestUrl(targetUrl);
     await new Promise<void>((resolve, reject) => {
@@ -577,7 +566,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
           serializeSocketHttpResponse({
             statusCode: upstreamRes.statusCode || 101,
             statusMessage: upstreamRes.statusMessage,
-            headers: target.isRemote ? stripSetCookieHeaders(upstreamRes.headers) : upstreamRes.headers,
+            headers: stripSetCookieHeaders(upstreamRes.headers),
           })
         );
 
@@ -663,7 +652,7 @@ async function handleSessionWorkspaceEditorUpgrade(request: IncomingMessage, soc
               serializeSocketHttpResponse({
                 statusCode: upstreamRes.statusCode || 502,
                 statusMessage: upstreamRes.statusMessage,
-                headers: upstreamRes.headers,
+                headers: stripSetCookieHeaders(upstreamRes.headers),
                 body: Buffer.concat(chunks),
               })
             );
@@ -942,7 +931,8 @@ async function resolveOwnedAgentSession(
   request: IncomingMessage,
   sessionId: string,
   queryToken?: string | null
-): Promise<any> {
+): Promise<{ session: any; tokenExpiresAt?: number }> {
+  if (isInteractiveAuthUnavailable()) throw new Error(AUTHENTICATION_UNAVAILABLE.message);
   const AgentSessionService = (await import('./src/server/services/agentSession')).default;
   const session = await AgentSessionService.getSession(sessionId);
   if (!session || session.status !== 'active') {
@@ -958,22 +948,24 @@ async function resolveOwnedAgentSession(
   }
 
   if (process.env.ENABLE_AUTH === 'true') {
-    const headerToken = request.headers.authorization?.split(' ')[1];
-    const cookieToken = parseCookieHeader(request.headers.cookie)[SESSION_WORKSPACE_EDITOR_COOKIE_NAME];
-    const rawToken = headerToken || queryToken || cookieToken;
-
-    if (!rawToken) {
-      throw new Error('Authentication token is required');
+    const headerToken = /^Bearer\s+(\S+)$/i.exec(request.headers.authorization || '')?.[1];
+    const rawToken = queryToken || headerToken;
+    if (rawToken) {
+      const { verifyBearerToken } = await import('./src/server/lib/auth');
+      const authResult = await verifyBearerToken(rawToken);
+      if (!authResult.success || authResult.payload?.sub !== session.userId) {
+        throw new Error('Forbidden: you do not own this session');
+      }
+      return { session, tokenExpiresAt: authResult.payload.exp };
     }
 
-    const { verifyBearerToken } = await import('./src/server/lib/auth');
-    const authResult = await verifyBearerToken(rawToken);
-    if (!authResult.success || authResult.payload?.sub !== session.userId) {
-      throw new Error('Forbidden: you do not own this session');
+    const grant = parseCookieHeader(request.headers.cookie)[SESSION_WORKSPACE_EDITOR_COOKIE_NAME];
+    if (!verifyWorkspaceEditorGrant(grant, { sessionId, userId: session.userId })) {
+      throw new Error('Authentication failed. Reopen the editor from Lifecycle.');
     }
   }
 
-  return session;
+  return { session };
 }
 
 function closeSocket(ws: WebSocket, code: number, reason: string) {
@@ -1023,13 +1015,19 @@ async function handleSessionWorkspaceEditorHttp(
 
   try {
     const queryToken = typeof query.token === 'string' ? query.token : null;
-    const session = await resolveOwnedAgentSession(req, match.sessionId, queryToken);
+    const { session, tokenExpiresAt } = await resolveOwnedAgentSession(req, match.sessionId, queryToken);
 
     // The token only bootstraps the cookie; redirect to the clean URL so the credential never
     // lingers in the address bar or history and code-server's own requests stay cookie-only.
     if (process.env.ENABLE_AUTH === 'true' && queryToken) {
+      const { grant, maxAgeSeconds } = createWorkspaceEditorGrant({
+        sessionId: match.sessionId,
+        userId: session.userId,
+        tokenExpiresAt: tokenExpiresAt ?? NaN,
+      });
       res.statusCode = 302;
-      appendSetCookie(res, buildSessionWorkspaceEditorCookie(req, match.sessionId, queryToken));
+      res.setHeader('Cache-Control', 'no-store');
+      appendSetCookie(res, buildSessionWorkspaceEditorCookie(req, match.sessionId, grant, maxAgeSeconds));
       res.setHeader('Location', stripQueryParamsFromRequestUrl(req.url, EDITOR_PROXY_BLOCKED_QUERY_PARAMS));
       res.end();
       return true;
@@ -1043,7 +1041,7 @@ async function handleSessionWorkspaceEditorHttp(
     const forwardedPrefix = getSessionWorkspaceEditorCookiePath(match.sessionId);
     const target = await resolveSessionWorkspaceEditorTarget(session, match.forwardPath, query);
     const targetUrl = target.url;
-    const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix, target.headers, false, target.isRemote);
+    const proxyHeaders = buildProxyHeaders(req, targetUrl, forwardedPrefix, target.headers, false, true);
     await new Promise<void>((resolve, reject) => {
       const proxyReq = requestForTarget(targetUrl)(
         targetUrl,
@@ -1062,16 +1060,6 @@ async function handleSessionWorkspaceEditorHttp(
 
             res.setHeader(key, Array.isArray(value) ? value : value.toString());
           });
-
-          // SECURITY: untrusted remote editor responses must not set cookies on the Lifecycle origin.
-          if (!target.isRemote) {
-            const upstreamSetCookies = proxyRes.headers['set-cookie'] || [];
-            (Array.isArray(upstreamSetCookies) ? upstreamSetCookies : [upstreamSetCookies]).forEach((cookie) => {
-              if (cookie) {
-                appendSetCookie(res, cookie);
-              }
-            });
-          }
 
           proxyRes.on('error', reject);
           proxyRes.on('end', () => resolve());
@@ -1247,11 +1235,141 @@ async function handleSitesGatewayHttp(req: IncomingMessage, res: ServerResponse)
   return true;
 }
 
+type LogStreamAccess = { target: LogStreamTarget } | { legacy: true };
+
+// SECURITY: only explicit local development permits coordinates without a ticket.
+function authorizeLogStreamUpgrade(query: Record<string, string | string[] | undefined>): LogStreamAccess | null {
+  if (!canServeLogs(LIFECYCLE_MODE)) return null;
+  if (query.ticket !== undefined && typeof query.ticket !== 'string') return null;
+  const ticket = typeof query.ticket === 'string' ? query.ticket : null;
+  if (ticket) {
+    const claims = readLogStreamTicketClaims(ticket);
+    return claims
+      ? { target: { namespace: claims.namespace, podName: claims.podName, containerName: claims.containerName } }
+      : null;
+  }
+
+  return query.ticket === undefined && isLocalAuthDisabled() ? { legacy: true } : null;
+}
+
+function parseLegacyLogStreamTarget(query: Record<string, string | string[] | undefined>): LogStreamTarget {
+  const { podName, namespace, containerName } = query;
+  if (
+    !podName ||
+    !namespace ||
+    !containerName ||
+    typeof podName !== 'string' ||
+    typeof namespace !== 'string' ||
+    typeof containerName !== 'string'
+  ) {
+    throw new Error('Missing or invalid required parameters: podName, namespace, containerName');
+  }
+
+  return { podName, namespace, containerName };
+}
+
+function handleLogStreamConnection(ws: WebSocket, request: IncomingMessage, access: LogStreamAccess) {
+  let k8sStreamAbort: AbortHandle | null = null;
+  let logCtx: Record<string, any> = {
+    remoteAddress: request.socket.remoteAddress,
+  };
+
+  try {
+    const { query } = parse(request.url || '', true);
+    const target = 'target' in access ? access.target : parseLegacyLogStreamTarget(query);
+    const { follow: followStr, tailLines: tailLinesStr, timestamps: timestampsStr } = query;
+
+    logCtx = { ...logCtx, ...target };
+    logger.debug(logCtx, 'WebSocket connection established');
+
+    const follow = followStr === 'true';
+    const tailLines = tailLinesStr ? parseInt(tailLinesStr as string, 10) : undefined;
+    const timestamps = timestampsStr === 'true';
+    if (tailLines !== undefined && isNaN(tailLines)) throw new Error('Invalid tailLines parameter.');
+
+    logger.debug(logCtx, 'Initiating K8s log stream');
+    k8sStreamAbort = streamK8sLogs(
+      { ...target, follow, tailLines, timestamps },
+      {
+        onData: (logLine: string) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'log', payload: logLine }));
+          }
+        },
+        onError: (error: Error) => {
+          logger.error({ ...logCtx, err: error }, 'K8s stream error');
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'error', message: `Kubernetes stream error: ${error.message}` }));
+          }
+          ws.close(1011, 'Kubernetes stream error');
+        },
+        onEnd: () => {
+          logger.debug(logCtx, 'K8s stream ended');
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'end', reason: 'ContainerTerminated' }));
+          }
+          ws.close(1000, 'Stream ended');
+        },
+      }
+    );
+  } catch (error: any) {
+    logger.error({ ...logCtx, err: error }, 'WebSocket connection setup error');
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.send(JSON.stringify({ type: 'error', message: `Connection error: ${error.message}` }));
+      closeSocket(ws, 1008, `Connection error: ${error.message}`);
+    }
+    return;
+  }
+
+  ws.on('close', (code, reason) => {
+    const reasonString = reason instanceof Buffer ? reason.toString() : String(reason);
+    logger.debug({ ...logCtx, code, reason: reasonString }, 'WebSocket connection closed by client');
+    if (k8sStreamAbort && typeof k8sStreamAbort.abort === 'function') {
+      logger.debug(logCtx, 'Aborting log stream due to client close');
+      k8sStreamAbort.abort();
+      k8sStreamAbort = null;
+    }
+  });
+
+  ws.on('error', (error) => {
+    logger.warn({ ...logCtx, err: error }, 'WebSocket error');
+    if (k8sStreamAbort && typeof k8sStreamAbort.abort === 'function') {
+      logger.debug(logCtx, 'Aborting log stream due to WebSocket error');
+      k8sStreamAbort.abort();
+      k8sStreamAbort = null;
+    }
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(1011, 'WebSocket error');
+    }
+  });
+}
+
 app.prepare().then(() => {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const parsedUrl = parse(req.url!, true);
+      if (LIFECYCLE_MODE === 'job') {
+        if (isWorkerProbe(req.method, parsedUrl.pathname)) {
+          await handle(req, res, parsedUrl);
+        } else {
+          res.statusCode = 404;
+          res.end('Not found');
+        }
+        return;
+      }
+      if (isLogHttpPath(parsedUrl.pathname) && !canServeLogs(LIFECYCLE_MODE)) {
+        res.statusCode = 403;
+        res.end('Log streaming is unavailable on this server.');
+        return;
+      }
       const chatPreviewHost = parseChatPreviewHost(req.headers.host);
+      if (isInteractiveAuthUnavailable() && (chatPreviewHost || parseSessionWorkspaceEditorPath(parsedUrl.pathname))) {
+        res.statusCode = 503;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'no-store');
+        res.end(JSON.stringify({ error: AUTHENTICATION_UNAVAILABLE }));
+        return;
+      }
       if (chatPreviewHost) {
         const chatPreviewHostMatch = await resolveChatPreviewHostPathMatch(req, parsedUrl.pathname || '/');
         if (
@@ -1302,13 +1420,36 @@ app.prepare().then(() => {
   httpServer.on('upgrade', (request: IncomingMessage, socket, head) => {
     // A throw here would be an uncaughtException that kills the whole server; drop the socket instead.
     try {
-      const { pathname } = parse(request.url!, true);
+      const { pathname, query } = parse(request.url!, true);
+      if (LIFECYCLE_MODE === 'job') {
+        socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+        return;
+      }
+      if (
+        isInteractiveAuthUnavailable() &&
+        (parseSessionWorkspaceEditorPath(pathname) || parseChatPreviewHost(request.headers.host))
+      ) {
+        socket.end(
+          serializeSocketHttpResponse({
+            statusCode: 503,
+            statusMessage: 'Service Unavailable',
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+            body: JSON.stringify({ error: AUTHENTICATION_UNAVAILABLE }),
+          })
+        );
+        return;
+      }
       const connectionLogCtx = { path: pathname, remoteAddress: request.socket.remoteAddress };
 
       if (pathname === LOG_STREAM_PATH) {
+        const access = authorizeLogStreamUpgrade(query);
+        if (!access) {
+          socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+          return;
+        }
         logger.debug(connectionLogCtx, 'Handling upgrade request for log stream');
         wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-          wss.emit('connection', ws, request);
+          handleLogStreamConnection(ws, request, access);
         });
       } else if (parseSessionWorkspaceEditorPath(pathname)) {
         logger.debug(connectionLogCtx, 'WebSocket: upgrade path=session_workspace_editor');
@@ -1320,101 +1461,12 @@ app.prepare().then(() => {
         socket.destroy();
       }
     } catch (error) {
-      logger.warn({ error, url: request.url }, 'WebSocket: upgrade dispatch failed');
+      logger.warn(
+        { errorName: error instanceof Error ? error.name : 'UnknownError' },
+        'WebSocket: upgrade dispatch failed'
+      );
       socket.destroy();
     }
-  });
-
-  wss.on('connection', (ws: WebSocket, request: IncomingMessage) => {
-    let k8sStreamAbort: AbortHandle | null = null;
-    let logCtx: Record<string, any> = {
-      remoteAddress: request.socket.remoteAddress,
-    };
-
-    try {
-      const { query } = parse(request.url || '', true);
-      const {
-        podName,
-        namespace,
-        containerName,
-        follow: followStr,
-        tailLines: tailLinesStr,
-        timestamps: timestampsStr,
-      } = query;
-
-      logCtx = { ...logCtx, podName, namespace, containerName };
-      logger.debug(logCtx, 'WebSocket connection established');
-
-      if (
-        !podName ||
-        !namespace ||
-        !containerName ||
-        typeof podName !== 'string' ||
-        typeof namespace !== 'string' ||
-        typeof containerName !== 'string'
-      ) {
-        throw new Error('Missing or invalid required parameters: podName, namespace, containerName');
-      }
-      const follow = followStr === 'true';
-      const tailLines = tailLinesStr ? parseInt(tailLinesStr as string, 10) : undefined;
-      const timestamps = timestampsStr === 'true';
-      if (tailLines !== undefined && isNaN(tailLines)) throw new Error('Invalid tailLines parameter.');
-
-      logger.debug(logCtx, 'Initiating K8s log stream');
-      k8sStreamAbort = streamK8sLogs(
-        { podName, namespace, containerName, follow, tailLines, timestamps },
-        {
-          onData: (logLine: string) => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'log', payload: logLine }));
-            }
-          },
-          onError: (error: Error) => {
-            logger.error({ ...logCtx, err: error }, 'K8s stream error');
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'error', message: `Kubernetes stream error: ${error.message}` }));
-            }
-            ws.close(1011, 'Kubernetes stream error');
-          },
-          onEnd: () => {
-            logger.debug(logCtx, 'K8s stream ended');
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'end', reason: 'ContainerTerminated' }));
-            }
-            ws.close(1000, 'Stream ended');
-          },
-        }
-      );
-    } catch (error: any) {
-      logger.error({ ...logCtx, err: error }, 'WebSocket connection setup error');
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.send(JSON.stringify({ type: 'error', message: `Connection error: ${error.message}` }));
-        closeSocket(ws, 1008, `Connection error: ${error.message}`);
-      }
-      return;
-    }
-
-    ws.on('close', (code, reason) => {
-      const reasonString = reason instanceof Buffer ? reason.toString() : String(reason);
-      logger.debug({ ...logCtx, code, reason: reasonString }, 'WebSocket connection closed by client');
-      if (k8sStreamAbort && typeof k8sStreamAbort.abort === 'function') {
-        logger.debug(logCtx, 'Aborting log stream due to client close');
-        k8sStreamAbort.abort();
-        k8sStreamAbort = null;
-      }
-    });
-
-    ws.on('error', (error) => {
-      logger.warn({ ...logCtx, err: error }, 'WebSocket error');
-      if (k8sStreamAbort && typeof k8sStreamAbort.abort === 'function') {
-        logger.debug(logCtx, 'Aborting log stream due to WebSocket error');
-        k8sStreamAbort.abort();
-        k8sStreamAbort = null;
-      }
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close(1011, 'WebSocket error');
-      }
-    });
   });
 
   httpServer.listen(port);
@@ -1441,8 +1493,12 @@ app.prepare().then(() => {
  *     summary: Stream Kubernetes pod logs via WebSocket
  *     description: |
  *       Establishes a WebSocket connection to stream real-time logs from a
- *       specified Kubernetes pod container. The client must provide query
- *       parameters identifying the pod, namespace, and container.
+ *       Kubernetes pod container. The pod is identified by a short-lived
+ *       ticket from `POST /api/v2/logs/stream-tickets`, which pins the
+ *       environment namespace, pod and container the caller may read.
+ *       `podName`, `namespace` and `containerName` are accepted only with
+ *       authentication disabled in explicit local development. A ticket
+ *       overrides these values.
  *
  *       The endpoint returns log messages as JSON objects with a type field
  *       indicating the message type (log, error, or end), and additional
@@ -1453,23 +1509,29 @@ app.prepare().then(() => {
  *       - Logs
  *     parameters:
  *       - in: query
- *         name: podName
+ *         name: ticket
  *         required: true
  *         schema:
  *           type: string
- *         description: The name of the Kubernetes pod
+ *         description: Stream ticket from `POST /api/v2/logs/stream-tickets`
+ *       - in: query
+ *         name: podName
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Deprecated; the ticket names the pod
  *       - in: query
  *         name: namespace
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
- *         description: The Kubernetes namespace where the pod is located
+ *         description: Deprecated; the ticket names the namespace
  *       - in: query
  *         name: containerName
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
- *         description: The name of the container within the pod
+ *         description: Deprecated; the ticket names the container
  *       - in: query
  *         name: follow
  *         required: false
@@ -1546,21 +1608,13 @@ app.prepare().then(() => {
  *                 value:
  *                   type: "end"
  *                   reason: "ContainerTerminated"
- *       400:
- *         description: Bad request - missing or invalid parameters
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: "Missing or invalid required parameters: podName, namespace, containerName"
+ *       401:
+ *         description: Missing, expired or invalid ticket
  */
 
 // Usage example:
 // Connect to WebSocket using wscat (substitute your host with the appropriate environment):
-// wscat -c "wss://<your-host>/api/logs/stream?podName=<pod-name>&namespace=<namespace>&follow=true&tailLines=200&timestamps=true&containerName=<container-name>"
+// wscat -c "wss://<your-host>/api/logs/stream?ticket=<ticket>&follow=true&tailLines=200&timestamps=true"
 //
 // Example messages received from the WebSocket:
 // {"type":"log","payload":"2024-04-14T12:34:56.789Z INFO Starting application..."}
@@ -1599,7 +1653,7 @@ app.prepare().then(() => {
  *         required: false
  *         schema:
  *           type: string
- *         description: Optional bearer token used to seed the editor auth cookie.
+ *         description: Optional bearer token exchanged for a session-scoped editor grant cookie.
  *     responses:
  *       '200':
  *         description: Browser editor HTML or proxied editor assets.

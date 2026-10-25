@@ -192,6 +192,28 @@ describe('authenticateMcpRequest', () => {
     expect(result.wwwAuthenticate).toContain('resource_metadata=');
   });
 
+  it.each([undefined, '', 'false', 'TRUE'])(
+    'returns a configuration failure instead of authenticating production auth=%s',
+    async (value) => {
+      const originalAppEnv = process.env.APP_ENV;
+      try {
+        process.env.APP_ENV = 'production';
+        if (value === undefined) delete process.env.ENABLE_AUTH;
+        else process.env.ENABLE_AUTH = value;
+        const result = await authenticateMcpRequest(fakeRequest('Bearer anything'));
+        expect(result).toEqual({
+          ok: false,
+          status: 503,
+          message: 'Authentication is not configured on this server.',
+          retryAfterSeconds: 30,
+        });
+      } finally {
+        if (originalAppEnv === undefined) delete process.env.APP_ENV;
+        else process.env.APP_ENV = originalAppEnv;
+      }
+    }
+  );
+
   it('does not provide a local-session fallback when authentication is disabled', async () => {
     process.env.ENABLE_AUTH = 'false';
     const result = (await authenticateMcpRequest(fakeRequest('Bearer anything'))) as McpAuthFailure;

@@ -17,6 +17,7 @@
 import type { NextRequest } from 'next/server';
 import type { JWTPayload } from 'jose';
 import { UnauthorizedError } from './appError';
+import { isInteractiveAuthUnavailable, isLocalAuthDisabled } from './serverAccess';
 
 const decode = <T = JWTPayload>(raw: string | null): T | null => {
   if (!raw) return null;
@@ -113,7 +114,7 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
   const realmAccess = claims.realm_access as { roles?: unknown } | undefined;
   const tokenRoles = normalizeRoles(realmAccess?.roles);
   const roles: RequestUserRole[] =
-    tokenRoles.length > 0 ? tokenRoles : !payload && process.env.ENABLE_AUTH !== 'true' ? ['admin'] : [];
+    tokenRoles.length > 0 ? tokenRoles : !payload && isLocalAuthDisabled() ? ['admin'] : [];
   const displayName =
     explicitName ||
     [firstName, lastName].filter(Boolean).join(' ').trim() ||
@@ -142,15 +143,16 @@ function buildUserIdentity(payload: JWTPayload | null, userId: string): RequestU
 
 /**
  * Build a request identity directly from verified JWT claims (no NextRequest),
- * falling back to the local-dev identity when auth is disabled.
+ * falling back to the local-dev identity only in explicit local development.
  */
 export function getIdentityFromClaims(payload: JWTPayload | null): RequestUserIdentity | null {
+  if (isInteractiveAuthUnavailable()) return null;
   const sub = normalizeClaim(payload?.sub);
   if (sub) {
     return buildUserIdentity(payload, sub);
   }
 
-  if (process.env.ENABLE_AUTH === 'true') {
+  if (!isLocalAuthDisabled()) {
     return null;
   }
 
@@ -158,12 +160,13 @@ export function getIdentityFromClaims(payload: JWTPayload | null): RequestUserId
 }
 
 export function getRequestUserSub(req: NextRequest): string | null {
+  if (isInteractiveAuthUnavailable()) return null;
   const sub = normalizeClaim(getUser(req)?.sub);
   if (sub) {
     return sub;
   }
 
-  if (process.env.ENABLE_AUTH === 'true') {
+  if (!isLocalAuthDisabled()) {
     return null;
   }
 
@@ -171,13 +174,14 @@ export function getRequestUserSub(req: NextRequest): string | null {
 }
 
 export function getRequestUserIdentity(req: NextRequest): RequestUserIdentity | null {
+  if (isInteractiveAuthUnavailable()) return null;
   const payload = getUser(req);
   const sub = normalizeClaim(payload?.sub);
   if (sub) {
     return buildUserIdentity(payload, sub);
   }
 
-  if (process.env.ENABLE_AUTH === 'true') {
+  if (!isLocalAuthDisabled()) {
     return null;
   }
 

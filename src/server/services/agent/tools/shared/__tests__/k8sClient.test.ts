@@ -31,7 +31,7 @@ jest.mock('@kubernetes/client-node', () => {
 
 import * as k8s from '@kubernetes/client-node';
 
-import { K8sClient } from '../k8sClient';
+import { K8S_NAMESPACE_SCOPE_UNAVAILABLE_MESSAGE, K8sClient } from '../k8sClient';
 
 type MockKubeConfig = {
   loadFromDefault: jest.Mock;
@@ -79,13 +79,21 @@ describe('K8sClient', () => {
     }
   });
 
-  it('requires and trims the requested namespace when no build namespace is configured', () => {
+  it('refuses every namespace, including the omitted one, when no build namespace is configured', () => {
     const client = new K8sClient();
 
-    expect(client.resolveNamespace('  requested-namespace  ')).toBe('requested-namespace');
-    for (const value of ['', '   ', null, undefined]) {
-      expect(() => client.resolveNamespace(value)).toThrow('namespace is required');
+    for (const value of ['kube-system', 'env-other-build', 'env-session-own', '', '   ', null, undefined]) {
+      expect(() => client.resolveNamespace(value)).toThrow(K8S_NAMESPACE_SCOPE_UNAVAILABLE_MESSAGE);
     }
+  });
+
+  it('refuses again once a configured build namespace is cleared', () => {
+    const client = new K8sClient();
+    client.setAllowedNamespace('lifecycle-42');
+    expect(client.resolveNamespace(undefined)).toBe('lifecycle-42');
+
+    client.setAllowedNamespace(null);
+    expect(() => client.resolveNamespace('lifecycle-42')).toThrow(K8S_NAMESPACE_SCOPE_UNAVAILABLE_MESSAGE);
   });
 
   it('defaults an omitted request to the configured build namespace', () => {

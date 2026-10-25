@@ -26,6 +26,7 @@ import { requireRole, type LifecycleRole } from './roles';
 import { getRequestUserIdentity } from './get-user';
 import { AppError, bearerChallenge, isAppError } from './appError';
 import { resolvePrincipal, type Principal, type PrincipalKind } from './principal';
+import { AUTHENTICATION_UNAVAILABLE, isInteractiveAuthUnavailable } from './serverAccess';
 
 // eslint-disable-next-line no-unused-vars
 type RouteHandler = (req: NextRequest, ...args: any[]) => Promise<NextResponse>;
@@ -126,6 +127,10 @@ export function createApiHandler(handler: RouteHandler, options: SessionApiHandl
   const guarded = options.roles?.length ? requireRole(...options.roles)(handler) : handler;
 
   const wrapped = createBaseApiHandler(async (req: NextRequest, ...args: any[]) => {
+    if (isInteractiveAuthUnavailable()) {
+      throw new AppError({ httpStatus: 503, ...AUTHENTICATION_UNAVAILABLE });
+    }
+
     const authorization = req.headers.get('authorization');
     if (authorization && INTERACTIVE_KEY_SHAPE.test(authorization)) {
       return errorResponse(

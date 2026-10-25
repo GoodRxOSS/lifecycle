@@ -7486,6 +7486,10 @@ export const openApiSpecificationForV2Api: OAS3Options = {
               type: 'array',
               items: { $ref: '#/components/schemas/McpDiscoveredTool' },
             },
+            discoveryPending: {
+              type: 'boolean',
+              description: 'Tools are discovered in the session workspace for each run.',
+            },
           },
           required: [
             'slug',
@@ -7505,6 +7509,7 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             'updatedAt',
             'discoveredTools',
             'sharedDiscoveredTools',
+            'discoveryPending',
           ],
         },
 

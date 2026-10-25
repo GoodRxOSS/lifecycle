@@ -28,6 +28,7 @@ import {
   normalizeUserConnectionValues,
 } from 'server/services/agentRuntime/mcp/connectionConfig';
 import { McpConfigService, sanitizeMcpErrorMessage } from 'server/services/agentRuntime/mcp/config';
+import { usesSessionWorkspaceGatewayExecution } from 'server/services/agentRuntime/mcp/sessionPod';
 import UserMcpConnectionService from 'server/services/userMcpConnection';
 
 /**
@@ -39,7 +40,9 @@ import UserMcpConnectionService from 'server/services/userMcpConnection';
  *       Saves encrypted per-user connection values for a shared MCP
  *       that uses field-based user auth, validates them against the MCP
  *       schema, and discovers tools using the current user's effective runtime
- *       config.
+ *       config. Command-based (stdio) MCPs are never started here: the
+ *       connection is saved with no tools and they are discovered the first
+ *       time a session uses it.
  *     tags:
  *       - Agent Sessions
  *     operationId: upsertAgentMcpConnection
@@ -180,7 +183,6 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
     );
   }
 
-  const validatedAt = new Date().toISOString();
   const definitionFingerprint = buildMcpDefinitionFingerprint({
     preset: config.preset,
     transport: config.transport,
@@ -190,34 +192,7 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
   const compiledConfig = mergeCompiledConnectionConfig(config.sharedConfig || {}, compiledUserConfig);
   const transport = applyCompiledConnectionConfigToTransport(config.transport, compiledConfig);
 
-  try {
-    const discoveredTools = await configService.discoverTools(transport, config.timeout);
-    if (discoveredTools.length === 0) {
-      throw new Error(`MCP validation failed for ${slug}: server returned 0 tools`);
-    }
-
-    await UserMcpConnectionService.upsertConnection({
-      userId: userIdentity.userId,
-      ownerGithubUsername: userIdentity.githubUsername,
-      scope,
-      slug,
-      state: { type: 'fields', values },
-      definitionFingerprint,
-      discoveredTools,
-      validationError: null,
-      validatedAt,
-    });
-  } catch (error) {
-    const message = sanitizeMcpErrorMessage(error, [
-      {
-        values,
-        compiledConfig: compiledUserConfig,
-      },
-      {
-        compiledConfig,
-        transport,
-      },
-    ]);
+  if (usesSessionWorkspaceGatewayExecution(transport)) {
     await UserMcpConnectionService.upsertConnection({
       userId: userIdentity.userId,
       ownerGithubUsername: userIdentity.githubUsername,
@@ -226,18 +201,60 @@ const putHandler = async (req: NextRequest, { params }: { params: Promise<{ slug
       state: { type: 'fields', values },
       definitionFingerprint,
       discoveredTools: [],
-      validationError: message,
-      validatedAt,
+      validationError: null,
+      validatedAt: null,
     });
+  } else {
+    const validatedAt = new Date().toISOString();
+    try {
+      const discoveredTools = await configService.discoverTools(transport, config.timeout);
+      if (discoveredTools.length === 0) {
+        throw new Error(`MCP validation failed for ${slug}: server returned 0 tools`);
+      }
 
-    return NextResponse.json(
-      {
-        request_id: req.headers.get('x-request-id'),
-        data: null,
-        error: { message },
-      },
-      { status: 422 }
-    );
+      await UserMcpConnectionService.upsertConnection({
+        userId: userIdentity.userId,
+        ownerGithubUsername: userIdentity.githubUsername,
+        scope,
+        slug,
+        state: { type: 'fields', values },
+        definitionFingerprint,
+        discoveredTools,
+        validationError: null,
+        validatedAt,
+      });
+    } catch (error) {
+      const message = sanitizeMcpErrorMessage(error, [
+        {
+          values,
+          compiledConfig: compiledUserConfig,
+        },
+        {
+          compiledConfig,
+          transport,
+        },
+      ]);
+      await UserMcpConnectionService.upsertConnection({
+        userId: userIdentity.userId,
+        ownerGithubUsername: userIdentity.githubUsername,
+        scope,
+        slug,
+        state: { type: 'fields', values },
+        definitionFingerprint,
+        discoveredTools: [],
+        validationError: message,
+        validatedAt,
+      });
+
+      return NextResponse.json(
+        {
+          request_id: req.headers.get('x-request-id'),
+          data: null,
+          error: { message },
+        },
+        { status: 422 }
+      );
+    }
   }
 
   const state = await UserMcpConnectionService.getMaskedState(

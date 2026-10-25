@@ -14,10 +14,14 @@
  * limitations under the License.
  */
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
+import { openGrant, sealGrant } from 'server/lib/opaqueGrant';
 
-const GRANT_PREFIX = 'lfcpg_v1';
-const GRANT_AAD = Buffer.from('lifecycle.chat-preview-grant.v1', 'utf8');
+const GRANT_KIND = {
+  prefix: 'lfcpg_v1',
+  aad: 'lifecycle.chat-preview-grant.v1',
+  localSecret: 'local-dev-chat-preview-grant-secret',
+};
 const DEFAULT_GRANT_TTL_SECONDS = 60 * 60;
 const MIN_GRANT_TTL_SECONDS = 60;
 const MAX_GRANT_TTL_SECONDS = 24 * 60 * 60;
@@ -44,37 +48,6 @@ export interface CreateChatPreviewGrantOptions extends ChatPreviewGrantExpectedC
   ttlSeconds?: number;
 }
 
-function readUsableSecret(): string | null {
-  const candidate =
-    process.env.CHAT_PREVIEW_GRANT_SECRET ||
-    process.env.ENCRYPTION_KEY ||
-    process.env.NEXTAUTH_SECRET ||
-    process.env.GITHUB_WEBHOOK_SECRET ||
-    null;
-  const normalized = candidate?.trim();
-  if (!normalized || normalized === 'changeme' || normalized === 'not_setup') {
-    return null;
-  }
-  return normalized;
-}
-
-function getGrantSecret(): string {
-  const secret = readUsableSecret();
-  if (secret) {
-    return secret;
-  }
-
-  if (process.env.ENABLE_AUTH !== 'true') {
-    return 'local-dev-chat-preview-grant-secret';
-  }
-
-  throw new Error('CHAT_PREVIEW_GRANT_SECRET or ENCRYPTION_KEY must be configured to mint preview grants.');
-}
-
-function getKey(): Buffer {
-  return createHash('sha256').update(getGrantSecret(), 'utf8').digest();
-}
-
 function normalizeTtlSeconds(ttlSeconds?: number): number {
   if (!Number.isFinite(ttlSeconds)) {
     return DEFAULT_GRANT_TTL_SECONDS;
@@ -94,10 +67,6 @@ function requirePreviewHost(value: string | null | undefined): string {
     throw new Error('previewHost is required to mint a chat preview grant.');
   }
   return normalized;
-}
-
-function decodeBase64Url(value: string): Buffer {
-  return Buffer.from(value, 'base64url');
 }
 
 export function createChatPreviewGrant({
@@ -124,17 +93,7 @@ export function createChatPreviewGrant({
     jti: randomUUID(),
   };
 
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
-  cipher.setAAD(GRANT_AAD);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(claims), 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const grant = [
-    GRANT_PREFIX,
-    iv.toString('base64url'),
-    ciphertext.toString('base64url'),
-    tag.toString('base64url'),
-  ].join('.');
+  const grant = sealGrant(GRANT_KIND, claims);
 
   return { grant, claims, maxAgeSeconds };
 }
@@ -156,31 +115,12 @@ function isClaimsShape(value: unknown): value is ChatPreviewGrantClaims {
 }
 
 export function readChatPreviewGrantClaims(grant: string | null | undefined): ChatPreviewGrantClaims | null {
-  if (!grant) {
-    return null;
-  }
-
-  const [prefix, rawIv, rawCiphertext, rawTag] = grant.split('.');
-  if (prefix !== GRANT_PREFIX || !rawIv || !rawCiphertext || !rawTag) {
-    return null;
-  }
-
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', getKey(), decodeBase64Url(rawIv));
-    decipher.setAAD(GRANT_AAD);
-    decipher.setAuthTag(decodeBase64Url(rawTag));
-    const plaintext = Buffer.concat([decipher.update(decodeBase64Url(rawCiphertext)), decipher.final()]);
-    const claims = JSON.parse(plaintext.toString('utf8')) as unknown;
-    if (!isClaimsShape(claims)) {
-      return null;
-    }
-    return {
-      ...claims,
-      previewHost: requirePreviewHost(claims.previewHost),
-    };
-  } catch {
-    return null;
-  }
+  const claims = openGrant(GRANT_KIND, grant);
+  if (!isClaimsShape(claims)) return null;
+  return {
+    ...claims,
+    previewHost: requirePreviewHost(claims.previewHost),
+  };
 }
 
 export function getChatPreviewGrantMaxAgeSeconds(grant: string): number | null {

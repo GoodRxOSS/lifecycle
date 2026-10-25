@@ -257,6 +257,38 @@ describe('MCP user connection route', () => {
     );
   });
 
+  it('saves a stdio preset connection pending discovery without running the command here', async () => {
+    mockGetBySlugAndScope.mockResolvedValue({
+      ...connectorConfig,
+      transport: { type: 'stdio', command: 'npx', args: ['-y', 'sample-mcp'] },
+      authConfig: {
+        mode: 'user-fields',
+        schema: {
+          fields: [{ key: 'apiToken', label: 'API token', required: true, inputType: 'password' }],
+          bindings: [{ target: 'env', key: 'API_TOKEN', fieldKey: 'apiToken' }],
+        },
+      },
+    });
+
+    const response = await PUT(makeRequest({ values: { apiToken: 'sample-token' } }), {
+      params: Promise.resolve({ slug: 'sample-connector' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mockDiscoverTools).not.toHaveBeenCalled();
+    expect(mockUpsertConnection).toHaveBeenCalledTimes(1);
+    expect(mockUpsertConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        slug: 'sample-connector',
+        state: { type: 'fields', values: { apiToken: 'sample-token' } },
+        discoveredTools: [],
+        validationError: null,
+        validatedAt: null,
+      })
+    );
+    expect(mockGetMaskedState).toHaveBeenCalled();
+  });
+
   it('stores validation errors on the user connection without mutating shared discovery', async () => {
     mockDiscoverTools.mockRejectedValue(
       new Error('HTTP 401 Unauthorized for Authorization Bearer invalid-token and token invalid-token')
