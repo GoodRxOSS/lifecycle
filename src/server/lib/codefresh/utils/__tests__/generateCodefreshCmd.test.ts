@@ -21,16 +21,27 @@ import {
   waitForInProgressDeploys,
 } from 'server/lib/codefresh/utils/generateCodefreshCmd';
 
+jest.mock('fs', () => ({ mkdirSync: jest.fn(), writeFileSync: jest.fn() }));
 jest.mock('server/lib/codefresh/utils/generateYaml');
 import * as yaml from 'server/lib/codefresh/utils/generateYaml';
 
 describe('generateCodefreshCmd', () => {
+  it('rejects an option-like pipeline before writing a submission file', () => {
+    const { writeFileSync } = jest.requireMock('fs');
+    writeFileSync.mockClear();
+    jest.spyOn(yaml, 'generateYaml').mockReturnValue('yaml');
+    expect(() => generateCodefreshCmd({ ...generateOptions, buildPipelineName: '--local' })).toThrow(
+      'must not start with a hyphen'
+    );
+    expect(writeFileSync).not.toHaveBeenCalled();
+  });
+
   it('should generate command with master branch', () => {
     jest.spyOn(yaml, 'generateYaml').mockReturnValue('yaml');
     const options = { ...generateOptions, branch: 'master' };
     const result = generateCodefreshCmd(options);
 
-    expect(result).toContain('-b "master"');
+    expect(result[2]).toEqual('--branch=master');
   });
 
   it('should generate command with unique branch', () => {
@@ -42,10 +53,10 @@ describe('generateCodefreshCmd', () => {
 
     const result = generateCodefreshCmd(customBranchOptions);
 
-    expect(result).toContain('-b "unique-branch-name"');
+    expect(result[2]).toEqual('--branch=unique-branch-name');
   });
 
-  it('should generate command with repo name', () => {
+  it('preserves the image-derived filename with path separators removed', () => {
     jest.spyOn(yaml, 'generateYaml').mockReturnValue('yaml');
     const customImageOptions = {
       ...generateOptions,
@@ -54,7 +65,7 @@ describe('generateCodefreshCmd', () => {
 
     const result = generateCodefreshCmd(customImageOptions);
 
-    expect(result).toContain('latest');
+    expect(result.find((arg) => arg.startsWith('--yaml='))).toContain('latest');
   });
 
   it('includes the selected runtime and every build environment variable', () => {
@@ -66,9 +77,9 @@ describe('generateCodefreshCmd', () => {
       envVars: { API_URL: 'https://api.example.test', EMPTY_VALUE: '' },
     });
 
-    expect(result).toContain('--runtime-name production-runtime');
-    expect(result).toContain("-v 'API_URL'='https://api.example.test'");
-    expect(result).toContain("-v 'EMPTY_VALUE'=''");
+    expect(result).toContain('--runtime-name=production-runtime');
+    expect(result).toContain('--variable=API_URL=https://api.example.test');
+    expect(result).toContain('--variable=EMPTY_VALUE=');
   });
 });
 
@@ -85,7 +96,7 @@ describe('Codefresh deployment coordination steps', () => {
       image: 'alpine/helm:3.7.2',
       fail_fast: false,
       commands: [
-        'helm list -n candidate-123 -m 1000 --pending -q | grep deploy-123 | xargs --no-run-if-empty helm uninstall --wait -n candidate-123',
+        "helm list --namespace='candidate-123' -m 1000 --pending -q | grep -- 'deploy-123' | xargs --no-run-if-empty helm uninstall --wait --namespace='candidate-123' --",
       ],
     });
   });
@@ -101,7 +112,73 @@ describe('Codefresh deployment coordination steps', () => {
     });
     expect(step.commands).toHaveLength(1);
     expect(step.commands[0]).toContain('pipeline=pipeline-456&status=running');
-    expect(step.commands[0]).toContain('.value=="deploy-123"');
-    expect(step.commands[0]).toContain('if [ "{}" != "$CF_BUILD_ID" ]');
+    expect(step.commands[0]).toContain("--arg DEPLOY_UUID 'deploy-123'");
+    expect(step.commands[0]).toContain('.value==$DEPLOY_UUID');
+    expect(step.commands[0]).toContain('if [ "$1" != "$CF_BUILD_ID" ]');
+  });
+});
+
+describe('generated Codefresh commands preserve data boundaries', () => {
+  it('passes all CLI fields literally while preserving the existing env string coercion', () => {
+    jest.spyOn(yaml, 'generateYaml').mockReturnValue('yaml');
+    const value = "quote'$(id);`uname`\nnext";
+    const args = generateCodefreshCmd({
+      ...generateOptions,
+      buildPipelineName: value,
+      branch: value,
+      runtimeName: value,
+      envVars: { [value]: value, OBJECT: { a: 1 }, NULL: null },
+    } as any);
+    expect(args.slice(0, 4)).toEqual(['run', value, `--branch=${value}`, `--runtime-name=${value}`]);
+    expect(args).toContain(`--variable=${value}=${value}`);
+    expect(args).toContain('--variable=OBJECT=[object Object]');
+    expect(args).toContain('--variable=NULL=null');
+  });
+
+  it('binds jq data separately and never inserts returned pipeline IDs into a second shell program', () => {
+    const { execFileSync } = jest.requireActual('child_process');
+    const { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } = jest.requireActual('fs');
+    const { join } = jest.requireActual('path');
+    const { tmpdir } = jest.requireActual('os');
+    const directory = mkdtempSync(join(tmpdir(), 'lfc-codefresh-'));
+    try {
+      const log = join(directory, 'args.jsonl');
+      const marker = join(directory, 'unexpected');
+      const value = `quote' ; touch ${marker}; #`;
+      const returnedId = `$(touch\${IFS}${marker});id`;
+      for (const tool of ['curl', 'jq', 'cf_export', 'codefresh']) {
+        writeFileSync(
+          join(directory, tool),
+          `#!${process.execPath}\nrequire('fs').appendFileSync(process.env.ARGV_LOG,JSON.stringify([${JSON.stringify(
+            tool
+          )},...process.argv.slice(2)])+'\\n');if(${JSON.stringify(
+            tool
+          )}==='jq')process.stdout.write(process.env.PIPELINE_ID+'\\n');`,
+          { mode: 0o755 }
+        );
+      }
+      const script = waitForInProgressDeploys({ deployUUID: value, pipelineId: value }).commands[0];
+      execFileSync('/bin/sh', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          ARGV_LOG: log,
+          PIPELINE_ID: returnedId,
+          CF_BUILD_ID: 'current',
+          CF_BUILD_TIMESTAMP: '42',
+          CODEFRESH_API_KEY: 'synthetic',
+        },
+      });
+      const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      expect(calls.find((args) => args[0] === 'curl')[3]).toBe(
+        `https://g.codefresh.io/api/workflow?pipeline=${encodeURIComponent(value)}&status=running`
+      );
+      const jq = calls.find((args) => args[0] === 'jq');
+      expect(jq.slice(5, 8)).toEqual(['--arg', 'DEPLOY_UUID', value]);
+      expect(calls.find((args) => args[0] === 'codefresh')).toEqual(['codefresh', 'wait', '-v', returnedId]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

@@ -16,7 +16,8 @@
 
 import yaml from 'js-yaml';
 import fs from 'fs';
-import { shellPromise } from 'server/lib/shell';
+import { createHash } from 'crypto';
+import { execFilePromise } from 'server/lib/shell';
 import { getLogger } from 'server/lib/logger';
 import { SecretRefWithEnvKey } from 'server/lib/secretRefs';
 import { SecretProviderConfig } from 'server/services/types/globalConfig';
@@ -160,7 +161,9 @@ const MANIFEST_PATH = '/tmp/lifecycle/manifests/externalsecrets';
 
 export async function applyExternalSecret(manifest: ExternalSecretManifest, namespace: string): Promise<void> {
   const manifestYaml = yaml.dump(manifest);
-  const fileName = `${manifest.metadata.name}.yaml`;
+  const fileName = `${createHash('sha256')
+    .update(JSON.stringify([namespace, manifest.metadata.name]))
+    .digest('hex')}.yaml`;
   const localPath = `${MANIFEST_PATH}/${fileName}`;
 
   await fs.promises.mkdir(MANIFEST_PATH, { recursive: true });
@@ -168,7 +171,7 @@ export async function applyExternalSecret(manifest: ExternalSecretManifest, name
 
   getLogger().info(`ExternalSecret: applying name=${manifest.metadata.name} namespace=${namespace}`);
 
-  await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`, {
+  await execFilePromise('kubectl', ['apply', '-f', localPath, `--namespace=${namespace}`], {
     timeout: 90_000,
   });
 }
@@ -177,9 +180,13 @@ export async function deleteExternalSecret(name: string, namespace: string): Pro
   getLogger().info(`ExternalSecret: deleting name=${name} namespace=${namespace}`);
 
   try {
-    await shellPromise(`kubectl delete externalsecret ${name} --namespace ${namespace} --ignore-not-found`, {
-      timeout: 90_000,
-    });
+    await execFilePromise(
+      'kubectl',
+      ['delete', 'externalsecret', `--namespace=${namespace}`, '--ignore-not-found', '--', name],
+      {
+        timeout: 90_000,
+      }
+    );
   } catch (error) {
     getLogger().warn({ error }, `ExternalSecret: delete failed name=${name}`);
   }
