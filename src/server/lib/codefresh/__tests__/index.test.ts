@@ -39,6 +39,7 @@ jest.mock('server/lib/metrics', () => ({
 }));
 jest.mock('server/lib/shell', () => ({
   shellPromise: jest.fn(),
+  execFilePromise: jest.fn(),
 }));
 jest.mock('server/lib/utils', () => ({
   waitUntil: jest.fn(),
@@ -60,10 +61,11 @@ import {
 } from 'server/lib/codefresh';
 import * as codefreshUtils from 'server/lib/codefresh/utils';
 import { Metrics } from 'server/lib/metrics';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise, shellPromise } from 'server/lib/shell';
 import { waitUntil } from 'server/lib/utils';
 import GlobalConfigService from 'server/services/globalConfig';
 
+const mockExecFilePromise = execFilePromise as jest.MockedFunction<typeof execFilePromise>;
 const mockShellPromise = shellPromise as jest.MockedFunction<typeof shellPromise>;
 const mockWaitUntil = waitUntil as jest.MockedFunction<typeof waitUntil>;
 const mockGenerateCodefreshCmd = codefreshUtils.generateCodefreshCmd as jest.MockedFunction<
@@ -83,6 +85,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGetAllConfigs.mockReset();
   mockShellPromise.mockReset();
+  mockExecFilePromise.mockReset();
   mockWaitUntil.mockReset();
   mockGenerateCodefreshCmd.mockReset();
   mockConstructEcrTag.mockReset();
@@ -96,26 +99,38 @@ describe('tagExists', () => {
     mockGetAllConfigs.mockResolvedValue({
       lifecycleDefaults: { ecrDomain: '123456789012.dkr.ecr.us-west-2.amazonaws.com' },
     });
-    mockShellPromise.mockResolvedValue('');
+    mockExecFilePromise.mockResolvedValue('');
 
     await expect(tagExists({ tag: 'sha-123', ecrRepo: 'custom-images', uuid: 'environment-123' })).resolves.toBe(true);
 
-    expect(mockShellPromise).toHaveBeenCalledWith(
-      'aws ecr describe-images --repository-name=custom-images --image-ids=imageTag=sha-123 --no-paginate --no-cli-auto-prompt --registry-id 123456789012'
-    );
+    expect(mockExecFilePromise).toHaveBeenCalledWith('aws', [
+      'ecr',
+      'describe-images',
+      '--repository-name=custom-images',
+      '--image-ids=imageTag=sha-123',
+      '--no-paginate',
+      '--no-cli-auto-prompt',
+      '--registry-id=123456789012',
+    ]);
     expect(mockLoggerInfo).toHaveBeenCalledWith('ECR: exists tag=sha-123 repo=custom-images');
     expect(mockLoggerDebug).not.toHaveBeenCalled();
   });
 
   it('uses the default repository and returns false when ECR does not contain the tag', async () => {
     mockGetAllConfigs.mockResolvedValue({ lifecycleDefaults: {} });
-    mockShellPromise.mockRejectedValue(new Error('image not found'));
+    mockExecFilePromise.mockRejectedValue(new Error('image not found'));
 
     await expect(tagExists({ tag: 'missing' })).resolves.toBe(false);
 
-    expect(mockShellPromise).toHaveBeenCalledWith(
-      'aws ecr describe-images --repository-name=lifecycle-deployments --image-ids=imageTag=missing --no-paginate --no-cli-auto-prompt --registry-id '
-    );
+    expect(mockExecFilePromise).toHaveBeenCalledWith('aws', [
+      'ecr',
+      'describe-images',
+      '--repository-name=lifecycle-deployments',
+      '--image-ids=imageTag=missing',
+      '--no-paginate',
+      '--no-cli-auto-prompt',
+      '--registry-id=',
+    ]);
     expect(mockLoggerDebug).toHaveBeenCalledWith('ECR: tag=missing not found in lifecycle-deployments');
     expect(mockLoggerInfo).not.toHaveBeenCalled();
   });
@@ -125,14 +140,14 @@ describe('tagExists', () => {
     mockGetAllConfigs.mockRejectedValue(configError);
 
     await expect(tagExists({ tag: 'sha-123' })).rejects.toBe(configError);
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecFilePromise).not.toHaveBeenCalled();
   });
 });
 
 describe('buildImage', () => {
   it('builds an image and records the completed pipeline', async () => {
-    mockGenerateCodefreshCmd.mockReturnValue('codefresh run command');
-    mockShellPromise.mockResolvedValue('Yaml\n672ea2c44b9c09ed7c91a8ef');
+    mockGenerateCodefreshCmd.mockReturnValue(['run', 'command']);
+    mockExecFilePromise.mockResolvedValue('Yaml\n672ea2c44b9c09ed7c91a8ef');
     mockGetCodefreshPipelineIdFromOutput.mockReturnValue('672ea2c44b9c09ed7c91a8ef');
 
     await expect(buildImage(options)).resolves.toBe('672ea2c44b9c09ed7c91a8ef');
@@ -144,7 +159,7 @@ describe('buildImage', () => {
       sha: options.revision,
     });
     expect(mockGenerateCodefreshCmd).toHaveBeenCalledWith(options);
-    expect(mockShellPromise).toHaveBeenCalledWith('codefresh run command');
+    expect(mockExecFilePromise).toHaveBeenCalledWith('codefresh', ['run', 'command']);
     expect(mockGetCodefreshPipelineIdFromOutput).toHaveBeenCalledWith('Yaml\n672ea2c44b9c09ed7c91a8ef');
     expect(mockMetricsIncrement).toHaveBeenCalledWith('total', {
       error: '',
@@ -158,8 +173,8 @@ describe('buildImage', () => {
   });
 
   it('rejects empty CLI output without attempting to parse a pipeline id', async () => {
-    mockGenerateCodefreshCmd.mockReturnValue('codefresh run command');
-    mockShellPromise.mockResolvedValue('');
+    mockGenerateCodefreshCmd.mockReturnValue(['run', 'command']);
+    mockExecFilePromise.mockResolvedValue('');
 
     await expect(buildImage(options)).rejects.toThrow('no output from Codefresh');
 
@@ -176,8 +191,8 @@ describe('buildImage', () => {
   });
 
   it('retains the current pipeline result when non-empty output omits the Yaml marker', async () => {
-    mockGenerateCodefreshCmd.mockReturnValue('codefresh run command');
-    mockShellPromise.mockResolvedValue('672ea2c44b9c09ed7c91a8ef');
+    mockGenerateCodefreshCmd.mockReturnValue(['run', 'command']);
+    mockExecFilePromise.mockResolvedValue('672ea2c44b9c09ed7c91a8ef');
     mockGetCodefreshPipelineIdFromOutput.mockReturnValue('672ea2c44b9c09ed7c91a8ef');
 
     await expect(buildImage(options)).resolves.toBe('672ea2c44b9c09ed7c91a8ef');
@@ -195,8 +210,8 @@ describe('buildImage', () => {
   });
 
   it('rejects output that does not yield a pipeline id', async () => {
-    mockGenerateCodefreshCmd.mockReturnValue('codefresh run command');
-    mockShellPromise.mockResolvedValue('Yaml\nno pipeline id');
+    mockGenerateCodefreshCmd.mockReturnValue(['run', 'command']);
+    mockExecFilePromise.mockResolvedValue('Yaml\nno pipeline id');
     mockGetCodefreshPipelineIdFromOutput.mockReturnValue('');
 
     await expect(buildImage(options)).rejects.toThrow('no returned from Codefresh');
@@ -210,8 +225,8 @@ describe('buildImage', () => {
 
   it('propagates a CLI failure and does not try to parse its output', async () => {
     const cliError = new Error('Codefresh unavailable');
-    mockGenerateCodefreshCmd.mockReturnValue('codefresh run command');
-    mockShellPromise.mockRejectedValue(cliError);
+    mockGenerateCodefreshCmd.mockReturnValue(['run', 'command']);
+    mockExecFilePromise.mockRejectedValue(cliError);
 
     await expect(buildImage(options)).rejects.toBe(cliError);
 
@@ -303,41 +318,79 @@ describe('waitForImage', () => {
 
 describe('triggerPipeline', () => {
   it('maps lowercase branch data and returns the parsed build id', async () => {
-    mockShellPromise.mockResolvedValue('Codefresh output');
+    mockExecFilePromise.mockResolvedValue('Codefresh output');
     mockGetCodefreshPipelineIdFromOutput.mockReturnValue('672ea2c44b9c09ed7c91a8ef');
 
     await expect(triggerPipeline('pipeline', 'webhook', { branch: 'main' })).resolves.toBe('672ea2c44b9c09ed7c91a8ef');
-    expect(mockShellPromise).toHaveBeenCalledWith(
-      'codefresh run "pipeline" -d -b "main" --trigger "webhook"  -v \'branch\'=\'main\' '
-    );
+    expect(mockExecFilePromise).toHaveBeenCalledWith('codefresh', [
+      'run',
+      'pipeline',
+      '--branch=main',
+      '--trigger=webhook',
+      '--variable=branch=main',
+      '-d',
+    ]);
     expect(mockGetCodefreshPipelineIdFromOutput).toHaveBeenCalledWith('Codefresh output');
   });
 
   it('accepts the uppercase branch variable and forwards every webhook variable', async () => {
-    mockShellPromise.mockResolvedValue('Codefresh output');
+    mockExecFilePromise.mockResolvedValue('Codefresh output');
     mockGetCodefreshPipelineIdFromOutput.mockReturnValue('build-id');
 
     await expect(triggerPipeline('pipeline', 'webhook', { BRANCH: 'release', SHA: 'abc123' })).resolves.toBe(
       'build-id'
     );
-    expect(mockShellPromise).toHaveBeenCalledWith(
-      "codefresh run \"pipeline\" -d -b \"release\" --trigger \"webhook\"  -v 'BRANCH'='release'   -v 'SHA'='abc123' "
-    );
+    expect(mockExecFilePromise).toHaveBeenCalledWith('codefresh', [
+      'run',
+      'pipeline',
+      '--branch=release',
+      '--trigger=webhook',
+      '--variable=BRANCH=release',
+      '--variable=SHA=abc123',
+      '-d',
+    ]);
   });
 
   it('rejects missing branch data before invoking Codefresh', async () => {
     await expect(triggerPipeline('pipeline', 'webhook', { SHA: 'abc123' })).rejects.toThrow(
       '[triggerPipeline][WEBHOOK pipeline/webhook] webhook error: no "branch" env var.'
     );
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecFilePromise).not.toHaveBeenCalled();
     expect(mockGetCodefreshPipelineIdFromOutput).not.toHaveBeenCalled();
   });
 
   it('propagates CLI failures without parsing a build id', async () => {
     const cliError = new Error('Codefresh unavailable');
-    mockShellPromise.mockRejectedValue(cliError);
+    mockExecFilePromise.mockRejectedValue(cliError);
 
     await expect(triggerPipeline('pipeline', 'webhook', { branch: 'main' })).rejects.toBe(cliError);
     expect(mockGetCodefreshPipelineIdFromOutput).not.toHaveBeenCalled();
   });
+});
+
+it('keeps ECR and webhook values as literal arguments across every interpolation field', async () => {
+  const value = "quote'$(id);`uname`\nnext";
+  mockGetAllConfigs.mockResolvedValue({ lifecycleDefaults: { ecrDomain: `${value}.registry` } });
+  mockExecFilePromise.mockResolvedValue('output');
+  await tagExists({ tag: value, ecrRepo: value });
+  expect(mockExecFilePromise).toHaveBeenCalledWith('aws', [
+    'ecr',
+    'describe-images',
+    `--repository-name=${value}`,
+    `--image-ids=imageTag=${value}`,
+    '--no-paginate',
+    '--no-cli-auto-prompt',
+    `--registry-id=${value}`,
+  ]);
+  await triggerPipeline(value, value, { branch: value, [value]: value });
+  expect(mockExecFilePromise).toHaveBeenLastCalledWith('codefresh', [
+    'run',
+    value,
+    `--branch=${value}`,
+    `--trigger=${value}`,
+    `--variable=branch=${value}`,
+    `--variable=${value}=${value}`,
+    '-d',
+  ]);
+  expect(mockShellPromise).not.toHaveBeenCalled();
 });

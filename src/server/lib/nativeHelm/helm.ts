@@ -20,7 +20,9 @@ import Deploy from 'server/models/Deploy';
 import Deployable from 'server/models/Deployable';
 import GlobalConfigService from 'server/services/globalConfig';
 import { getLogger, withSpan, withLogContext } from 'server/lib/logger';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise } from 'server/lib/shell';
+import { shellQuote } from 'server/lib/shellQuote';
+import { createHash } from 'crypto';
 import { randomAlphanumeric } from 'server/lib/random';
 import { nanoid } from 'nanoid';
 import { Metrics } from 'server/lib/metrics';
@@ -146,8 +148,10 @@ export async function createHelmContainer(
 export function createWaitForPriorDeploysInitContainer(namespace: string, serviceName: string, jobName: string): any {
   const script = [
     'set -euo pipefail',
-    `echo "Checking for prior deploy jobs for service=${serviceName}"`,
-    `MY_CREATED=$(kubectl get job ${jobName} -n ${namespace} -o jsonpath='{.metadata.creationTimestamp}')`,
+    `printf '%s\\n' ${shellQuote(`Checking for prior deploy jobs for service=${serviceName}`)}`,
+    `MY_CREATED=$(kubectl get job --namespace=${shellQuote(
+      namespace
+    )} -o jsonpath='{.metadata.creationTimestamp}' -- ${shellQuote(jobName)})`,
     `WAIT_TIMEOUT=${HELM_WAIT_TIMEOUT_SECONDS}`,
     'POLL_INTERVAL=10',
     'wait_start=$(date +%s)',
@@ -158,7 +162,11 @@ export function createWaitForPriorDeploysInitContainer(namespace: string, servic
     '    exit 1',
     '  fi',
     '',
-    `  blocking_jobs=$(kubectl get jobs -n ${namespace} -l "service=${serviceName},app.kubernetes.io/name=native-helm" -o jsonpath='{range .items[*]}{.metadata.name}{"\\t"}{.metadata.creationTimestamp}{"\\t"}{.status.active}{"\\n"}{end}' | awk -v my_name="${jobName}" -v my_ts="$MY_CREATED" '`,
+    `  blocking_jobs=$(kubectl get jobs --namespace=${shellQuote(namespace)} -l ${shellQuote(
+      `service=${serviceName},app.kubernetes.io/name=native-helm`
+    )} -o jsonpath='{range .items[*]}{.metadata.name}{"\\t"}{.metadata.creationTimestamp}{"\\t"}{.status.active}{"\\n"}{end}' | awk -v my_name=${shellQuote(
+      jobName
+    )} -v my_ts="$MY_CREATED" '`,
     '    BEGIN { result = "" }',
     '    $1 != my_name && (($2 < my_ts) || ($2 == my_ts && $1 < my_name)) && ($3 + 0) > 0 {',
     '      result = result (result ? " " : "") $1',
@@ -364,10 +372,13 @@ export async function nativeHelmDeploy(
 
   const manifest = await generateHelmManifest(deploy, jobName, options, helmConfig);
 
-  const localPath = `${MANIFEST_PATH}/helm/${deploy.uuid}-helm-${shortSha}`;
+  const manifestName = createHash('sha256')
+    .update(JSON.stringify([deploy.uuid, shortSha]))
+    .digest('hex');
+  const localPath = `${MANIFEST_PATH}/helm/${manifestName}.yaml`;
   await fs.promises.mkdir(`${MANIFEST_PATH}/helm/`, { recursive: true });
   await fs.promises.writeFile(localPath, manifest, 'utf8');
-  await shellPromise(`kubectl apply -f ${localPath}`, { timeout: 90_000 });
+  await execFilePromise('kubectl', ['apply', '-f', localPath], { timeout: 90_000 });
 
   const jobResult = await waitForJobAndGetLogs(jobName, namespace, `[HELM ${deploy.uuid}]`);
 
@@ -487,7 +498,7 @@ async function deployCodefreshHelm(
     if (options.providerSubmissionGate && !(await options.providerSubmissionGate(deploy))) {
       throw new DeploymentSupersededError();
     }
-    output = await shellPromise(codefreshRunCommand);
+    output = await execFilePromise('codefresh', codefreshRunCommand);
   } finally {
     if (configPath) await fs.promises.unlink(configPath).catch(() => undefined);
   }

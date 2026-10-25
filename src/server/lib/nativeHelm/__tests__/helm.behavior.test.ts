@@ -23,7 +23,7 @@ const mockWithSpan = jest.fn();
 const mockWithLogContext = jest.fn();
 const mockMkdir = jest.fn();
 const mockWriteFile = jest.fn();
-const mockShellPromise = jest.fn();
+const mockExecFilePromise = jest.fn();
 const mockUnlink = jest.fn();
 const mockNanoid = jest.fn();
 const mockMetricsConstructor = jest.fn();
@@ -80,7 +80,7 @@ jest.mock('fs', () => ({
 }));
 
 jest.mock('server/lib/shell', () => ({
-  shellPromise: (...args: unknown[]) => mockShellPromise(...args),
+  execFilePromise: (...args: unknown[]) => mockExecFilePromise(...args),
 }));
 
 jest.mock('nanoid', () => ({ nanoid: () => mockNanoid() }));
@@ -103,7 +103,7 @@ jest.mock('server/lib/helm/helm', () => ({
   constructHelmDeploysBuildMetaData: (...args: unknown[]) => mockConstructBuildMetadata(...args),
   generateCodefreshRunCommand: async (...args: unknown[]) => {
     const plan = await mockGenerateCodefreshRunCommand(...args);
-    return typeof plan === 'string' ? { command: plan, configPath: null } : plan;
+    return typeof plan === 'string' ? { command: ['run', 'pipeline'], configPath: null } : plan;
   },
 }));
 
@@ -256,7 +256,7 @@ describe('native Helm orchestration behavior', () => {
     mockWithLogContext.mockImplementation(async (_context: unknown, action: () => Promise<unknown>) => action());
     mockMkdir.mockResolvedValue(undefined);
     mockWriteFile.mockResolvedValue(undefined);
-    mockShellPromise.mockResolvedValue('');
+    mockExecFilePromise.mockResolvedValue('');
     mockNanoid.mockReturnValue('generated-run');
     mockMetricsConstructor.mockReturnValue({ increment: mockMetricIncrement, event: mockMetricEvent });
     mockPatchIngress.mockResolvedValue(undefined);
@@ -332,9 +332,52 @@ describe('native Helm orchestration behavior', () => {
         limits: { cpu: '500m', memory: '512Mi' },
       },
     });
-    expect(container.args[0]).toContain('kubectl get job helm-job -n preview-ns');
+    expect(container.args[0]).toContain("kubectl get job --namespace='preview-ns'");
+    expect(container.args[0]).toContain("-- 'helm-job'");
     expect(container.args[0]).toContain('service=sample-service,app.kubernetes.io/name=native-helm');
     expect(container.args[0]).toContain('Timed out after ${WAIT_TIMEOUT}s');
+  });
+
+  it('keeps prior-deploy wait names and selectors literal through the generated shell', () => {
+    const { execFileSync } = jest.requireActual('child_process');
+    const { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } = jest.requireActual('fs');
+    const { join } = jest.requireActual('path');
+    const { tmpdir } = jest.requireActual('os');
+    const directory = mkdtempSync(join(tmpdir(), 'lfc-helm-wait-'));
+    try {
+      const log = join(directory, 'argv.jsonl');
+      const marker = join(directory, 'unexpected');
+      const value = `name'$(touch ${marker});next`;
+      writeFileSync(
+        join(directory, 'kubectl'),
+        `#!${process.execPath}\nrequire('fs').appendFileSync(process.env.ARGV_LOG,JSON.stringify(process.argv.slice(2))+'\\n');if(process.argv[3]==='job')process.stdout.write('2026-01-01T00:00:00Z');`,
+        { mode: 0o755 }
+      );
+      const container = createWaitForPriorDeploysInitContainer(value, value, value);
+      execFileSync('/bin/bash', ['-c', container.args[0]], {
+        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, ARGV_LOG: log },
+      });
+      const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      expect(calls[0]).toEqual([
+        'get',
+        'job',
+        `--namespace=${value}`,
+        '-o',
+        'jsonpath={.metadata.creationTimestamp}',
+        '--',
+        value,
+      ]);
+      expect(calls[1].slice(0, 5)).toEqual([
+        'get',
+        'jobs',
+        `--namespace=${value}`,
+        '-l',
+        `service=${value},app.kubernetes.io/name=native-helm`,
+      ]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('returns false without a deployable and rejects manifest generation before external calls', async () => {
@@ -438,14 +481,13 @@ describe('native Helm orchestration behavior', () => {
     expect(mockSecretProcessorConstructor).not.toHaveBeenCalled();
     expect(mockMkdir).toHaveBeenCalledWith('/tmp/lifecycle-manifests/helm/', { recursive: true });
     expect(mockWriteFile).toHaveBeenCalledWith(
-      '/tmp/lifecycle-manifests/helm/deploy-uuid-helm-no-sha',
+      expect.stringMatching(/^\/tmp\/lifecycle-manifests\/helm\/[a-f0-9]{64}\.yaml$/),
       expect.stringContaining('kind: Job'),
       'utf8'
     );
-    expect(mockShellPromise).toHaveBeenCalledWith(
-      'kubectl apply -f /tmp/lifecycle-manifests/helm/deploy-uuid-helm-no-sha',
-      { timeout: 90_000 }
-    );
+    expect(mockExecFilePromise).toHaveBeenCalledWith('kubectl', ['apply', '-f', mockWriteFile.mock.calls[0][0]], {
+      timeout: 90_000,
+    });
     expect(where).not.toHaveBeenCalled();
     expect(mockArchiveLogs).not.toHaveBeenCalled();
   });
@@ -494,7 +536,9 @@ describe('native Helm orchestration behavior', () => {
 
     expect(mockProcessSecretRefs).toHaveBeenCalledTimes(1);
     expect(mockWaitForSecretSync).not.toHaveBeenCalled();
-    expect(mockShellPromise).toHaveBeenCalledWith(expect.stringContaining('kubectl apply -f '), { timeout: 90_000 });
+    expect(mockExecFilePromise).toHaveBeenCalledWith('kubectl', ['apply', '-f', mockWriteFile.mock.calls[0][0]], {
+      timeout: 90_000,
+    });
   });
 
   it('does not write or apply a manifest when a secret mutation gate supersedes the deploy', async () => {
@@ -510,7 +554,7 @@ describe('native Helm orchestration behavior', () => {
     expect(secretMutationGate).toHaveBeenCalledWith(deploy, expect.any(Function));
     expect(mockProcessSecretRefs).not.toHaveBeenCalled();
     expect(mockWriteFile).not.toHaveBeenCalled();
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecFilePromise).not.toHaveBeenCalled();
   });
 
   it('preserves deploy success when log archival fails and reports the warning', async () => {
@@ -570,7 +614,7 @@ describe('native Helm orchestration behavior', () => {
       'Native helm configuration validation failed: chart is required, release is invalid'
     );
     expect(mockWriteFile).not.toHaveBeenCalled();
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecFilePromise).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -637,7 +681,7 @@ describe('native Helm orchestration behavior', () => {
       },
     });
     mockPatchIngress.mockRejectedValueOnce(patchError);
-    mockShellPromise.mockResolvedValueOnce('pipeline output');
+    mockExecFilePromise.mockResolvedValueOnce('pipeline output');
 
     await expect(deployHelm([deploy])).resolves.toBeUndefined();
 
@@ -645,7 +689,7 @@ describe('native Helm orchestration behavior', () => {
     expect(patch).toHaveBeenCalledWith({ runUUID: 'generated-run' });
     expect(deploy.runUUID).toBe('generated-run');
     expect(mockGenerateCodefreshRunCommand).toHaveBeenCalledWith(deploy);
-    expect(mockShellPromise).toHaveBeenCalledWith('codefresh run pipeline');
+    expect(mockExecFilePromise).toHaveBeenCalledWith('codefresh', ['run', 'pipeline']);
     expect(mockGetPipelineId).toHaveBeenCalledWith('pipeline output');
     expect(mockCheckPipelineStatus).toHaveBeenCalledWith('pipeline-1');
     expect(mockWaitForPipeline).toHaveBeenCalledTimes(1);
@@ -693,14 +737,14 @@ describe('native Helm orchestration behavior', () => {
       deployable: { name: 'sample-service', repository: { fullName: 'example/repository' } },
     });
     mockGenerateCodefreshRunCommand.mockResolvedValueOnce({
-      command: 'codefresh run pipeline',
+      command: ['run', 'pipeline'],
       configPath: '/tmp/lifecycle/codefresh/helm-deploy-sample-abc.yaml',
     });
     mockUnlink.mockResolvedValue(undefined);
 
     await expect(deployHelm([deploy])).resolves.toBeUndefined();
 
-    expect(mockShellPromise).toHaveBeenCalledWith('codefresh run pipeline');
+    expect(mockExecFilePromise).toHaveBeenCalledWith('codefresh', ['run', 'pipeline']);
     expect(mockUnlink).toHaveBeenCalledWith('/tmp/lifecycle/codefresh/helm-deploy-sample-abc.yaml');
   });
 
@@ -709,14 +753,14 @@ describe('native Helm orchestration behavior', () => {
       deployable: { name: 'sample-service', repository: { fullName: 'example/repository' } },
     });
     mockGenerateCodefreshRunCommand.mockResolvedValueOnce({
-      command: 'codefresh run pipeline',
+      command: ['run', 'pipeline'],
       configPath: '/tmp/x.yaml',
     });
     mockUnlink.mockResolvedValue(undefined);
 
     await expect(deployHelm([deploy], { providerSubmissionGate: async () => false })).rejects.toThrow();
 
-    expect(mockShellPromise).not.toHaveBeenCalled();
+    expect(mockExecFilePromise).not.toHaveBeenCalled();
     expect(mockUnlink).toHaveBeenCalledWith('/tmp/x.yaml');
   });
 

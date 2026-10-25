@@ -408,7 +408,7 @@ describe('buildkitBuild', () => {
 
     expect(result.success).toBe(true);
     expect(staticDeploy.$fetchGraph).toHaveBeenCalledWith('build');
-    expect(fullCommand).toContain('git init /workspace/repo-repo-only');
+    expect(fullCommand).toContain("git init -- '/workspace/repo-repo-only'");
     expect(fullCommand).toContain('filename=Dockerfile');
     expect(fullCommand).toContain('lfc/dockerfile: "Dockerfile"');
     expect(fullCommand).toContain('ttlSecondsAfterFinished: 86400');

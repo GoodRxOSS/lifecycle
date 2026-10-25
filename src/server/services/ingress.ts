@@ -18,9 +18,10 @@
 import { withLogContext, getLogger, LogStage } from 'server/lib/logger';
 import BaseService from './_service';
 import fs from 'fs';
+import { createHash } from 'crypto';
 import { TMP_PATH, QUEUE_NAMES } from 'shared/config';
 import { IngressConfiguration } from '../../server/services/build';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise } from 'server/lib/shell';
 import yaml from 'js-yaml';
 import { redisClient } from 'server/lib/dependencies';
 import GlobalConfigService from './globalConfig';
@@ -75,12 +76,15 @@ export default class IngressService extends BaseService {
       try {
         await Promise.all(
           configurations.map((configuration) =>
-            shellPromise(`kubectl delete ingress ingress-${configuration.deployUUID} --namespace ${namespace}`).catch(
-              (error) => {
-                getLogger({ stage: LogStage.INGRESS_PROCESSING }).warn(`${error}`);
-                return null;
-              }
-            )
+            execFilePromise('kubectl', [
+              'delete',
+              'ingress',
+              `ingress-${configuration.deployUUID}`,
+              `--namespace=${namespace}`,
+            ]).catch((error) => {
+              getLogger({ stage: LogStage.INGRESS_PROCESSING }).warn(`${error}`);
+              return null;
+            })
           )
         );
         getLogger({ stage: LogStage.INGRESS_COMPLETE }).info('Ingress: cleaned up');
@@ -244,12 +248,15 @@ export default class IngressService extends BaseService {
     expectedGeneration?: number
   ) => {
     try {
-      const localPath = `${MANIFEST_PATH}/global-ingress/${ingressName}-ingress.yaml`;
+      const manifestName = createHash('sha256')
+        .update(JSON.stringify([namespace, ingressName]))
+        .digest('hex');
+      const localPath = `${MANIFEST_PATH}/global-ingress/${manifestName}.yaml`;
       await fs.promises.mkdir(`${MANIFEST_PATH}/global-ingress/`, {
         recursive: true,
       });
       await fs.promises.writeFile(localPath, manifest, 'utf8');
-      await shellPromise(`kubectl apply -f ${localPath} --namespace ${namespace}`, {
+      await execFilePromise('kubectl', ['apply', '-f', localPath, `--namespace=${namespace}`], {
         timeout: 90_000,
       });
       return true;

@@ -15,7 +15,8 @@
  */
 
 import { spawn } from 'child_process';
-import { shellPromise } from 'server/lib/shell';
+import { codefreshRunArgs } from './command';
+import { execFilePromise, shellPromise } from 'server/lib/shell';
 import { getLogger } from 'server/lib/logger';
 import { generateCodefreshCmd, constructEcrTag, getCodefreshPipelineIdFromOutput } from 'server/lib/codefresh/utils';
 import { waitUntil } from 'server/lib/utils';
@@ -29,8 +30,15 @@ export const tagExists = async ({ tag, ecrRepo = 'lifecycle-deployments', uuid: 
   const repoName = ecrRepo;
   const registryId = (lifecycleDefaults.ecrDomain?.split?.('.') || [])[0] || '';
   try {
-    const command = `aws ecr describe-images --repository-name=${repoName} --image-ids=imageTag=${tag} --no-paginate --no-cli-auto-prompt --registry-id ${registryId}`;
-    await shellPromise(command);
+    await execFilePromise('aws', [
+      'ecr',
+      'describe-images',
+      `--repository-name=${repoName}`,
+      `--image-ids=imageTag=${tag}`,
+      '--no-paginate',
+      '--no-cli-auto-prompt',
+      `--registry-id=${registryId}`,
+    ]);
     getLogger().info(`ECR: exists tag=${tag} repo=${repoName}`);
     return true;
   } catch (error) {
@@ -49,7 +57,7 @@ export const buildImage = async (options: ContainerBuildOptions) => {
   };
   try {
     const codefreshRunCommand = generateCodefreshCmd(options);
-    const output = await shellPromise(codefreshRunCommand);
+    const output = await execFilePromise('codefresh', codefreshRunCommand);
     const hasOutput = output?.length > 0;
     const hasYamlString = output?.includes('Yaml');
     if (!hasOutput || !hasYamlString) {
@@ -104,11 +112,11 @@ export const triggerPipeline = async (
 ): Promise<string> => {
   const branch = data?.branch || data?.BRANCH;
   if (!branch) throw Error(`[triggerPipeline][WEBHOOK ${pipelineId}/${trigger}] webhook error: no "branch" env var.`);
-  const variables = Object.keys(data)
-    .map((key) => ` -v '${key}'='${data[key]}' `)
-    .join(' ');
-  const command = `codefresh run "${pipelineId}" -d -b "${branch}" --trigger "${trigger}" ${variables}`;
-  const output = await shellPromise(command);
+  const variables = Object.keys(data).map((key) => `--variable=${key}=${data[key]}`);
+  const output = await execFilePromise(
+    'codefresh',
+    codefreshRunArgs(pipelineId, [`--branch=${branch}`, `--trigger=${trigger}`, ...variables])
+  );
   const buildId = getCodefreshPipelineIdFromOutput(output);
   return buildId;
 };

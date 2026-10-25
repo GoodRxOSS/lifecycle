@@ -15,7 +15,9 @@
  */
 
 import { getLogger } from 'server/lib/logger';
+import { execFile } from 'child_process';
 import shell, { ExecOptions } from 'shelljs';
+import { shellQuote } from './shellQuote';
 
 interface Options extends ExecOptions {
   debug?: boolean;
@@ -47,5 +49,48 @@ export async function shellPromise(cmd: string, options: Options = {}): Promise<
         resolve(stdout);
       }
     });
+  });
+}
+
+interface FileOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeout?: number;
+  redactCommand?: string;
+  redactValues?: string[];
+}
+
+export function redactCommandOutput(output: string, values: string[] = []): string {
+  return [...new Set(values)]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .reduce((redacted, value) => redacted.split(value).join('[REDACTED]'), output);
+}
+
+export async function execFilePromise(file: string, args: string[], options: FileOptions = {}): Promise<string> {
+  const { redactCommand, redactValues, ...execOptions } = options;
+  const displayCommand = redactCommandOutput(redactCommand || [file, ...args].map(shellQuote).join(' '), redactValues);
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      args,
+      { ...execOptions, shell: false, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolve(stdout);
+          return;
+        }
+        const safeStderr = redactCommandOutput(stderr, redactValues);
+        const safeStdout = redactCommandOutput(stdout, redactValues);
+        if (stderr.length > 0) {
+          getLogger().debug(`Command failed: cmd=${displayCommand} stderr=${safeStderr}`);
+        }
+        reject(
+          `execFilePromise command failed:\nExit code: ${
+            error.code ?? error.signal ?? 'unknown'
+          }\nCommand:\n${displayCommand},\n\nstderr:\n${safeStderr}\n\nstdout:\n${safeStdout}`
+        );
+      }
+    );
   });
 }
