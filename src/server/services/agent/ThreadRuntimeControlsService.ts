@@ -339,10 +339,6 @@ function allowedMcpCapabilityIds(context: RuntimeChoiceContext): AgentCapability
   );
 }
 
-function hasAllowedMcpCapability(context: RuntimeChoiceContext): boolean {
-  return allowedMcpCapabilityIds(context).length > 0;
-}
-
 function assertDefinitionUsable(definition: AgentDefinitionContract, sourceKind: AgentCapabilitySourceKind): void {
   if (definition.status !== 'active') {
     throw new AgentThreadRuntimeControlsError('policy_denied', `${definition.name} is unavailable.`);
@@ -430,22 +426,26 @@ function buildChoiceState(context: RuntimeChoiceContext): {
     }
   }
 
-  const mcpConnections: AgentThreadRuntimeControlChoice[] = hasAllowedMcpCapability(context)
-    ? context.mcpConnections.map((connection) => {
-        const id = opaqueChoiceId('mcp', `${connection.scope}:${connection.slug}`);
-        const available = isConnectionAvailable(connection);
-        const choice = {
-          id,
-          label: connection.name,
-          description: connection.description || null,
-          required: false,
-          selected: savedMcpChoiceIds ? savedMcpChoiceIds.has(id) : available,
-          available,
-        };
-        lookup.mcpById.set(id, { ...choice, rawConnectionId: `${connection.scope}:${connection.slug}` });
-        return choice;
-      })
-    : [];
+  const mcpCapabilityIds = allowedMcpCapabilityIds(context);
+  const mcpConnections: AgentThreadRuntimeControlChoice[] =
+    mcpCapabilityIds.length > 0
+      ? context.mcpConnections.map((connection) => {
+          const id = opaqueChoiceId('mcp', `${connection.scope}:${connection.slug}`);
+          const available =
+            isConnectionAvailable(connection) &&
+            (connection.transport.type !== 'stdio' || mcpCapabilityIds.includes('external_mcp_write'));
+          const choice = {
+            id,
+            label: connection.name,
+            description: connection.description || null,
+            required: false,
+            selected: savedMcpChoiceIds ? savedMcpChoiceIds.has(id) : available,
+            available,
+          };
+          lookup.mcpById.set(id, { ...choice, rawConnectionId: `${connection.scope}:${connection.slug}` });
+          return choice;
+        })
+      : [];
 
   const selectedToolChoiceIds = [
     ...required.filter((choice) => choice.available).map((choice) => choice.id),

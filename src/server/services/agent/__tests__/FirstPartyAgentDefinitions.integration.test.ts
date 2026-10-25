@@ -47,6 +47,9 @@ const mockGetOwnedThreadWithSession = jest.fn();
 const mockSeedSystemTemplates = jest.fn();
 const mockResolveInstructionRefs = jest.fn();
 const mockWarn = jest.fn();
+const mockResolveMcpServers = jest.fn();
+const mockListMcpConnections = jest.fn();
+const mockDiscoverPendingServerTools = jest.fn();
 
 let mockDefinitionRows: any[] = [];
 let mockActiveRunResults: any[] = [];
@@ -91,7 +94,47 @@ jest.mock('../CapabilityService', () => ({
   __esModule: true,
   default: {
     resolveSessionContext: (...args: unknown[]) => mockResolveSessionContext(...args),
+    buildToolSetWithMetadata: (options: unknown) =>
+      jest.requireActual('../CapabilityService').default.buildToolSetWithMetadata(options),
   },
+}));
+
+jest.mock('../aiSdkRuntime', () => ({
+  loadAiSdk: async () => ({ dynamicTool: (config: unknown) => config, jsonSchema: (schema: unknown) => schema }),
+}));
+
+jest.mock('server/services/agentRuntime/mcp/config', () => {
+  const actual = jest.requireActual('server/services/agentRuntime/mcp/config');
+  return {
+    ...actual,
+    McpConfigService: jest.fn().mockImplementation(() => ({
+      resolveServers: (...args: unknown[]) => mockResolveMcpServers(...args),
+      listEnabledConnectionsForUser: (...args: unknown[]) => mockListMcpConnections(...args),
+      discoverPendingServerTools: (...args: unknown[]) => mockDiscoverPendingServerTools(...args),
+    })),
+  };
+});
+
+jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
+  __esModule: true,
+  default: { getInstance: () => ({ getEffectiveConfig: async () => ({}) }) },
+}));
+
+jest.mock('../diagnosticTools', () => ({
+  registerLifecycleDiagnosticReadTools: jest.fn(),
+  registerLifecycleDiagnosticFixTools: jest.fn(),
+}));
+
+jest.mock('server/services/workspaceCoreMcp/config', () => ({ isWorkspaceCoreMcpEnabled: () => false }));
+
+jest.mock('../chatWorkspaceToolRegistration', () => ({
+  isChatWorkspaceRuntimeReady: () => true,
+  resolveSessionWorkspaceGatewayServer: async () => ({ slug: 'workspace', discoveredTools: [] }),
+  resolveSessionGatewayEndpoint: async () => ({ url: 'http://workspace-gateway.test' }),
+  resolveSessionExecutionServer: async (_session: unknown, server: Record<string, unknown>) => ({
+    ...server,
+    transport: { type: 'http', url: 'http://workspace-gateway.test/servers/sample/mcp' },
+  }),
 }));
 
 jest.mock('../InstructionTemplateService', () => {
@@ -160,7 +203,7 @@ jest.mock('uuid', () => ({
   v4: jest.fn(() => '11111111-1111-4111-8111-111111111111'),
 }));
 
-import { AgentSessionKind } from 'shared/constants';
+import { AgentSessionKind, AgentWorkspaceStatus } from 'shared/constants';
 import {
   ensureSystemAgentDefinitionsSeeded,
   getSystemAgentDefinition,
@@ -172,6 +215,11 @@ import { serializeRunPlanSummary } from '../runPlanSummary';
 import { SYSTEM_AGENT_DEFINITIONS, SYSTEM_AGENT_DEFINITION_IDS } from '../systemAgentDefinitions';
 import type { AgentDefinitionContract } from '../agentDefinitionTypes';
 import type { AgentCapabilityCatalogId } from '../capabilityCatalog';
+import AgentCapabilityService from '../CapabilityService';
+import AgentThreadRuntimeControlsService from '../ThreadRuntimeControlsService';
+import type { ResolvedAgentCapabilityAccess } from '../PolicyService';
+import { DEFAULT_AGENT_APPROVAL_POLICY, type AgentApprovalMode } from '../types';
+import type { AgentSessionToolRule } from 'server/services/types/agentSessionConfig';
 
 const userIdentity = {
   userId: 'sample-user',
@@ -308,6 +356,9 @@ describe('First-party agent definition integration regressions', () => {
     session = buildSession();
     source = buildSource();
     mockActiveRuns();
+    mockResolveMcpServers.mockResolvedValue([]);
+    mockListMcpConnections.mockResolvedValue([]);
+    mockDiscoverPendingServerTools.mockResolvedValue([]);
 
     mockDefinitionUpsert.mockImplementation(async (row) => row);
     mockDefinitionFindOne.mockImplementation(async ({ definitionId, ownerKind }) => {
@@ -358,6 +409,176 @@ describe('First-party agent definition integration regressions', () => {
       insertAndFetch: mockInsertAndFetch,
     }));
   });
+
+  async function buildWorkspaceMcpTools({
+    selection = 'default',
+    writeMode = 'require_approval',
+    writeDisabled = false,
+    transport = 'stdio',
+    toolRules,
+  }: {
+    selection?: 'default' | 'selected' | 'none';
+    writeMode?: AgentApprovalMode;
+    writeDisabled?: boolean;
+    transport?: 'stdio' | 'http' | 'sse';
+    toolRules?: AgentSessionToolRule[];
+  } = {}) {
+    session = buildSession({
+      workspaceStatus: AgentWorkspaceStatus.READY,
+      podName: 'agent-session-pod',
+      pvcName: 'agent-session-pvc',
+    });
+    const approvalPolicy = {
+      ...DEFAULT_AGENT_APPROVAL_POLICY,
+      rules: { ...DEFAULT_AGENT_APPROVAL_POLICY.rules, external_mcp_write: writeMode },
+    };
+    mockResolveSessionContext.mockResolvedValue({
+      repoFullName: 'example-org/example-repo',
+      approvalPolicy,
+      capabilityPolicy: writeDisabled ? { availability: { external_mcp_write: 'disabled' } } : undefined,
+    });
+    const discoveredTools = [
+      {
+        name: 'sample_tool',
+        description: 'A sample MCP tool.',
+        inputSchema: { type: 'object', properties: {} },
+        annotations: { readOnlyHint: transport === 'stdio' },
+      },
+    ];
+    const server = {
+      scope: 'global',
+      slug: 'sample',
+      name: 'Sample MCP',
+      transport:
+        transport === 'stdio'
+          ? { type: 'stdio', command: 'node', args: ['server.mjs'] }
+          : { type: transport, url: 'https://mcp.example.test' },
+      timeout: 5000,
+      env: {},
+      defaultArgs: {},
+      discoveredTools: transport === 'stdio' ? [] : discoveredTools,
+      discoveryPending: transport === 'stdio',
+    };
+    mockResolveMcpServers.mockResolvedValue([server]);
+    mockDiscoverPendingServerTools.mockResolvedValue(discoveredTools);
+    mockListMcpConnections.mockResolvedValue([
+      { ...server, connectionRequired: false, configured: true, stale: false, sharedDiscoveredTools: [] },
+    ]);
+
+    const controls = await AgentThreadRuntimeControlsService.getState({ threadId: thread.uuid, userIdentity });
+    if (selection !== 'default') {
+      thread = buildThread({
+        metadata: {
+          runtimeControlChoices: {
+            version: 1,
+            toolChoiceIds: [],
+            mcpChoiceIds: selection === 'selected' ? [controls.mcp.connections[0].id] : [],
+          },
+        },
+      });
+    }
+    const result = await resolveRunPlan({ session, thread, source });
+    const runPlan = result.runPlanSnapshot;
+    const toolSet = await AgentCapabilityService.buildToolSetWithMetadata({
+      session,
+      userIdentity,
+      repoFullName: result.repoFullName,
+      approvalPolicy: result.approvalPolicy,
+      resolvedCapabilityAccess: runPlan.capabilities.resolvedCapabilityAccess as ResolvedAgentCapabilityAccess[],
+      selectedRuntimeMcpConnectionRefs: runPlan.capabilities.selectedRuntimeMcpConnectionRefs,
+      agentDefinitionId: runPlan.agent.id,
+      agentSourceKind: runPlan.agent.sourceKind,
+      workspaceToolDiscoveryTimeoutMs: 4500,
+      workspaceToolExecutionTimeoutMs: 22000,
+      toolRules,
+    });
+    return { result, toolSet, controls };
+  }
+
+  it.each(['default', 'selected'] as const)(
+    'registers workspace MCP tools from the actual Develop plan with %s selection',
+    async (selection) => {
+      const { result, toolSet, controls } = await buildWorkspaceMcpTools({ selection });
+      expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
+      expect(getCapabilityAccess(result, 'external_mcp_write')).toMatchObject({
+        allowed: true,
+        availability: 'admin_only',
+        approvalMode: 'require_approval',
+      });
+      expect(controls.mcp.connections[0]).toMatchObject({ selected: true, available: true });
+      expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
+      expect(toolSet.metadata).toEqual([
+        expect.objectContaining({
+          capabilityKey: 'external_mcp_write',
+          catalogCapabilityId: 'external_mcp_write',
+          approvalMode: 'require_approval',
+        }),
+      ]);
+      expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe('user-approval');
+      expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('keeps explicit MCP deselection authoritative for Develop', async () => {
+    const { result, toolSet } = await buildWorkspaceMcpTools({ selection: 'none' });
+    expect(getCapabilityAccess(result, 'external_mcp_write')).toBeUndefined();
+    expect(getCapabilityAccess(result, 'external_mcp_read')).toMatchObject({ allowed: true });
+    expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpConnectionRefs).toEqual([]);
+    expect(toolSet.tools).toEqual({});
+    expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+  });
+
+  it.each(['default', 'selected'] as const)(
+    'omits disabled optional MCP write without blocking the workspace: %s selection',
+    async (selection) => {
+      const { result, toolSet, controls } = await buildWorkspaceMcpTools({
+        selection,
+        writeDisabled: true,
+        toolRules: [{ toolKey: 'mcp__sample__sample_tool', mode: 'allow' }],
+      });
+      expect(getCapabilityAccess(result, 'workspace_files')).toMatchObject({ allowed: true });
+      expect(getCapabilityAccess(result, 'external_mcp_write')).toBeUndefined();
+      expect(controls.mcp.connections[0]).toMatchObject({ available: false, selected: false });
+      expect(toolSet.tools).toEqual({});
+      if (selection === 'selected') {
+        expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpConnectionRefs).toEqual([]);
+      }
+    }
+  );
+
+  it.each([
+    { writeMode: 'deny' as const, rule: undefined, exposed: false, approval: false },
+    { writeMode: 'allow' as const, rule: undefined, exposed: true, approval: false },
+    { writeMode: 'deny' as const, rule: 'allow' as const, exposed: true, approval: false },
+    { writeMode: 'allow' as const, rule: 'deny' as const, exposed: false, approval: false },
+    { writeMode: 'allow' as const, rule: 'require_approval' as const, exposed: true, approval: true },
+  ])(
+    'preserves configured MCP policy and exact tool precedence: %j',
+    async ({ writeMode, rule, exposed, approval }) => {
+      const { result, toolSet, controls } = await buildWorkspaceMcpTools({
+        selection: 'selected',
+        writeMode,
+        toolRules: rule ? [{ toolKey: 'mcp__sample__sample_tool', mode: rule }] : undefined,
+      });
+      expect(getCapabilityAccess(result, 'external_mcp_write')).toMatchObject({
+        allowed: true,
+        approvalMode: writeMode,
+      });
+      expect(controls.mcp.connections[0].available).toBe(true);
+      expect(Boolean(toolSet.tools.mcp__sample__sample_tool)).toBe(exposed);
+      expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe(approval ? 'user-approval' : undefined);
+    }
+  );
+
+  it.each(['http', 'sse'] as const)(
+    'admits selected %s write tools under the Develop write policy',
+    async (transport) => {
+      const { toolSet } = await buildWorkspaceMcpTools({ selection: 'selected', transport });
+      expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
+      expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe('user-approval');
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+    }
+  );
 
   it('seeds the one visible system agent plus legacy readable system definitions', async () => {
     const seeded = await ensureSystemAgentDefinitionsSeeded();
