@@ -31,6 +31,7 @@ import {
 import { getLogger } from 'server/lib/logger';
 import AgentMessageStore, { type RuntimeControlsUpdateChoice } from './MessageStore';
 import AgentPolicyService from './PolicyService';
+import { resolveWorkspaceMcpAdmission } from './workspaceMcpAdmission';
 import AgentRunService from './RunService';
 import AgentSourceService from './SourceService';
 import AgentThreadService, { type AgentThreadRuntimeControlChoicesMetadata } from './ThreadService';
@@ -427,13 +428,29 @@ function buildChoiceState(context: RuntimeChoiceContext): {
   }
 
   const mcpCapabilityIds = allowedMcpCapabilityIds(context);
+  const selectedCapabilityIds = [
+    ...mcpCapabilityIds,
+    ...[...lookup.toolsById.values()]
+      .filter((choice) => choice.available && choice.selected)
+      .map((choice) => choice.rawCapabilityId),
+  ];
+  const workspaceMcpAdmission = resolveWorkspaceMcpAdmission({
+    resolvedCapabilityAccess: selectedCapabilityIds.map((capabilityId) =>
+      capabilityAllowed({ capabilityId, definition: context.definition, context })
+    ),
+    definitionOwnerKind: context.definition.owner.kind,
+    sourceKind: context.sourceKind,
+    capabilityPolicy: context.capabilityPolicy,
+    customAgentCreationPolicy: context.customAgentCreationPolicy,
+    approvalPolicy: context.approvalPolicy,
+  });
   const mcpConnections: AgentThreadRuntimeControlChoice[] =
     mcpCapabilityIds.length > 0
       ? context.mcpConnections.map((connection) => {
           const id = opaqueChoiceId('mcp', `${connection.scope}:${connection.slug}`);
           const available =
             isConnectionAvailable(connection) &&
-            (connection.transport.type !== 'stdio' || mcpCapabilityIds.includes('external_mcp_write'));
+            (connection.transport.type !== 'stdio' || workspaceMcpAdmission !== null);
           const choice = {
             id,
             label: connection.name,

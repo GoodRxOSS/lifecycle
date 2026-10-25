@@ -97,7 +97,6 @@ export const SYSTEM_AGENT_DEFINITIONS: Record<SystemAgentDefinitionId, AgentDefi
       'preview_publish',
       'external_mcp_read',
     ],
-    optionalCapabilityRefs: ['external_mcp_write'],
     resourcePolicy: {
       sourceKinds: ['workspace_session'],
       sandboxRequired: true,

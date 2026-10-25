@@ -2304,7 +2304,7 @@ describe('AgentCapabilityService.buildToolSet', () => {
       workspaceToolExecutionTimeoutMs: 22000,
     });
     expect(tools.mcp__figma__get_design_context).toBeUndefined();
-    expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(1);
+    expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
   });
 
   it('leaves a pending stdio server out of the run when gateway discovery fails', async () => {

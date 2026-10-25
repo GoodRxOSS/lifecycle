@@ -50,6 +50,7 @@ const mockWarn = jest.fn();
 const mockResolveMcpServers = jest.fn();
 const mockListMcpConnections = jest.fn();
 const mockDiscoverPendingServerTools = jest.fn();
+const mockGetEffectiveConfig = jest.fn();
 
 let mockDefinitionRows: any[] = [];
 let mockActiveRunResults: any[] = [];
@@ -117,7 +118,7 @@ jest.mock('server/services/agentRuntime/mcp/config', () => {
 
 jest.mock('server/services/agentRuntime/config/agentRuntimeConfig', () => ({
   __esModule: true,
-  default: { getInstance: () => ({ getEffectiveConfig: async () => ({}) }) },
+  default: { getInstance: () => ({ getEffectiveConfig: (...args: unknown[]) => mockGetEffectiveConfig(...args) }) },
 }));
 
 jest.mock('../diagnosticTools', () => ({
@@ -359,6 +360,7 @@ describe('First-party agent definition integration regressions', () => {
     mockResolveMcpServers.mockResolvedValue([]);
     mockListMcpConnections.mockResolvedValue([]);
     mockDiscoverPendingServerTools.mockResolvedValue([]);
+    mockGetEffectiveConfig.mockResolvedValue({});
 
     mockDefinitionUpsert.mockImplementation(async (row) => row);
     mockDefinitionFindOne.mockImplementation(async ({ definitionId, ownerKind }) => {
@@ -413,14 +415,30 @@ describe('First-party agent definition integration regressions', () => {
   async function buildWorkspaceMcpTools({
     selection = 'default',
     writeMode = 'require_approval',
+    shellMode = 'require_approval',
+    readMode = 'allow',
     writeDisabled = false,
     transport = 'stdio',
+    remoteReadOnly = false,
+    cachedStdio = false,
+    omitOwner = false,
+    omitSource = false,
+    omitCapability,
+    advertisedWorkspaceSource = false,
     toolRules,
   }: {
     selection?: 'default' | 'selected' | 'none';
     writeMode?: AgentApprovalMode;
+    shellMode?: AgentApprovalMode;
+    readMode?: AgentApprovalMode;
     writeDisabled?: boolean;
     transport?: 'stdio' | 'http' | 'sse';
+    remoteReadOnly?: boolean;
+    cachedStdio?: boolean;
+    omitOwner?: boolean;
+    omitSource?: boolean;
+    omitCapability?: string;
+    advertisedWorkspaceSource?: boolean;
     toolRules?: AgentSessionToolRule[];
   } = {}) {
     session = buildSession({
@@ -430,19 +448,26 @@ describe('First-party agent definition integration regressions', () => {
     });
     const approvalPolicy = {
       ...DEFAULT_AGENT_APPROVAL_POLICY,
-      rules: { ...DEFAULT_AGENT_APPROVAL_POLICY.rules, external_mcp_write: writeMode },
+      rules: {
+        ...DEFAULT_AGENT_APPROVAL_POLICY.rules,
+        external_mcp_write: writeMode,
+        shell_exec: shellMode,
+        external_mcp_read: readMode,
+      },
     };
+    const capabilityPolicy = writeDisabled ? { availability: { external_mcp_write: 'disabled' } } : undefined;
+    mockGetEffectiveConfig.mockResolvedValue({ capabilityPolicy });
     mockResolveSessionContext.mockResolvedValue({
       repoFullName: 'example-org/example-repo',
       approvalPolicy,
-      capabilityPolicy: writeDisabled ? { availability: { external_mcp_write: 'disabled' } } : undefined,
+      capabilityPolicy,
     });
     const discoveredTools = [
       {
         name: 'sample_tool',
         description: 'A sample MCP tool.',
         inputSchema: { type: 'object', properties: {} },
-        annotations: { readOnlyHint: transport === 'stdio' },
+        annotations: { readOnlyHint: transport === 'stdio' || remoteReadOnly },
       },
     ];
     const server = {
@@ -456,8 +481,9 @@ describe('First-party agent definition integration regressions', () => {
       timeout: 5000,
       env: {},
       defaultArgs: {},
-      discoveredTools: transport === 'stdio' ? [] : discoveredTools,
-      discoveryPending: transport === 'stdio',
+      discoveredTools: transport === 'stdio' && !cachedStdio ? [] : discoveredTools,
+      discoveryPending: transport === 'stdio' && !cachedStdio,
+      toolDiscoverySource: advertisedWorkspaceSource ? 'workspace' : undefined,
     };
     mockResolveMcpServers.mockResolvedValue([server]);
     mockDiscoverPendingServerTools.mockResolvedValue(discoveredTools);
@@ -484,10 +510,13 @@ describe('First-party agent definition integration regressions', () => {
       userIdentity,
       repoFullName: result.repoFullName,
       approvalPolicy: result.approvalPolicy,
-      resolvedCapabilityAccess: runPlan.capabilities.resolvedCapabilityAccess as ResolvedAgentCapabilityAccess[],
+      resolvedCapabilityAccess: runPlan.capabilities.resolvedCapabilityAccess.filter(
+        (access) => access.capabilityId !== omitCapability
+      ) as ResolvedAgentCapabilityAccess[],
       selectedRuntimeMcpConnectionRefs: runPlan.capabilities.selectedRuntimeMcpConnectionRefs,
       agentDefinitionId: runPlan.agent.id,
-      agentSourceKind: runPlan.agent.sourceKind,
+      agentDefinitionOwnerKind: omitOwner ? undefined : runPlan.agent.ownerKind,
+      agentSourceKind: omitSource ? undefined : runPlan.agent.sourceKind,
       workspaceToolDiscoveryTimeoutMs: 4500,
       workspaceToolExecutionTimeoutMs: 22000,
       toolRules,
@@ -500,17 +529,15 @@ describe('First-party agent definition integration regressions', () => {
     async (selection) => {
       const { result, toolSet, controls } = await buildWorkspaceMcpTools({ selection });
       expect(result.runPlanSnapshot.agent.sourceKind).toBe('workspace_session');
-      expect(getCapabilityAccess(result, 'external_mcp_write')).toMatchObject({
-        allowed: true,
-        availability: 'admin_only',
-        approvalMode: 'require_approval',
-      });
+      expect(getCapabilityAccess(result, 'external_mcp_write')).toBeUndefined();
+      expect(getCapabilityAccess(result, 'workspace_shell')).toMatchObject({ allowed: true });
+      expect(getCapabilityAccess(result, 'external_mcp_read')).toMatchObject({ allowed: true });
       expect(controls.mcp.connections[0]).toMatchObject({ selected: true, available: true });
       expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
       expect(toolSet.metadata).toEqual([
         expect.objectContaining({
           capabilityKey: 'external_mcp_write',
-          catalogCapabilityId: 'external_mcp_write',
+          catalogCapabilityId: 'workspace_shell',
           approvalMode: 'require_approval',
         }),
       ]);
@@ -529,7 +556,7 @@ describe('First-party agent definition integration regressions', () => {
   });
 
   it.each(['default', 'selected'] as const)(
-    'omits disabled optional MCP write without blocking the workspace: %s selection',
+    'withholds disabled MCP write without blocking the workspace: %s selection',
     async (selection) => {
       const { result, toolSet, controls } = await buildWorkspaceMcpTools({
         selection,
@@ -540,6 +567,7 @@ describe('First-party agent definition integration regressions', () => {
       expect(getCapabilityAccess(result, 'external_mcp_write')).toBeUndefined();
       expect(controls.mcp.connections[0]).toMatchObject({ available: false, selected: false });
       expect(toolSet.tools).toEqual({});
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
       if (selection === 'selected') {
         expect(result.runPlanSnapshot.capabilities.selectedRuntimeMcpConnectionRefs).toEqual([]);
       }
@@ -548,7 +576,7 @@ describe('First-party agent definition integration regressions', () => {
 
   it.each([
     { writeMode: 'deny' as const, rule: undefined, exposed: false, approval: false },
-    { writeMode: 'allow' as const, rule: undefined, exposed: true, approval: false },
+    { writeMode: 'allow' as const, rule: undefined, exposed: true, approval: true },
     { writeMode: 'deny' as const, rule: 'allow' as const, exposed: true, approval: false },
     { writeMode: 'allow' as const, rule: 'deny' as const, exposed: false, approval: false },
     { writeMode: 'allow' as const, rule: 'require_approval' as const, exposed: true, approval: true },
@@ -560,25 +588,94 @@ describe('First-party agent definition integration regressions', () => {
         writeMode,
         toolRules: rule ? [{ toolKey: 'mcp__sample__sample_tool', mode: rule }] : undefined,
       });
-      expect(getCapabilityAccess(result, 'external_mcp_write')).toMatchObject({
-        allowed: true,
-        approvalMode: writeMode,
-      });
+      expect(getCapabilityAccess(result, 'external_mcp_write')).toBeUndefined();
       expect(controls.mcp.connections[0].available).toBe(true);
       expect(Boolean(toolSet.tools.mcp__sample__sample_tool)).toBe(exposed);
       expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe(approval ? 'user-approval' : undefined);
+      expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(writeMode === 'deny' && !rule ? 0 : 1);
     }
   );
 
   it.each(['http', 'sse'] as const)(
-    'admits selected %s write tools under the Develop write policy',
+    'keeps %s write tools outside Develop even with an exact allow rule',
     async (transport) => {
-      const { toolSet } = await buildWorkspaceMcpTools({ selection: 'selected', transport });
-      expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
-      expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe('user-approval');
+      const { toolSet, controls } = await buildWorkspaceMcpTools({
+        selection: 'selected',
+        transport,
+        writeMode: 'allow',
+        toolRules: [{ toolKey: 'mcp__sample__sample_tool', mode: 'allow' }],
+      });
+      expect(controls.mcp.connections[0].available).toBe(true);
+      expect(toolSet.tools.mcp__sample__sample_tool).toBeUndefined();
+      expect(toolSet.toolApproval.mcp__sample__sample_tool).toBeUndefined();
       expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
     }
   );
+
+  it.each(['http', 'sse'] as const)('preserves Develop %s read tools', async (transport) => {
+    const { toolSet, controls } = await buildWorkspaceMcpTools({ transport, remoteReadOnly: true });
+    expect(controls.mcp.connections[0]).toMatchObject({ available: true, selected: true });
+    expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
+    expect(toolSet.metadata[0]).toMatchObject({
+      capabilityKey: 'external_mcp_read',
+      catalogCapabilityId: 'external_mcp_read',
+    });
+    expect(toolSet.toolApproval.mcp__sample__sample_tool).toBeUndefined();
+    expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+  });
+
+  it.each(['http', 'sse'] as const)(
+    'does not let a %s server select workspace admission through an advertised hint',
+    async (transport) => {
+      const { toolSet } = await buildWorkspaceMcpTools({ transport, advertisedWorkspaceSource: true });
+      expect(toolSet.tools).toEqual({});
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([{ omitOwner: true }, { omitSource: true }])(
+    'withholds workspace discovery without fallback context: %j',
+    async (options) => {
+      const { toolSet } = await buildWorkspaceMcpTools(options);
+      expect(toolSet.tools).toEqual({});
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['workspace_shell', 'external_mcp_read'])(
+    'withholds workspace discovery when %s is not admitted',
+    async (omitCapability) => {
+      const { toolSet } = await buildWorkspaceMcpTools({ omitCapability });
+      expect(toolSet.tools).toEqual({});
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['shellMode', 'readMode'] as const)(
+    'blocks workspace discovery when %s denies fallback authority',
+    async (mode) => {
+      const { toolSet } = await buildWorkspaceMcpTools({ [mode]: 'deny', writeMode: 'allow' });
+      expect(toolSet.tools).toEqual({});
+      expect(mockDiscoverPendingServerTools).not.toHaveBeenCalled();
+    }
+  );
+
+  it('uses explicit allow for all fallback authorities without adding an approval', async () => {
+    const { toolSet } = await buildWorkspaceMcpTools({ writeMode: 'allow', shellMode: 'allow', readMode: 'allow' });
+    expect(toolSet.tools.mcp__sample__sample_tool).toBeDefined();
+    expect(toolSet.toolApproval.mcp__sample__sample_tool).toBeUndefined();
+  });
+
+  it('rediscovers cached stdio tools and applies write approval despite read annotations', async () => {
+    const { toolSet } = await buildWorkspaceMcpTools({ cachedStdio: true });
+    expect(mockDiscoverPendingServerTools).toHaveBeenCalledTimes(1);
+    expect(toolSet.metadata[0]).toMatchObject({
+      capabilityKey: 'external_mcp_write',
+      catalogCapabilityId: 'workspace_shell',
+      approvalMode: 'require_approval',
+    });
+    expect(toolSet.toolApproval.mcp__sample__sample_tool).toBe('user-approval');
+  });
 
   it('seeds the one visible system agent plus legacy readable system definitions', async () => {
     const seeded = await ensureSystemAgentDefinitionsSeeded();
