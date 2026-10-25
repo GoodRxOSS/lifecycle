@@ -15,9 +15,6 @@
  */
 
 (function () {
-  const SERVICE_NAME = window.LFC_SERVICE_NAME || 'service name';
-  const UUID = window.LFC_UUID || 'not found';
-
   const BADGE_STYLES = {
     position: 'fixed',
     bottom: '20px',
@@ -35,28 +32,13 @@
     pointerEvents: 'auto',
   };
 
-  const TERMINAL_COLORS = {
-    bg: '#1E1E1E',
-    text: '#D4D4D4',
-    error: '#FF5252',
-    warning: '#FFA726',
-    info: '#4CAF50',
-    prompt: '#64B5F6',
-  };
-
   const LINK_STYLES = 'color: #4CAF50; text-decoration: none; border-bottom: 1px dotted #4CAF50;';
   const BADGE_ID = 'versionBadge';
-  const LOG_MODAL_ID = 'logsModal';
-  const LOG_MODAL_CONTENT_ID = 'logsModalContent';
-  const LOG_BUTTON_ID = 'showLogsButton';
-  const SEARCH_INPUT_ID = 'logSearchInput';
+  const LOGS_BUTTON_ID = 'openLogsButton';
 
   let shadowRoot = null;
-  let logsModal = null;
-  let evtSource = null;
   const state = {
     isHidden: true,
-    terminalWasOpen: false,
     shouldShowBadge: false,
     isCollapsed: false,
     badgePosition: {
@@ -134,7 +116,6 @@
 
     state.isHidden = hiddenState === null ? true : hiddenState === 'true';
     state.shouldShowBadge = badgeVisibleState === null ? false : badgeVisibleState === 'true';
-    state.terminalWasOpen = localStorage.getItem('terminalWasOpen') === 'true';
     state.isCollapsed = localStorage.getItem('bannerCollapsed') === 'true';
 
     const savedPosition = localStorage.getItem('badgePosition');
@@ -155,11 +136,6 @@
     state.shouldShowBadge = true;
     toggleBadge();
     saveState();
-
-    if (state.terminalWasOpen) {
-      if (!logsModal) logsModal = createLogsModal();
-      showLogsModal();
-    }
   }
 
   function toggleBadge(forceHide = false) {
@@ -179,14 +155,13 @@
     }
 
     badge = createBadge(content);
-    addShowLogsButton(badge);
+    addLogsButton(badge);
     shadowRoot.appendChild(badge);
     saveState();
   }
 
   function saveState() {
     localStorage.setItem('componentsHidden', state.isHidden);
-    localStorage.setItem('terminalWasOpen', state.terminalWasOpen);
     localStorage.setItem('badgeVisible', state.shouldShowBadge);
     localStorage.setItem('badgePosition', JSON.stringify(state.badgePosition));
     localStorage.setItem('bannerCollapsed', state.isCollapsed);
@@ -355,7 +330,7 @@
 
   function updateBadgeCollapsedState(badge, contentWrapper) {
     const collapseBtn = badge.querySelector('#collapse-btn');
-    const buttonContainer = shadowRoot.getElementById(`${LOG_BUTTON_ID}-container`);
+    const buttonContainer = shadowRoot.getElementById(`${LOGS_BUTTON_ID}-container`);
     const dragHandle = badge.querySelector('#drag-handle');
 
     if (state.isCollapsed) {
@@ -378,7 +353,7 @@
       collapseBtn.style.borderRadius = '50%';
     } else {
       contentWrapper.style.display = 'block';
-      if (buttonContainer && !state.terminalWasOpen) buttonContainer.style.display = 'block';
+      if (buttonContainer) buttonContainer.style.display = 'block';
       if (dragHandle) dragHandle.style.display = 'block';
       badge.style.width = '';
       badge.style.height = '';
@@ -425,19 +400,27 @@
     return badge;
   }
 
-  function addShowLogsButton(badge) {
+  function addLogsButton(badge) {
+    let environmentUrl;
+    try {
+      environmentUrl = new URL(window.LFC_ENVIRONMENT_URL || window.LFC_DASHBOARD_URL || '');
+      if (!['https:', 'http:'].includes(environmentUrl.protocol)) return;
+    } catch {
+      return;
+    }
+
     const buttonContainer = document.createElement('div');
-    buttonContainer.id = `${LOG_BUTTON_ID}-container`;
+    buttonContainer.id = `${LOGS_BUTTON_ID}-container`;
     Object.assign(buttonContainer.style, {
       padding: '8px 15px 15px 15px',
       borderTop: '1px solid rgba(255, 255, 255, 0.1)',
       marginTop: '10px',
-      display: state.terminalWasOpen || state.isCollapsed ? 'none' : 'block',
+      display: state.isCollapsed ? 'none' : 'block',
     });
 
     const btn = document.createElement('button');
-    btn.id = LOG_BUTTON_ID;
-    btn.textContent = 'Show logs';
+    btn.id = LOGS_BUTTON_ID;
+    btn.textContent = 'View logs';
     Object.assign(btn.style, {
       padding: '8px 12px',
       fontSize: '14px',
@@ -454,273 +437,16 @@
     btn.addEventListener('mouseout', () => (btn.style.backgroundColor = 'rgba(255, 255, 255, 0.1)'));
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      showLogsModal();
-      buttonContainer.style.display = 'none';
+      window.open(environmentUrl.toString(), '_blank', 'noopener,noreferrer');
     });
 
     buttonContainer.appendChild(btn);
     badge.appendChild(buttonContainer);
   }
 
-  function createLogsModal() {
-    const modal = document.createElement('div');
-    modal.id = LOG_MODAL_ID;
-    Object.assign(modal.style, {
-      position: 'fixed',
-      left: '0',
-      right: '0',
-      bottom: '0',
-      height: '400px',
-      backgroundColor: TERMINAL_COLORS.bg,
-      borderTop: `2px solid ${TERMINAL_COLORS.prompt}`,
-      zIndex: '2147483647',
-      overflow: 'hidden',
-      display: 'none',
-      fontFamily: '"Fira Code", "Source Code Pro", monospace',
-      pointerEvents: 'auto',
-    });
-
-    const header = document.createElement('div');
-    Object.assign(header.style, {
-      height: '40px',
-      backgroundColor: '#2D2D2D',
-      borderBottom: '1px solid #3D3D3D',
-      display: 'flex',
-      alignItems: 'center',
-      padding: '0 10px',
-      cursor: 'ns-resize',
-      position: 'relative',
-    });
-
-    const controls = document.createElement('div');
-    controls.innerHTML = `
-      <span style="height: 12px; width: 12px; background-color: #FF5F56; border-radius: 50%; display: inline-block; margin-right: 6px;"></span>
-      <span style="height: 12px; width: 12px; background-color: #FFBD2E; border-radius: 50%; display: inline-block; margin-right: 6px;"></span>
-      <span style="height: 12px; width: 12px; background-color: #27C93F; border-radius: 50%; display: inline-block;"></span>
-    `;
-    header.appendChild(controls);
-
-    const searchContainer = document.createElement('div');
-    Object.assign(searchContainer.style, {
-      position: 'absolute',
-      right: '40px',
-      top: '50%',
-      transform: 'translateY(-50%)',
-      display: 'flex',
-      alignItems: 'center',
-      zIndex: '1',
-    });
-
-    const searchInput = document.createElement('input');
-    searchInput.id = SEARCH_INPUT_ID;
-    Object.assign(searchInput.style, {
-      backgroundColor: '#3D3D3D',
-      border: 'none',
-      color: TERMINAL_COLORS.text,
-      padding: '5px 10px',
-      borderRadius: '4px',
-      width: '200px',
-      fontSize: '14px',
-      height: '28px',
-    });
-    searchInput.placeholder = 'Filter logs...';
-    searchContainer.appendChild(searchInput);
-
-    const copyBtn = document.createElement('button');
-    copyBtn.textContent = 'Copy';
-    Object.assign(copyBtn.style, {
-      backgroundColor: '#3D3D3D',
-      border: 'none',
-      color: TERMINAL_COLORS.text,
-      padding: '5px 10px',
-      borderRadius: '4px',
-      marginLeft: '8px',
-      cursor: 'pointer',
-      fontSize: '14px',
-      height: '28px',
-    });
-
-    copyBtn.addEventListener('click', async () => {
-      const contentDiv = shadowRoot.getElementById(LOG_MODAL_CONTENT_ID);
-      const logLines = Array.from(contentDiv.getElementsByClassName('log-line'))
-        .filter((line) => line.style.display !== 'none')
-        .map((line) => line.textContent)
-        .join('\n');
-
-      try {
-        await navigator.clipboard.writeText(logLines);
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => {
-          copyBtn.textContent = 'Copy';
-        }, 2000);
-      } catch (err) {
-        console.error('Failed to copy logs:', err);
-        copyBtn.textContent = 'Failed';
-        setTimeout(() => {
-          copyBtn.textContent = 'Copy';
-        }, 2000);
-      }
-    });
-
-    copyBtn.addEventListener('mouseover', () => (copyBtn.style.backgroundColor = '#4D4D4D'));
-    copyBtn.addEventListener('mouseout', () => (copyBtn.style.backgroundColor = '#3D3D3D'));
-
-    searchContainer.appendChild(copyBtn);
-
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '\u2715';
-    Object.assign(closeBtn.style, {
-      position: 'absolute',
-      right: '10px',
-      top: '50%',
-      transform: 'translateY(-50%)',
-      backgroundColor: 'transparent',
-      border: 'none',
-      color: TERMINAL_COLORS.text,
-      fontSize: '20px',
-      cursor: 'pointer',
-      padding: '5px',
-      lineHeight: '1',
-      zIndex: '1',
-    });
-    closeBtn.addEventListener('click', hideLogsModal);
-
-    header.appendChild(searchContainer);
-    header.appendChild(closeBtn);
-    modal.appendChild(header);
-
-    const contentDiv = document.createElement('div');
-    contentDiv.id = LOG_MODAL_CONTENT_ID;
-    Object.assign(contentDiv.style, {
-      position: 'absolute',
-      top: '40px',
-      bottom: '0',
-      left: '0',
-      right: '0',
-      overflowY: 'auto',
-      padding: '10px',
-      backgroundColor: TERMINAL_COLORS.bg,
-      color: TERMINAL_COLORS.text,
-      fontSize: '14px',
-      lineHeight: '1.5',
-      userSelect: 'text',
-    });
-    modal.appendChild(contentDiv);
-
-    let isResizing = false;
-    let startY = 0;
-    let startHeight = 0;
-
-    header.addEventListener('mousedown', (e) => {
-      if (e.target === searchInput || e.target.closest('button')) return;
-      isResizing = true;
-      startY = e.clientY;
-      startHeight = parseInt(window.getComputedStyle(modal).height, 10);
-      document.body.style.cursor = 'ns-resize';
-      e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isResizing) return;
-      const dy = startY - e.clientY;
-      const newHeight = startHeight + dy;
-      if (newHeight > 200) modal.style.height = `${newHeight}px`;
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (isResizing) {
-        isResizing = false;
-        document.body.style.cursor = '';
-      }
-    });
-
-    searchInput.addEventListener('input', (e) => {
-      const searchTerm = e.target.value.toLowerCase();
-      Array.from(contentDiv.getElementsByClassName('log-line')).forEach((line) => {
-        line.style.display = line.textContent.toLowerCase().includes(searchTerm) ? 'block' : 'none';
-      });
-    });
-
-    shadowRoot.appendChild(modal);
-    return modal;
-  }
-
-  function colorizeLog(logText) {
-    if (logText.includes('Error:') || logText.includes('[ERROR]')) {
-      return `<span style="color: ${TERMINAL_COLORS.error}">${logText}</span>`;
-    }
-    if (logText.includes('Warning:') || logText.includes('[WARN]')) {
-      return `<span style="color: ${TERMINAL_COLORS.warning}">${logText}</span>`;
-    }
-    if (logText.includes('Info:') || logText.includes('[INFO]')) {
-      return `<span style="color: ${TERMINAL_COLORS.info}">${logText}</span>`;
-    }
-    return logText;
-  }
-
-  function getBaseUrl() {
-    return window.LFC_BASE_URL || 'PLEASE_UPDATE';
-  }
-
-  function showLogsModal() {
-    if (!logsModal) logsModal = createLogsModal();
-    logsModal.style.display = 'block';
-    state.terminalWasOpen = true;
-    saveState();
-
-    const contentDiv = shadowRoot.getElementById(LOG_MODAL_CONTENT_ID);
-    contentDiv.innerHTML = '';
-
-    const url = `${getBaseUrl()}/api/v1/builds/${encodeURIComponent(UUID)}/services/${encodeURIComponent(
-      SERVICE_NAME
-    )}/logs`;
-    evtSource = new EventSource(url);
-
-    evtSource.onmessage = (event) => {
-      const logLine = document.createElement('div');
-      logLine.className = 'log-line';
-      logLine.innerHTML = colorizeLog(event.data);
-      contentDiv.appendChild(logLine);
-
-      const searchTerm = shadowRoot.getElementById(SEARCH_INPUT_ID).value.toLowerCase();
-      if (searchTerm) {
-        logLine.style.display = event.data.toLowerCase().includes(searchTerm) ? 'block' : 'none';
-      }
-      contentDiv.scrollTop = contentDiv.scrollHeight;
-    };
-
-    evtSource.onerror = (error) => console.error('SSE error:', error);
-  }
-
-  function hideLogsModal() {
-    if (logsModal) {
-      logsModal.style.display = 'none';
-      state.terminalWasOpen = false;
-      saveState();
-
-      const buttonContainer = shadowRoot.getElementById(`${LOG_BUTTON_ID}-container`);
-      if (buttonContainer && !state.isCollapsed) buttonContainer.style.display = 'block';
-    }
-    if (evtSource) {
-      evtSource.close();
-      evtSource = null;
-    }
-  }
-
   function hideAll() {
-    const wasTerminalOpen = logsModal?.style.display === 'block';
-
-    if (logsModal) {
-      logsModal.style.display = 'none';
-      if (evtSource) {
-        evtSource.close();
-        evtSource = null;
-      }
-    }
-
     toggleBadge(true);
     state.isHidden = true;
-    state.terminalWasOpen = wasTerminalOpen;
     saveState();
   }
 
@@ -738,14 +464,8 @@
     loadState();
     initShortcut();
 
-    if (!state.isHidden) {
-      if (state.shouldShowBadge) {
-        toggleBadge();
-      }
-      if (state.terminalWasOpen) {
-        if (!logsModal) logsModal = createLogsModal();
-        showLogsModal();
-      }
+    if (!state.isHidden && state.shouldShowBadge) {
+      toggleBadge();
     }
 
     setInterval(() => {
