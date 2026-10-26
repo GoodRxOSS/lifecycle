@@ -2100,7 +2100,8 @@ export default class BuildService extends BaseService {
               .where((teardown) => {
                 teardown
                   .where('status', BuildStatus.TEARING_DOWN)
-                  .orWhereRaw('?? = concat(?, ??)', ['runUUID', 'build-teardown-', 'id']);
+                  // Postgres can't infer the type of a bare bind parameter inside concat(), so it must be cast.
+                  .orWhereRaw('?? = concat(?::text, ??)', ['runUUID', 'build-teardown-', 'id']);
               });
           });
       })
@@ -2124,7 +2125,14 @@ export default class BuildService extends BaseService {
   }
 
   processApiEnvironmentExpiryQueue = async () => {
-    const result = await this.sweepExpiredApiEnvironments();
+    let result: Awaited<ReturnType<BuildService['sweepExpiredApiEnvironments']>>;
+    try {
+      result = await this.sweepExpiredApiEnvironments();
+    } catch (error) {
+      // The queue drops failed jobs, so without this a broken sweep fails silently every run.
+      getLogger().error({ error }, 'Environment: expiry sweep failed');
+      throw error;
+    }
     if (result.expired > 0 || result.stuckTeardowns > 0) {
       getLogger().info(
         `Environment: expiry sweep complete expired=${result.expired} stuckTeardowns=${result.stuckTeardowns} enqueued=${result.enqueued}`
