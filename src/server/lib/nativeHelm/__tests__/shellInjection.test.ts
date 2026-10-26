@@ -30,6 +30,7 @@ jest.mock('server/services/globalConfig');
 
 import { ChartType, escapeHelmValue, generateHelmInstallScript } from '../utils';
 import { createHelmContainer } from '../helm';
+import { serializeHelmEnvMap } from '../../helm/utils';
 import { createCloneScript, createGitCloneContainer } from '../../nativeBuild/utils';
 
 const simulateK8sExpand = (input: string, env: Record<string, string> = {}): string => {
@@ -116,7 +117,7 @@ describe('native helm deploy script with shell metacharacters', () => {
     const { result, argv } = runScript(script, { NODE_ENV: 'production' });
 
     expect(result.status).toBe(0);
-    expect(argv).toContain(`deployment.env.KEY=${escapeHelmValue(value)}`);
+    expect(argv).toContain(`deployment.env.KEY=${escapeHelmValue(value).replace(/\\([\\"$`])/g, '$1')}`);
     expect(argv).toContain('plain.key=plain');
     expect(fs.readdirSync(workDir)).toEqual([]);
   });
@@ -195,5 +196,83 @@ describe('git clone scripts with hostile refs', () => {
   it('escapes dollar signs in revision and target dir for the clone container', () => {
     const container = createGitCloneContainer('owner/repo', 'rev$(touch PWNED)', 'u', 'p');
     expect(container.args[0]).toContain("'rev$$(touch PWNED)'");
+  });
+});
+
+describe('legacy --set value compatibility', () => {
+  // Shapes found in real configs: values sh used to rewrite inside double quotes.
+  const LEGACY_VALUES = [
+    'master.disableCommands[0]="FLUSHALL"',
+    'auth.username=""',
+    'secrets.env.WEB_SERVICE="svc.example.svc.cluster.local/pass-api"',
+    'job.annotations.helm\\.sh/hook=post-install\\,post-upgrade',
+    'ingress.extraAnnotations.external-dns\\.alpha\\.kubernetes\\.io/hostname=host.example.com',
+    'plain.key=plain',
+    'url.key=https://host.example.com/a/b?x=1',
+    ...serializeHelmEnvMap(
+      {
+        PLAIN: 'value',
+        SLASHED: 'a/b/c',
+        NUMBER: 3,
+        FLAG: true,
+        TOKEN: { valueFrom: { secretKeyRef: { name: 'app-secrets', key: 'TOKEN' } } },
+      },
+      'deployment.env',
+      { quoteStringValues: true }
+    ),
+  ];
+
+  const oldShellArgv = (entry: string): string[] => {
+    const eq = entry.indexOf('=');
+    const key = entry.slice(0, eq);
+    const val = escapeHelmValue(entry.slice(eq + 1));
+    const result = spawnSync('/bin/sh', ['-c', `printf '%s\\0' --set "${key}=${val}"`], { encoding: 'utf8' });
+    return result.stdout.split('\0').slice(0, -1);
+  };
+
+  const newArgv = (entry: string): string[] => {
+    const script = generateHelmInstallScript(
+      'no-repo',
+      'chart',
+      'rel',
+      'env-test',
+      [entry],
+      [],
+      ChartType.ORG_CHART,
+      undefined,
+      'oci://registry.example.com/chart'
+    );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'helm-legacy-'));
+    const argvFile = path.join(dir, 'argv');
+    fs.writeFileSync(
+      path.join(dir, 'helm'),
+      `#!/bin/sh\nfor a in "$@"; do printf '%s\\0' "$a" >> "${argvFile}"; done\n`,
+      {
+        mode: 0o755,
+      }
+    );
+    try {
+      spawnSync('/bin/sh', ['-c', simulateK8sExpand(script)], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+      });
+      const argv = fs.readFileSync(argvFile, 'utf8').split('\0').slice(0, -1);
+      const idx = argv.indexOf('--set');
+      return argv.slice(idx, idx + 2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it.each(LEGACY_VALUES)('passes %s to helm exactly as the old shell evaluation did', (entry) => {
+    expect(newArgv(entry)).toEqual(oldShellArgv(entry));
+  });
+
+  it('strips the quotes the env serializer adds to secret names', () => {
+    expect(newArgv('deployment.env.TOKEN.valueFrom.secretKeyRef.name="app-secrets"')).toEqual([
+      '--set',
+      'deployment.env.TOKEN.valueFrom.secretKeyRef.name=app-secrets',
+    ]);
   });
 });

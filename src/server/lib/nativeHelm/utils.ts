@@ -106,6 +106,28 @@ function mergeNativeHelmConfig(
   };
 }
 
+// Custom values used to be evaluated by sh inside double quotes, and configs and the env serializer rely
+// on two of its effects: a value wrapped in quotes loses them (`k="x"`, `k=""`), and `\\`, `\"`, `\$`
+// and `\`` lose their backslash. Reproduce just those, without any expansion.
+function unescapeShellDoubleQuoted(value: string): string {
+  return value.replace(/\\([\\"$`])/g, '$1');
+}
+
+function toHelmSetValue(val: string): string {
+  if (val.length >= 2 && val.startsWith('"') && val.endsWith('"')) {
+    let unwrapped: string;
+    try {
+      const parsed = JSON.parse(val);
+      unwrapped = typeof parsed === 'string' ? parsed : unescapeShellDoubleQuoted(val.slice(1, -1));
+    } catch {
+      unwrapped = unescapeShellDoubleQuoted(val.slice(1, -1));
+    }
+    return unwrapped.replace(/(?<!\\),/g, '\\,');
+  }
+
+  return unescapeShellDoubleQuoted(escapeHelmValue(val));
+}
+
 export function constructHelmCommand(
   action: string,
   chartPath: string,
@@ -161,8 +183,7 @@ export function constructHelmCommand(
     if (equalIndex > -1) {
       const key = value.substring(0, equalIndex);
       const val = value.substring(equalIndex + 1);
-      const escapedVal = escapeHelmValue(val);
-      command += ` --set ${shellQuote(`${key}=${escapedVal}`)}`;
+      command += ` --set ${shellQuote(`${key}=${toHelmSetValue(val)}`)}`;
     } else {
       command += ` --set ${shellQuote(value)}`;
     }
