@@ -16,6 +16,7 @@
 
 import { V1Job } from '@kubernetes/client-node';
 import GlobalConfigService from '../../services/globalConfig';
+import { quoteForJobScript } from '../shellQuote';
 import { createBuildJob } from '../kubernetes/jobFactory';
 import { JobMonitor } from '../kubernetes/JobMonitor';
 
@@ -163,9 +164,13 @@ export const GIT_USERNAME = 'x-access-token';
 export const MANIFEST_PATH = '/tmp/manifests';
 
 export function createCloneScript(repo: string, branch: string, sha?: string): string {
-  const cloneCmd = `git clone --depth 1 --single-branch --progress -b ${branch} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
+  const cloneCmd = `git clone --depth 1 --single-branch --progress -b ${quoteForJobScript(
+    branch
+  )} https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git /workspace`;
   const checkoutCmd = sha
-    ? ` && cd /workspace && git fetch --depth 1 --progress origin ${sha} && git checkout ${sha}`
+    ? ` && cd /workspace && git fetch --depth 1 --progress origin ${quoteForJobScript(
+        sha
+      )} && git checkout ${quoteForJobScript(sha)}`
     : '';
   return `${cloneCmd}${checkoutCmd}`;
 }
@@ -179,7 +184,7 @@ export function createGitCloneContainer(repo: string, revision: string, gitUsern
       `git config --global --add safe.directory /workspace && \
        git init /workspace && cd /workspace && \
        git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
-       git fetch --depth 1 --progress origin ${revision} && \
+       git fetch --depth 1 --progress origin ${quoteForJobScript(revision)} && \
        git checkout FETCH_HEAD`,
     ],
     env: [
@@ -213,10 +218,10 @@ export function createRepoSpecificGitCloneContainer(
     image: 'alpine/git:latest',
     command: ['sh', '-c'],
     args: [
-      `git config --global --add safe.directory ${targetDir} && \
-       git init ${targetDir} && cd ${targetDir} && \
+      `git config --global --add safe.directory ${quoteForJobScript(targetDir)} && \
+       git init ${quoteForJobScript(targetDir)} && cd ${quoteForJobScript(targetDir)} && \
        git remote add origin https://\${GIT_USERNAME}:\${GIT_PASSWORD}@github.com/${repo}.git && \
-       git fetch --depth 1 --progress origin ${revision} && \
+       git fetch --depth 1 --progress origin ${quoteForJobScript(revision)} && \
        git checkout FETCH_HEAD`,
     ],
     env: [

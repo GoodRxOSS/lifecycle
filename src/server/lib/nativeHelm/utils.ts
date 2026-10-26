@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { shellQuote, quoteIfNeeded, quoteForJobScript, escapeK8sDollar } from '../shellQuote';
 import Deploy from 'server/models/Deploy';
 import GlobalConfigService from 'server/services/globalConfig';
 import { ChartType, REPO_MAPPINGS, STATIC_ENV_JOB_TTL_SECONDS, HELM_JOB_TIMEOUT_SECONDS } from './constants';
@@ -56,19 +57,15 @@ export interface HelmConfiguration {
   helmVersion: string;
 }
 
-function shellEscape(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function buildPostRendererFlags(postRenderer?: NativeHelmPostRendererConfig): string {
   if (!postRenderer?.command || postRenderer.enabled === false) {
     return '';
   }
 
-  let flags = ` --post-renderer ${shellEscape(postRenderer.command)}`;
+  let flags = ` --post-renderer ${shellQuote(postRenderer.command)}`;
 
   (postRenderer.args || []).forEach((arg) => {
-    flags += ` --post-renderer-args ${shellEscape(arg)}`;
+    flags += ` --post-renderer-args ${shellQuote(arg)}`;
   });
 
   return flags;
@@ -124,37 +121,37 @@ export function constructHelmCommand(
   postRenderer?: NativeHelmPostRendererConfig,
   secretSetFiles: HelmSecretSetFile[] = []
 ): string {
-  let command = `helm ${action} ${releaseName}`;
+  let command = `helm ${action} ${quoteIfNeeded(releaseName)}`;
 
   if (chartType === ChartType.LOCAL) {
     const normalizedPath = chartPath.startsWith('./') || chartPath.startsWith('../') ? chartPath : `./${chartPath}`;
-    command += ` ${normalizedPath}`;
+    command += ` ${quoteIfNeeded(normalizedPath)}`;
   } else if (chartType === ChartType.PUBLIC) {
     const isOciChart = chartRepoUrl?.startsWith('oci://');
 
     if (isOciChart) {
-      command += ` ${chartRepoUrl}`;
+      command += ` ${quoteIfNeeded(chartRepoUrl as string)}`;
     } else if (chartPath.includes('/')) {
-      command += ` ${chartPath}`;
+      command += ` ${quoteIfNeeded(chartPath)}`;
     } else if (chartRepoUrl) {
       const repoAlias = getRepoAliasFromUrl(chartRepoUrl);
-      command += ` ${repoAlias}/${chartPath}`;
+      command += ` ${quoteIfNeeded(`${repoAlias}/${chartPath}`)}`;
     } else {
-      command += ` ${chartPath}`;
+      command += ` ${quoteIfNeeded(chartPath)}`;
     }
   } else {
     const isOciChart = chartRepoUrl?.startsWith('oci://');
     if (isOciChart) {
-      command += ` ${chartRepoUrl}`;
+      command += ` ${quoteIfNeeded(chartRepoUrl as string)}`;
     } else {
-      command += ` ${chartPath}`;
+      command += ` ${quoteIfNeeded(chartPath)}`;
     }
   }
 
-  command += ` --namespace ${namespace}`;
+  command += ` --namespace ${quoteIfNeeded(namespace)}`;
 
   if (chartVersion && (chartType === ChartType.PUBLIC || chartType === ChartType.ORG_CHART)) {
-    command += ` --version ${chartVersion}`;
+    command += ` --version ${quoteIfNeeded(chartVersion)}`;
   }
 
   command += buildPostRendererFlags(postRenderer);
@@ -165,9 +162,9 @@ export function constructHelmCommand(
       const key = value.substring(0, equalIndex);
       const val = value.substring(equalIndex + 1);
       const escapedVal = escapeHelmValue(val);
-      command += ` --set "${key}=${escapedVal}"`;
+      command += ` --set ${shellQuote(`${key}=${escapedVal}`)}`;
     } else {
-      command += ` --set "${value}"`;
+      command += ` --set ${shellQuote(value)}`;
     }
   };
 
@@ -176,15 +173,15 @@ export function constructHelmCommand(
   });
 
   secretSetFiles.forEach((file) => {
-    command += ` --set-file "${file.helmKey}=${file.mountPath}"`;
+    command += ` --set-file ${shellQuote(`${file.helmKey}=${file.mountPath}`)}`;
   });
 
   valuesFiles.forEach((file) => {
     if (chartType === ChartType.LOCAL) {
       const normalizedFile = file.startsWith('./') || file.startsWith('../') ? file : `./${file}`;
-      command += ` -f ${normalizedFile}`;
+      command += ` -f ${quoteIfNeeded(normalizedFile)}`;
     } else {
-      command += ` -f ${file}`;
+      command += ` -f ${quoteIfNeeded(file)}`;
     }
   });
   const allArgs = [defaultArgs, args].filter(Boolean).join(' ');
@@ -227,7 +224,12 @@ export function generateHelmInstallScript(
     secretSetFiles
   );
 
-  let script = ['set -e', `echo "Starting helm deployment for ${releaseName}"`, ''].join('\n');
+  const scriptHelmQuote = (value: string) => escapeK8sDollar(shellQuote(value));
+  const scriptHelmCommand = escapeK8sDollar(helmCommand);
+
+  let script = ['set -e', `printf '%s\\n' ${scriptHelmQuote(`Starting helm deployment for ${releaseName}`)}`, ''].join(
+    '\n'
+  );
 
   if (repoName !== 'no-repo' && repoName.includes('/')) {
     script += `cd /workspace
@@ -246,15 +248,15 @@ ls -la
         const [repoName] = chartPath.split('/');
         const repoUrl = getRepoUrl(repoName);
         script += `
-echo "Adding helm repository ${repoName}: ${repoUrl}"
-helm repo add ${repoName} ${repoUrl}
+printf '%s\\n' ${scriptHelmQuote(`Adding helm repository ${repoName}: ${repoUrl}`)}
+helm repo add ${quoteForJobScript(repoName)} ${quoteForJobScript(repoUrl)}
 helm repo update
 `;
       } else if (chartRepoUrl) {
         const repoAlias = getRepoAliasFromUrl(chartRepoUrl);
         script += `
-echo "Adding helm repository ${repoAlias}: ${chartRepoUrl}"
-helm repo add ${repoAlias} ${chartRepoUrl}
+printf '%s\\n' ${scriptHelmQuote(`Adding helm repository ${repoAlias}: ${chartRepoUrl}`)}
+helm repo add ${quoteForJobScript(repoAlias)} ${quoteForJobScript(chartRepoUrl)}
 helm repo update
 `;
       }
@@ -269,8 +271,8 @@ ${generateRegistryLoginScript(registryAuth)}
   }
 
   script += `
-echo "Executing: ${helmCommand}"
-${helmCommand}
+printf '%s\\n' ${scriptHelmQuote(`Executing: ${helmCommand}`)}
+${scriptHelmCommand}
 
 echo "Helm deployment completed successfully"
 `;
