@@ -14,7 +14,12 @@
  * limitations under the License.
  */
 
-import { buildkitBuild, buildWithEngine, NativeBuildOptions, generateSecretArgsScript } from '../engines';
+import { buildkitBuild, buildWithEngine, NativeBuildOptions, generateSecretArgsScript, shellQuote } from '../engines';
+import { spawnSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
 import { shellPromise } from '../../shell';
 import { getLogger } from '../../logger';
 import { waitForJobAndGetLogs, getGitHubToken } from '../utils';
@@ -227,7 +232,7 @@ describe('buildkitBuild', () => {
     const fullCommand = applyCall[0];
 
     // Should have init build with proper filename
-    expect(fullCommand).toContain('filename=Dockerfile.init');
+    expect(fullCommand).toContain("'filename=Dockerfile.init'");
     expect(fullCommand).toContain('name=123456789.dkr.ecr.us-east-1.amazonaws.com/test-repo:v1.0.0-init');
   });
 
@@ -290,7 +295,7 @@ describe('buildkitBuild', () => {
     const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
     const fullCommand = applyCall[0];
 
-    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"123456789.dkr.ecr.us-east-1.amazonaws.com\\"');
+    expect(fullCommand).toContain("REGISTRY_DOMAIN='123456789.dkr.ecr.us-east-1.amazonaws.com'");
     expect(fullCommand).toContain('Detected AWS ECR registry');
     expect(fullCommand).toContain('AWS_REGION=$(echo \\"${REGISTRY_DOMAIN}\\" | sed');
     expect(fullCommand).toContain('aws sts get-caller-identity');
@@ -316,7 +321,7 @@ describe('buildkitBuild', () => {
     const applyCall = kubectlCalls.find((call) => call[0].includes('kubectl apply'));
     const fullCommand = applyCall[0];
 
-    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"registry.internal.svc.cluster.local\\"');
+    expect(fullCommand).toContain("REGISTRY_DOMAIN='registry.internal.svc.cluster.local'");
     expect(fullCommand).toContain('apk add --no-cache docker-cli');
   });
 
@@ -409,7 +414,7 @@ describe('buildkitBuild', () => {
     expect(result.success).toBe(true);
     expect(staticDeploy.$fetchGraph).toHaveBeenCalledWith('build');
     expect(fullCommand).toContain('git init /workspace/repo-repo-only');
-    expect(fullCommand).toContain('filename=Dockerfile');
+    expect(fullCommand).toContain("'filename=Dockerfile'");
     expect(fullCommand).toContain('lfc/dockerfile: "Dockerfile"');
     expect(fullCommand).toContain('ttlSecondsAfterFinished: 86400');
     expect(fullCommand).toContain('name: "runtime-secrets"');
@@ -738,7 +743,7 @@ describe('native build GAR registry auth', () => {
 
     expect(fullCommand).toContain('name: "registry-auth-copy"');
     expect(fullCommand).toContain('mountPath: "/root/.docker"');
-    expect(fullCommand).toContain('REGISTRY_DOMAIN=\\"123456789.dkr.ecr.us-east-1.amazonaws.com\\"');
+    expect(fullCommand).toContain("REGISTRY_DOMAIN='123456789.dkr.ecr.us-east-1.amazonaws.com'");
     expect(fullCommand).toContain('Detected AWS ECR registry');
     expect(fullCommand).toContain(
       'echo \\"$ECR_PASSWORD\\" | docker login --username AWS --password-stdin ${REGISTRY_DOMAIN}'
@@ -1160,14 +1165,14 @@ describe('generateSecretArgsScript', () => {
   it('generates shell script for single secret key', () => {
     const result = generateSecretArgsScript(['AWS_SECRET']);
     expect(result).toBe(
-      '[ -n "$AWS_SECRET" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:AWS_SECRET=$AWS_SECRET --secret id=AWS_SECRET,env=AWS_SECRET"'
+      '[ -n "$AWS_SECRET" ] && set -- "$@" --opt "build-arg:AWS_SECRET=$AWS_SECRET" --secret "id=AWS_SECRET,env=AWS_SECRET"'
     );
   });
 
   it('passes each secret as a BuildKit secret, so RUN --mount=type=secret can read it', () => {
     const result = generateSecretArgsScript(['NPM_TOKEN']);
-    expect(result).toContain('--secret id=NPM_TOKEN,env=NPM_TOKEN');
-    expect(result).not.toContain('--secret id=NPM_TOKEN,env=$NPM_TOKEN');
+    expect(result).toContain('--secret "id=NPM_TOKEN,env=NPM_TOKEN"');
+    expect(result).not.toContain('env=$NPM_TOKEN');
   });
 
   it('generates shell script for multiple secret keys', () => {
@@ -1182,7 +1187,7 @@ describe('generateSecretArgsScript', () => {
     const result = generateSecretArgsScript(['MY_SECRET']);
     expect(result).not.toContain('\\$');
     expect(result).toContain('$MY_SECRET');
-    expect(result).toContain('--opt build-arg:MY_SECRET=');
+    expect(result).toContain('"build-arg:MY_SECRET=$MY_SECRET"');
   });
 });
 
@@ -1298,7 +1303,7 @@ describe('build cache mode', () => {
   const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   const buildctlArg = (flag: string, value: string): RegExp =>
-    new RegExp(`${flag}(?:[\\\\\\sn])+${escapeRegExp(value)}(?![^\\\\\\s])`);
+    new RegExp(`'${flag}'(?:[\\\\\\sn])+'${escapeRegExp(value)}'`);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -1396,5 +1401,122 @@ describe('build cache mode', () => {
     const fullCommand = getApplyCommand();
     expect(fullCommand).toContain('--cache=true');
     expect(fullCommand).toContain('--cache-repo=registry.example.com/test-repo/my-app/cache');
+  });
+});
+
+const HOSTILE_VALUES: Record<string, string> = {
+  ampersand: 'pr-12&x=<y>',
+  'redirect in': 'a<b',
+  'redirect out': 'a>b',
+  semicolon: 'a;touch INJECTED',
+  'command substitution': 'a$(touch INJECTED)b',
+  backticks: 'a`touch INJECTED`b',
+  'single quote': "it's",
+  'double quote': 'say "hi"',
+  newline: 'line1\nline2; touch INJECTED',
+  'dollar and backslash': '$HOME\\n\\$',
+  pipe: 'a|b||c',
+  empty: '',
+};
+
+describe('shellQuote', () => {
+  it.each(Object.entries(HOSTILE_VALUES))('round-trips %s through sh unchanged', (_name, value) => {
+    const result = spawnSync('/bin/sh', ['-c', `printf %s ${shellQuote(value)}; ls INJECTED 2>/dev/null`], {
+      encoding: 'utf8',
+      cwd: os.tmpdir(),
+    });
+    expect(result.stdout).toBe(value);
+  });
+});
+
+describe('buildkit build args with shell metacharacters', () => {
+  const mockDeploy = {
+    deployable: { name: 'my-app' },
+    $fetchGraph: jest.fn(),
+    build: { isStatic: false },
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (getGitHubToken as jest.Mock).mockResolvedValue('github-token-123');
+    (createNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (deleteNativeBuildRegistryAuthSecret as jest.Mock).mockResolvedValue(undefined);
+    (shellPromise as jest.Mock).mockResolvedValue('');
+    (GlobalConfigService.getInstance as jest.Mock).mockReturnValue({
+      getAllConfigs: jest.fn().mockResolvedValue({ buildDefaults: {} }),
+    });
+    (waitForJobAndGetLogs as jest.Mock).mockResolvedValue({ logs: '', success: true });
+    (getLogArchivalService as jest.Mock).mockReturnValue({ archiveLogs: jest.fn() });
+  });
+
+  const extractBuildScript = (): string => {
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const manifest = String(applyCall[0]).split("cat <<'EOF' | kubectl apply -f -\n")[1].split('\nEOF')[0];
+    const job: any = yaml.load(manifest);
+    return job.spec.template.spec.containers[0].args[0];
+  };
+
+  it.each(Object.entries(HOSTILE_VALUES))('passes %s to buildctl as one literal argument', async (_name, value) => {
+    await buildWithEngine(
+      mockDeploy,
+      {
+        ecrRepo: 'test-repo',
+        ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
+        envVars: { PR_VALUE: value },
+        secretEnvKeys: ['PR_VALUE'],
+        dockerfilePath: 'Dockerfile',
+        tag: 'v1.0.0',
+        revision: 'abc123def456789',
+        repo: 'owner/repo',
+        branch: 'main',
+        namespace: 'env-test-123',
+        buildId: '456',
+        deployUuid: 'my-app-abc123',
+        cacheRegistry: 'registry.example.com',
+      },
+      'buildkit'
+    );
+
+    const script = extractBuildScript();
+    const tail = script.slice(script.indexOf('set --'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'buildctl-'));
+    try {
+      const result = spawnSync(
+        '/bin/sh',
+        ['-c', `set -e\nbuildctl() { printf '%s\\0' "$@"; }\n${tail.replace('echo "Running buildctl..."', ':')}`],
+        { encoding: 'utf8', cwd: dir, env: { ...process.env, PR_VALUE: value } }
+      );
+      const argv = result.stdout.split('\0').slice(0, -1);
+      expect(result.status).toBe(0);
+      expect(argv).toContain(`build-arg:PR_VALUE=${value}`);
+      expect(argv.filter((a) => a.startsWith('build-arg:PR_VALUE='))).toHaveLength(value ? 2 : 1);
+      expect(argv.includes('id=PR_VALUE,env=PR_VALUE')).toBe(value !== '');
+      expect(fs.readdirSync(dir)).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('quotes the registry domain so it cannot break out of the assignment', async () => {
+    await buildWithEngine(
+      mockDeploy,
+      {
+        ecrRepo: 'test-repo',
+        ecrDomain: 'reg.example.com$(touch INJECTED)',
+        envVars: {},
+        dockerfilePath: 'Dockerfile',
+        tag: 'v1.0.0',
+        revision: 'abc123def456789',
+        repo: 'owner/repo',
+        branch: 'main',
+        namespace: 'env-test-123',
+        buildId: '456',
+        deployUuid: 'my-app-abc123',
+        cacheRegistry: 'registry.example.com',
+      },
+      'buildkit'
+    );
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    expect(applyCall[0]).toContain("REGISTRY_DOMAIN='reg.example.com$(touch INJECTED)'");
   });
 });

@@ -99,14 +99,17 @@ interface BuildArgOptions {
 // Each secret goes to buildctl twice: as a build arg, for Dockerfiles that read it with ARG, and as a
 // BuildKit secret, for Dockerfiles that read it with `RUN --mount=type=secret,id=<KEY>`. The secret
 // form never reaches the image history; a build arg only does if the Dockerfile declares its ARG.
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
   if (!secretEnvKeys || secretEnvKeys.length === 0) {
     return '# No secret env keys';
   }
 
   const lines = secretEnvKeys.map(
-    (key) =>
-      `[ -n "$${key}" ] && SECRET_BUILD_ARGS="$SECRET_BUILD_ARGS --opt build-arg:${key}=$${key} --secret id=${key},env=${key}"`
+    (key) => `[ -n "$${key}" ] && set -- "$@" --opt "build-arg:${key}=$${key}" --secret "id=${key},env=${key}"`
   );
 
   return lines.join('\n');
@@ -160,7 +163,7 @@ const ENGINES: Record<string, BuildEngine> = {
 set -e
 
 # Detect registry type and perform appropriate login
-REGISTRY_DOMAIN="${ecrDomain}"
+REGISTRY_DOMAIN=${shellQuote(ecrDomain)}
 
 # AWS ECR Detection (format: <account-id>.dkr.ecr.<region>.amazonaws.com)
 if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com$"; then
@@ -199,12 +202,12 @@ fi
 echo "Setting DOCKER_CONFIG..."
 export DOCKER_CONFIG=~/.docker
 
-# Build secret env vars as build args
-SECRET_BUILD_ARGS=""
+# Build secret env vars as build args; positional params keep values intact (no word splitting)
+set --
 ${generateSecretArgsScript(secretEnvKeys)}
 
 echo "Running buildctl..."
-buildctl ${buildctlArgs.join(' \\\n  ')} $SECRET_BUILD_ARGS
+buildctl ${buildctlArgs.map(shellQuote).join(' \\\n  ')} "$@"
 `;
 
       return [script.trim()];
