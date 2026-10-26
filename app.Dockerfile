@@ -16,11 +16,14 @@ ARG BASE_IMAGE_TAG=v2
 FROM lifecycleoss/app-base:${BASE_IMAGE_TAG} AS packages
 
 ARG PORT
+# Keep in sync with packageManager in package.json
+ARG PNPM_VERSION=9.15.0
 
 ENV PORT=$PORT
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
+RUN npm install pnpm@${PNPM_VERSION} --global
 RUN pnpm install --frozen-lockfile
 
 FROM packages
