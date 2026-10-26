@@ -103,6 +103,7 @@
     "@heroui/theme": "^2.4.26",
     "@next/eslint-plugin-next": "15.5.28",
     "@octokit/webhooks-types": "^7.6.1",
+    "@scalar/openapi-parser": "^0.29.16",
     "@swc/core": "^1.16.18",
     "@swc/jest": "^0.2.39",
     "@types/dotenv": "^6.1.1",
@@ -163,7 +164,7 @@
       "^.+\\.(js|ts)$": "@swc/jest"
     },
     "transformIgnorePatterns": [
-      "/node_modules/(?!\\.pnpm/|ai/|@ai-sdk/|@workflow/|jose/)"
+      "/node_modules/(?!\\.pnpm/|ai/|@ai-sdk/|@workflow/|jose/|@scalar/)"
     ],
     "setupFilesAfterEnv": [
       "<rootDir>/jestSetup.ts"

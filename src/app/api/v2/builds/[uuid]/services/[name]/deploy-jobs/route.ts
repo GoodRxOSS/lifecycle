@@ -58,30 +58,30 @@ import { getDeploymentJobs } from 'server/lib/kubernetes/getDeploymentJobs';
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/GetDeployLogsSuccessResponse'
- *     '400':
- *       description: Invalid parameters
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/ApiErrorResponse'
- *     '404':
- *       description: Environment or service not found
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/ApiErrorResponse'
- *     '502':
- *       description: Failed to communicate with Kubernetes
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/ApiErrorResponse'
- *     '500':
- *       description: Internal server error
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/ApiErrorResponse'
+ *       '400':
+ *         description: Invalid parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '404':
+ *         description: Environment or service not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '502':
+ *         description: Failed to communicate with Kubernetes
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
+ *       '500':
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiErrorResponse'
  */
 const getHandler = async (
   req: NextRequest,

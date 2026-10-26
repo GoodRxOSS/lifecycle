@@ -110,7 +110,7 @@ const parsePositiveIntegerParam = (value: string | null, name: string, fallback:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/ServiceApiTokenCreateSuccessResponse' }
  *       '400': { description: Invalid body. }
- *       '403': { description: Requires the admin role, forbidden scope, or key issuance disabled (api_keys_disabled). }
+ *       '403': { description: 'Requires the admin role, forbidden scope, or key issuance disabled (api_keys_disabled).' }
  */
 const getHandler = async (req: NextRequest) => {
   ApiTokenService.assertManagementAllowed();
