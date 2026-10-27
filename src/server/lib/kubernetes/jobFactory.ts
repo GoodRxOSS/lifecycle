@@ -243,6 +243,9 @@ export function createHelmJob(config: HelmJobConfig): V1Job {
     timeout,
     ttl,
     labels,
+    podAnnotations: {
+      'cluster-autoscaler.kubernetes.io/safe-to-evict': 'false',
+    },
     initContainers,
     containers,
     volumes: config.volumes || [{ name: 'helm-workspace', emptyDir: {} }],
