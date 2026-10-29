@@ -114,8 +114,8 @@ describe('nativeHelm utils', () => {
       );
 
       expect(command).toContain('helm template sample-release oci://registry.example.com/charts/sample');
-      expect(command).toContain('--set "feature.enabled"');
-      expect(command).toContain('--set "ingress.path=\\/api\\/v1\\,health"');
+      expect(command).toContain("--set 'feature.enabled'");
+      expect(command).toContain("--set 'ingress.path=\\/api\\/v1\\,health'");
       expect(command).not.toContain('ignored-chart-name');
     });
 
