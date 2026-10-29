@@ -1559,6 +1559,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "includeFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [

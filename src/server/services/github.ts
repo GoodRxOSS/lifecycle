@@ -45,6 +45,7 @@ import { redisClient } from 'server/lib/dependencies';
 import RepositoryService from './repository';
 import {
   getEffectiveIgnoreFiles,
+  normalizeIncludeFiles,
   PushIgnoreDecision,
   PushIgnoreServicePolicy,
   shouldSkipPushDeploy,
@@ -52,6 +53,7 @@ import {
 
 const SKIPPED_PUSH_WEBHOOK_STATUSES = new Set<string>([BuildStatus.DEPLOYED, BuildStatus.ERROR, BuildStatus.TORN_DOWN]);
 const IGNORE_FILES_FEATURE_FLAG = 'ignoreFiles';
+const IGNORE_FILES_PER_SERVICE_FEATURE_FLAG = 'ignoreFilesPerService';
 
 interface PullRequestPatchState {
   deployLabelPresent: boolean;
@@ -429,6 +431,7 @@ export default class GithubService extends Service {
       return {
         serviceName,
         ignoreFiles: getEffectiveIgnoreFiles(lifecycleConfig.environment?.ignoreFiles, service.ignoreFiles),
+        includeFiles: normalizeIncludeFiles(service.includeFiles),
       };
     });
   }
@@ -465,14 +468,12 @@ export default class GithubService extends Service {
     }
   }
 
-  private async isIgnoreFilesFeatureEnabled(): Promise<boolean> {
+  private async isIgnoreFilesFeatureEnabled(featureFlag = IGNORE_FILES_FEATURE_FLAG): Promise<boolean> {
     try {
       const { features } = await this.db.services.GlobalConfig.getAllConfigs();
-      return features?.[IGNORE_FILES_FEATURE_FLAG] === true;
+      return features?.[featureFlag] === true;
     } catch (error) {
-      getLogger({ error, featureFlag: IGNORE_FILES_FEATURE_FLAG }).warn(
-        'Push: ignoreFiles feature flag fetch failed, using dry-run mode'
-      );
+      getLogger({ error, featureFlag }).warn('Push: ignoreFiles feature flag fetch failed, using dry-run mode');
       return false;
     }
   }
@@ -618,6 +619,7 @@ export default class GithubService extends Service {
 
       for (const build of buildsToDeploy) {
         const buildId = build?.id;
+        let skipServices: string[] | undefined;
         if (!buildId) {
           getLogger().error(`Build: id not found for=handlePushWebhook`);
         }
@@ -679,6 +681,24 @@ export default class GithubService extends Service {
                   serviceName: skipDecision.serviceName,
                   filePath: skipDecision.filePath,
                 }).info('Push: deploying reason=ignoreFiles_not_matched');
+
+                if (skipDecision.skipServices) {
+                  const perServiceEnabled =
+                    (await this.isIgnoreFilesFeatureEnabled()) &&
+                    (await this.isIgnoreFilesFeatureEnabled(IGNORE_FILES_PER_SERVICE_FEATURE_FLAG));
+                  getLogger({
+                    buildId,
+                    repo: repoName,
+                    branch: branchName,
+                    skipServices: skipDecision.skipServices,
+                    perServiceEnabled,
+                  }).info(
+                    perServiceEnabled
+                      ? 'Push: skipped services reason=ignoreFiles'
+                      : 'Push: dry-run would skip services reason=ignoreFiles'
+                  );
+                  if (perServiceEnabled) skipServices = skipDecision.skipServices;
+                }
               }
             } else {
               getLogger({
@@ -701,6 +721,7 @@ export default class GithubService extends Service {
           ...(!this.isVoidCommit(previousCommit) ? { sourceBeforeRef: previousCommit } : {}),
           sourceGithubRepositoryId: githubRepositoryId,
           sourceBranch: branchName,
+          ...(skipServices ? { skipServices } : {}),
         });
       }
     } catch (error) {
