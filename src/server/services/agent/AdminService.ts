@@ -33,6 +33,7 @@ import AgentThreadService from './ThreadService';
 import AgentMessageStore from './MessageStore';
 import AgentFeedbackService from './FeedbackService';
 import type { CanonicalAgentMessage } from './canonicalMessages';
+import { deriveTitleFromMessageParts, loadFirstUserMessageParts, readUsefulThreadTitle } from './SessionReadService';
 import type {
   McpAuthConfig,
   McpDiscoveredTool,
@@ -220,6 +221,7 @@ function serializeSessionSummary(
     pendingActionsCount?: number;
     lastRunAt?: string | null;
     latestThread?: ReviewThread | null;
+    title?: string | null;
   }
 ) {
   return {
@@ -250,6 +252,7 @@ function serializeSessionSummary(
     threadCount: counts?.threadCount ?? 0,
     pendingActionsCount: counts?.pendingActionsCount ?? 0,
     lastRunAt: counts?.lastRunAt ?? null,
+    title: counts?.title ?? null,
     latestThreadId: counts?.latestThread?.uuid ?? null,
     latestThreadTitle: counts?.latestThread?.title ?? null,
     createdAt: session.createdAt || null,
@@ -350,16 +353,29 @@ export default class AgentAdminService {
       pendingCountBySessionId.set(sessionId, (pendingCountBySessionId.get(sessionId) || 0) + 1);
     }
 
-    const serialized = filteredSessions.map((session) =>
-      serializeSessionSummary(session, {
-        threadCount: threadCountBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || 0,
-        pendingActionsCount: pendingCountBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || 0,
-        lastRunAt: lastRunAtBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1) || null,
-        latestThread: latestThreadBySessionId.get(sessionDbIdByUuid.get(session.uuid) || -1),
-      })
-    );
+    const page = paginateArray(filteredSessions, filters.page, filters.limit);
+    const untitledPageSessionIds = page.data
+      .map((session) => sessionDbIdByUuid.get(session.uuid) || -1)
+      .filter((sessionDbId) => sessionDbId > 0 && !readUsefulThreadTitle(latestThreadBySessionId.get(sessionDbId)));
+    const firstUserMessagePartsBySessionId = untitledPageSessionIds.length
+      ? await loadFirstUserMessageParts(untitledPageSessionIds)
+      : new Map<number, unknown>();
 
-    return paginateArray(serialized, filters.page, filters.limit);
+    return {
+      ...page,
+      data: page.data.map((session) => {
+        const sessionDbId = sessionDbIdByUuid.get(session.uuid) || -1;
+        return serializeSessionSummary(session, {
+          threadCount: threadCountBySessionId.get(sessionDbId) || 0,
+          pendingActionsCount: pendingCountBySessionId.get(sessionDbId) || 0,
+          lastRunAt: lastRunAtBySessionId.get(sessionDbId) || null,
+          latestThread: latestThreadBySessionId.get(sessionDbId),
+          title:
+            readUsefulThreadTitle(latestThreadBySessionId.get(sessionDbId)) ||
+            deriveTitleFromMessageParts(firstUserMessagePartsBySessionId.get(sessionDbId)),
+        });
+      }),
+    };
   }
 
   static async getSession(sessionUuid: string) {
@@ -375,7 +391,7 @@ export default class AgentAdminService {
       .orderBy('isDefault', 'desc');
 
     const threadIds = threads.map((thread) => thread.id);
-    const [messageRows, runRows, pendingRows] = await Promise.all([
+    const [messageRows, runRows, pendingRows, firstUserMessagePartsBySessionId] = await Promise.all([
       threadIds.length
         ? AgentMessage.query().whereIn('threadId', threadIds).select('threadId')
         : Promise.resolve([] as Array<{ threadId: number }>),
@@ -385,6 +401,7 @@ export default class AgentAdminService {
       threadIds.length
         ? AgentPendingAction.query().whereIn('threadId', threadIds).where('status', 'pending').select('threadId')
         : Promise.resolve([] as Array<{ threadId: number }>),
+      threadIds.length ? loadFirstUserMessageParts([session.id]) : Promise.resolve(new Map<number, unknown>()),
     ]);
 
     const messageCountByThreadId = new Map<number, number>();
@@ -422,9 +439,14 @@ export default class AgentAdminService {
         : null,
     }));
 
+    const latestThread = latestReviewThread(threads);
+
     return {
       session: serializeSessionSummary(enrichedSession, {
-        latestThread: latestReviewThread(threads),
+        latestThread,
+        title:
+          readUsefulThreadTitle(latestThread) ||
+          deriveTitleFromMessageParts(firstUserMessagePartsBySessionId.get(session.id)),
         threadCount: serializedThreads.length,
         pendingActionsCount: serializedThreads.reduce((total, thread) => total + thread.pendingActionsCount, 0),
         lastRunAt:

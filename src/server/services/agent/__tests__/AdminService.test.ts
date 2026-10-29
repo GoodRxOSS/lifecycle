@@ -30,6 +30,7 @@ const mockSerializeRunEvent = jest.fn();
 const mockSerializeThread = jest.fn();
 const mockSerializeCanonicalMessage = jest.fn();
 const mockListMaskedUsersForServer = jest.fn();
+const mockLoadFirstUserMessageParts = jest.fn();
 
 const canonicalStartupFailure = {
   stage: 'connect_runtime',
@@ -39,6 +40,11 @@ const canonicalStartupFailure = {
   retryable: false,
   origin: 'agent_session',
 };
+
+jest.mock('../SessionReadService', () => ({
+  ...jest.requireActual('../SessionReadService'),
+  loadFirstUserMessageParts: (...args: unknown[]) => mockLoadFirstUserMessageParts(...args),
+}));
 
 jest.mock('../FeedbackService', () => ({
   __esModule: true,
@@ -155,6 +161,7 @@ import AgentAdminService from '../AdminService';
 describe('AgentAdminService.listSessions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockLoadFirstUserMessageParts.mockResolvedValue(new Map());
     mockListThreadFeedback.mockResolvedValue([]);
   });
 
@@ -236,8 +243,11 @@ describe('AgentAdminService.listSessions', () => {
       expect(result.metadata.pagination).toEqual({ current: index + 1, total: 3, items: 3, limit: 1 });
       expect(mockEnrichSessions).toHaveBeenLastCalledWith(sessions.slice(4));
       expect(threadWhereIn).toHaveBeenLastCalledWith('sessionId', [5, 6, 7]);
+      expect(mockLoadFirstUserMessageParts).toHaveBeenLastCalledWith([[5, 6, 7][index]]);
     }
+    expect(mockLoadFirstUserMessageParts).toHaveBeenCalledTimes(3);
     const pastLastPage = await AgentAdminService.listSessions({ page: 4, limit: 1 });
+    expect(mockLoadFirstUserMessageParts).toHaveBeenCalledTimes(3);
     expect(pastLastPage.data).toEqual([]);
     expect(pastLastPage.metadata.pagination).toEqual({ current: 4, total: 3, items: 3, limit: 1 });
   });
@@ -424,8 +434,13 @@ describe('AgentAdminService.listSessions', () => {
       select: pendingSelect,
     });
 
+    mockLoadFirstUserMessageParts.mockResolvedValue(
+      new Map([[101, [{ type: 'text', text: '  How do I   deploy?\n' }]]])
+    );
+
     const result = await AgentAdminService.listSessions({});
 
+    expect(mockLoadFirstUserMessageParts).toHaveBeenCalledWith([101, 202]);
     expect(sessionQueryBuilder.orderBy).toHaveBeenNthCalledWith(1, 'createdAt', 'desc');
     expect(sessionQueryBuilder.orderBy).toHaveBeenNthCalledWith(2, 'id', 'desc');
     expect(threadWhereIn).toHaveBeenCalledWith('sessionId', [101, 202]);
@@ -433,6 +448,7 @@ describe('AgentAdminService.listSessions', () => {
     expect(result.data).toEqual([
       expect.objectContaining({
         id: 'eda50b6f-f421-42c4-8d7e-7b38d1c7c362',
+        title: 'How do I deploy?',
         threadCount: 1,
         pendingActionsCount: 1,
         lastRunAt: '2026-04-05T18:00:00.000Z',
@@ -440,6 +456,7 @@ describe('AgentAdminService.listSessions', () => {
       }),
       expect.objectContaining({
         id: '3e81553b-b8d4-4d2b-88d0-8d5775bcffde',
+        title: null,
         threadCount: 0,
         pendingActionsCount: 0,
         lastRunAt: null,
@@ -604,6 +621,7 @@ describe('AgentAdminService.listSessions', () => {
     expect(sessionQueryBuilder.where).not.toHaveBeenCalled();
     expect(mockThreadQuery).not.toHaveBeenCalled();
     expect(mockPendingActionQuery).not.toHaveBeenCalled();
+    expect(mockLoadFirstUserMessageParts).not.toHaveBeenCalled();
     expect(result).toEqual({
       data: [],
       metadata: {
@@ -621,6 +639,7 @@ describe('AgentAdminService.listSessions', () => {
 describe('AgentAdminService.getSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockLoadFirstUserMessageParts.mockResolvedValue(new Map());
     mockListThreadFeedback.mockResolvedValue([]);
     mockSerializeThread.mockImplementation((thread, sessionId) => ({
       id: thread.uuid,
@@ -807,8 +826,11 @@ describe('AgentAdminService.getSession', () => {
       select: jest.fn().mockResolvedValue([{ threadId: 7 }]),
     });
 
+    mockLoadFirstUserMessageParts.mockResolvedValue(new Map([[17, [{ type: 'text', text: 'First question' }]]]));
+
     const result = await AgentAdminService.getSession('session-1');
 
+    expect(mockLoadFirstUserMessageParts).toHaveBeenCalledWith([17]);
     expect(threadQuery.where).toHaveBeenCalledWith({ sessionId: 17 });
     expect(threadQuery.whereNull).not.toHaveBeenCalled();
     expect(result.threads).toEqual([
@@ -846,6 +868,7 @@ describe('AgentAdminService.getSession', () => {
       expect.objectContaining({
         id: 'session-1',
         latestThreadId: 'thread-fresh-debug',
+        title: 'Fresh Debug diagnosis',
         threadCount: 3,
         pendingActionsCount: 1,
         lastRunAt: '2026-05-09T18:00:00.000Z',
