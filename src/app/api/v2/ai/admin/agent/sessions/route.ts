@@ -31,6 +31,7 @@ import AgentAdminService from 'server/services/agent/AdminService';
  *       user or assistant message. Empty sessions and system-event-only sessions are excluded.
  *       Sessions remain visible while waiting for an assistant response to a user's first message.
  *       Results can be filtered by status, repository, user, and build UUID.
+ *       Sessions are sorted newest first by creation time.
  *     tags:
  *       - Agent Admin
  *     operationId: getAdminAgentSessions

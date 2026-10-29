@@ -426,6 +426,8 @@ describe('AgentAdminService.listSessions', () => {
 
     const result = await AgentAdminService.listSessions({});
 
+    expect(sessionQueryBuilder.orderBy).toHaveBeenNthCalledWith(1, 'createdAt', 'desc');
+    expect(sessionQueryBuilder.orderBy).toHaveBeenNthCalledWith(2, 'id', 'desc');
     expect(threadWhereIn).toHaveBeenCalledWith('sessionId', [101, 202]);
     expect(pendingWhereIn).toHaveBeenCalledWith('thread.sessionId', [101, 202]);
     expect(result.data).toEqual([

@@ -287,7 +287,7 @@ export default class AgentAdminService {
       });
     }
 
-    const sessions = await query.orderBy('updatedAt', 'desc').orderBy('createdAt', 'desc');
+    const sessions = await query.orderBy('createdAt', 'desc').orderBy('id', 'desc');
     const sessionDbIdByUuid = new Map(sessions.map((session) => [session.uuid, session.id]));
     const enrichedSessions = await AgentSessionService.enrichSessions(sessions);
 
