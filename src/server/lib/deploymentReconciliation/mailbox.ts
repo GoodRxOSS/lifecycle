@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { PartialModelObject, Transaction } from 'objection';
+import type { PartialModelObject, QueryBuilder, Transaction } from 'objection';
 import type { JobDataWithContext } from 'server/lib/logger';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
@@ -30,6 +30,8 @@ export interface SourcePushIntent {
   sha: string;
   /** Delivered push predecessor; used to recognize a temporarily stale branch-head read. */
   beforeSha?: string;
+  /** Services whose push-ignore policy matched every changed file; their healthy rows keep the current image. */
+  skipServices?: string[];
 }
 
 export interface RepositoryRedeployIntent {
@@ -102,6 +104,31 @@ export function deploymentIntentDeployFilter(intent: DeploymentIntent): {
   return { githubRepositoryId: intent.githubRepositoryId };
 }
 
+const SKIPPABLE_DEPLOY_STATUSES = [DeployStatus.READY, DeployStatus.DEPLOYED, DeployStatus.BUILT];
+
+/**
+ * Leaves out rows of the intent's skipped services that are settled and healthy. A row that is still pending
+ * (including one a replaced intent stamped), failed, or never deployed stays selected.
+ */
+export function excludeSkippedServiceDeploys<QB extends QueryBuilder<Deploy, any>>(
+  query: QB,
+  buildId: number,
+  intent: DeploymentIntent,
+  trx?: Transaction
+): QB {
+  if (intent.type !== 'source' || intent.target !== 'repository' || !intent.skipServices?.length) return query;
+  return query.whereNotIn(
+    'id',
+    Deploy.query(trx)
+      .select('deploys.id')
+      .join('deployables', 'deployables.id', 'deploys.deployableId')
+      .where('deploys.buildId', buildId)
+      .whereIn('deployables.name', intent.skipServices)
+      .whereIn('deploys.status', SKIPPABLE_DEPLOY_STATUSES)
+      .whereRaw('?? >= ??', ['deploys.observedGeneration', 'deploys.desiredGeneration'])
+  );
+}
+
 /** A stamped row is unowned and queued: the older run can no longer write to it, and its old status is not current. */
 export function deployStampForGeneration(generation: number): PartialModelObject<Deploy> {
   const stamp = { desiredGeneration: generation, runUUID: null, status: DeployStatus.QUEUED, statusMessage: null };
@@ -116,10 +143,15 @@ export async function stampDeploysForIntent(
   intent: DeploymentIntent,
   generation: number
 ): Promise<number> {
-  return Deploy.query(trx)
-    .patch(deployStampForGeneration(generation))
-    .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
-    .where('desiredGeneration', '<', generation);
+  return excludeSkippedServiceDeploys(
+    Deploy.query(trx)
+      .patch(deployStampForGeneration(generation))
+      .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
+      .where('desiredGeneration', '<', generation),
+    buildId,
+    intent,
+    trx
+  );
 }
 
 /**

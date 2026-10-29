@@ -1475,6 +1475,26 @@ describe('BuildService deployment reconciliation', () => {
     });
   });
 
+  test('carries skipped services on a repository-scoped push only', async () => {
+    const { service } = serviceHarness();
+    const push = {
+      buildId: 1,
+      sourceGithubRepositoryId: 100,
+      sourceBranch: 'main',
+      sourceRef: 'commit-c',
+      skipServices: ['psp-web'],
+    };
+
+    await service.enqueueResolveAndDeployBuild({ ...push, githubRepositoryId: 100 });
+    await service.enqueueResolveAndDeployBuild(push);
+
+    expect(mockAcceptDeploymentIntent.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ target: 'repository', skipServices: ['psp-web'] })
+    );
+    expect(mockAcceptDeploymentIntent.mock.calls[1][1]).toEqual(expect.objectContaining({ target: 'all' }));
+    expect(mockAcceptDeploymentIntent.mock.calls[1][1]).not.toHaveProperty('skipServices');
+  });
+
   test('uses the legacy trigger ref as the immutable source when a tracked push omits sourceRef', async () => {
     const { service } = serviceHarness();
 
