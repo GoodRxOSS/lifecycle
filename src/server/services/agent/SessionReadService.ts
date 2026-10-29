@@ -240,7 +240,7 @@ function latestTimestamp(values: Array<string | Date | null | undefined>): strin
   return latest?.iso || null;
 }
 
-function readUsefulThreadTitle(thread: AgentThread | null): string | null {
+export function readUsefulThreadTitle(thread: Pick<AgentThread, 'title'> | null | undefined): string | null {
   const title = thread?.title?.trim();
   if (!title || title.toLowerCase() === 'default thread') {
     return null;
@@ -256,7 +256,7 @@ interface FirstUserMessageRow {
   parts: unknown;
 }
 
-function deriveTitleFromMessageParts(parts: unknown): string | null {
+export function deriveTitleFromMessageParts(parts: unknown): string | null {
   if (!Array.isArray(parts)) {
     return null;
   }
@@ -285,7 +285,7 @@ function deriveTitleFromMessageParts(parts: unknown): string | null {
 }
 
 /** First user message per session, as the title fallback when no thread was explicitly titled. */
-async function loadFirstUserMessageParts(sessionIds: number[]): Promise<Map<number, unknown>> {
+export async function loadFirstUserMessageParts(sessionIds: number[]): Promise<Map<number, unknown>> {
   const rows = (await AgentThread.knex().raw(
     `
     select distinct on (t."sessionId") t."sessionId" as "sessionId", m.parts as parts

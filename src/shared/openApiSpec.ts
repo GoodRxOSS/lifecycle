@@ -3286,6 +3286,11 @@ export const openApiSpecificationForV2Api: OAS3Options = {
             lastActivity: { type: 'string', format: 'date-time', nullable: true },
             archivedAt: { type: 'string', format: 'date-time', nullable: true },
             threadCount: { type: 'integer' },
+            title: {
+              type: 'string',
+              nullable: true,
+              description: 'Named latest conversation title, or the first user message when no conversation is named.',
+            },
             latestThreadId: {
               type: 'string',
               format: 'uuid',
