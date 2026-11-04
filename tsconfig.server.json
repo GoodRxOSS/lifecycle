@@ -7,6 +7,7 @@
     "isolatedModules": false,
     "jsx": "preserve",
     "lib": ["es2022", "dom"],
+    "useDefineForClassFields": false,
     "strictNullChecks": false,
     "baseUrl": "."
   },

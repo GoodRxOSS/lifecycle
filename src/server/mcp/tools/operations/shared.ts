@@ -16,6 +16,7 @@
 
 import type { Transaction } from 'objection';
 import { isAppError } from 'server/lib/appError';
+import { getLogger } from 'server/lib/logger';
 import type { Principal } from 'server/lib/principal';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
@@ -298,6 +299,7 @@ export function mapEnvironmentOperationError(
   options: {
     validServices?: string[];
     ambiguousEnvironments?: EnvironmentChoice[];
+    requestId?: string;
   } = {}
 ): McpExecutionError {
   if (error instanceof McpExecutionError) return error;
@@ -320,6 +322,7 @@ export function mapEnvironmentOperationError(
     return invalidBodyFromError(error);
   }
   if (!isAppError(error)) {
+    getLogger().error({ error, requestId: options.requestId }, 'MCP: environment operation failed unexpectedly');
     return new McpExecutionError(
       'internal_error',
       'Lifecycle could not complete this environment request. Ask an administrator for help.'
