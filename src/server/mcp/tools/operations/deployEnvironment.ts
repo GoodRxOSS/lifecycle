@@ -86,7 +86,7 @@ export function createDeployEnvironmentToolDefinition(
           next: `Deploy ${result.deployId} was queued and continues in the background. Report this receipt now. Use get_environment with uuid ${uuid} later when the user asks for current state. Do not call deploy_environment again for this run.${lifecycleUiNext}`,
         };
       } catch (error) {
-        throw mapEnvironmentOperationError(error);
+        throw mapEnvironmentOperationError(error, { requestId: context.requestId });
       }
     },
   };

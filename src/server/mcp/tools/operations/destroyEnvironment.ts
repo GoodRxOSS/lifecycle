@@ -181,7 +181,7 @@ export function createDestroyEnvironmentToolDefinition(
           },
         };
       } catch (error) {
-        throw mapEnvironmentOperationError(error);
+        throw mapEnvironmentOperationError(error, { requestId: context.requestId });
       }
     },
   };

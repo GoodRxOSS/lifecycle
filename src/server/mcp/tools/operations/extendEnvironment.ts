@@ -70,7 +70,7 @@ export function createExtendEnvironmentToolDefinition(
           ...(extension.maxReached ? { next: EXTEND_MAX_NEXT } : {}),
         };
       } catch (error) {
-        throw mapEnvironmentOperationError(error);
+        throw mapEnvironmentOperationError(error, { requestId: context.requestId });
       }
     },
   };

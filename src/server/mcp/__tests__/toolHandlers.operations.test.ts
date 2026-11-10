@@ -327,6 +327,23 @@ describe('configure_environment', () => {
     expect((service.applyApiEnvironmentPatch as jest.Mock).mock.calls[0][3]).toEqual({ envMode: 'merge' });
   });
 
+  it('passes service active and branch changes through to the patch', async () => {
+    const build = environmentBuild();
+    const service = operationService({
+      applyApiEnvironmentPatch: jest.fn().mockResolvedValue({ mode: 'applied', changed: true, build }),
+    });
+    const { call } = harness({ service, loadNamedEnvironment: async () => loadedEnvironment(build) });
+    const patch: McpJsonObject = {
+      services: [
+        { name: 'web', active: false },
+        { name: 'api', branchOrExternalUrl: 'feature/x' },
+      ],
+    };
+    const { output } = await call('configure_environment', { uuid: UUID, environmentId: ENVIRONMENT_ID, patch });
+    expect(output).toMatchObject({ applied: true, result: { mode: 'applied' } });
+    expect((service.applyApiEnvironmentPatch as jest.Mock).mock.calls[0][2]).toEqual(patch);
+  });
+
   it('returns the queued deploy without prompting automatic monitoring', async () => {
     const build = environmentBuild();
     const service = operationService({

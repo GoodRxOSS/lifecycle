@@ -118,7 +118,7 @@ export function createConfigureEnvironmentToolDefinition(
                 },
         };
       } catch (error) {
-        throw mapEnvironmentOperationError(error, { validServices });
+        throw mapEnvironmentOperationError(error, { validServices, requestId: context.requestId });
       }
     },
   };

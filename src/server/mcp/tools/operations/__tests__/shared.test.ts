@@ -15,6 +15,7 @@
  */
 
 import { AppError } from 'server/lib/appError';
+import { getLogger } from 'server/lib/logger';
 import Build from 'server/models/Build';
 import Deploy from 'server/models/Deploy';
 import Environment from 'server/models/Environment';
@@ -41,6 +42,11 @@ import {
   resolveEnvironmentOperationToolDependencies,
   validEnvironmentServiceNames,
 } from '../shared';
+
+jest.mock('server/lib/logger', () => ({
+  ...jest.requireActual('server/lib/logger'),
+  getLogger: jest.fn(() => ({ error: jest.fn() })),
+}));
 
 describe('environment operation shared helpers', () => {
   afterEach(() => {
@@ -359,6 +365,28 @@ describe('mapEnvironmentOperationError', () => {
       },
     });
     expect(mapEnvironmentOperationError(appError('env_ambiguous'))).toMatchObject({ code: 'internal_error' });
+  });
+
+  it('logs the original error with the request id before mapping it to internal_error', () => {
+    const errorLog = jest.fn();
+    (getLogger as jest.Mock).mockReturnValue({ error: errorLog });
+    const cause = new TypeError("Cannot read properties of undefined (reading 'x')");
+
+    const mapped = mapEnvironmentOperationError(cause, { requestId: 'req-1' });
+
+    expect(mapped).toMatchObject({ code: 'internal_error' });
+    expect(JSON.stringify(mapped)).not.toContain('Cannot read properties');
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({ error: cause, requestId: 'req-1' }),
+      expect.stringContaining('unexpectedly')
+    );
+  });
+
+  it('does not log expected operation errors', () => {
+    const errorLog = jest.fn();
+    (getLogger as jest.Mock).mockReturnValue({ error: errorLog });
+    mapEnvironmentOperationError(new ServiceOverrideNotFoundError('web'), { requestId: 'req-1' });
+    expect(errorLog).not.toHaveBeenCalled();
   });
 
   it('maps service-not-found AppErrors with safe unique services', () => {

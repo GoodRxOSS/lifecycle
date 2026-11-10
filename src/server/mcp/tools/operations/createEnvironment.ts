@@ -134,6 +134,7 @@ export function createCreateEnvironmentToolDefinition(
             ? await dependencies.listEnvironmentChoices(repository).catch(() => [])
             : undefined;
         throw mapEnvironmentOperationError(error, {
+          requestId: context.requestId,
           ...(ambiguousEnvironments ? { ambiguousEnvironments } : {}),
         });
       }
