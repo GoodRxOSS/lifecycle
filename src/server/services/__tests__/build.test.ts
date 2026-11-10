@@ -2964,6 +2964,31 @@ describe('BuildService uncovered public behavior', () => {
     expect(enqueueBuildDeletion).toHaveBeenNthCalledWith(1, closed, 'pull_request_inactive_sweep');
     expect(enqueueBuildDeletion).toHaveBeenNthCalledWith(2, disabled, 'pull_request_inactive_sweep');
     expect(lifecycleEnabledForPullRequest).not.toHaveBeenCalledWith(repositoryMissing.pullRequest);
+    expect(lifecycleEnabledForPullRequest).toHaveBeenCalledTimes(1);
+    expect(lifecycleEnabledForPullRequest).toHaveBeenCalledWith(disabled.pullRequest);
+  });
+
+  test('cleanupBuilds never queues a static environment', async () => {
+    const build = {
+      id: 8,
+      isStatic: true,
+      pullRequest: { status: 'closed', deployOnUpdate: false, repository: { id: 18 } },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    };
+    const lifecycleEnabledForPullRequest = jest.fn();
+    const enqueueBuildDeletion = jest.fn();
+    const service = serviceWith({
+      services: {
+        PullRequest: { lifecycleEnabledForPullRequest },
+        BuildService: { enqueueBuildDeletion },
+      },
+    });
+    jest.spyOn(service, 'activeBuilds').mockResolvedValue([build] as any);
+
+    await expect(service.cleanupBuilds()).resolves.toBeUndefined();
+
+    expect(lifecycleEnabledForPullRequest).not.toHaveBeenCalled();
+    expect(enqueueBuildDeletion).not.toHaveBeenCalled();
   });
 
   test('cleanupBuilds ignores a non-PR environment after loading its authority graph', async () => {

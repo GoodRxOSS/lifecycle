@@ -24,13 +24,20 @@ import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullReque
 import { getKeepLabel, getDisabledLabel, getDeployLabel, parsePullRequestLabels } from 'server/lib/utils';
 import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
-import { DEFAULT_TTL_INACTIVITY_DAYS, DEFAULT_TTL_CHECK_INTERVAL_MINUTES, PullRequestStatus } from 'shared/constants';
+import {
+  BuildKind,
+  DEFAULT_TTL_INACTIVITY_DAYS,
+  DEFAULT_TTL_CHECK_INTERVAL_MINUTES,
+  PullRequestStatus,
+} from 'shared/constants';
 import GlobalConfigService from './globalConfig';
 
 interface TTLCleanupJob {
   dryRun?: boolean;
   correlationId?: string;
 }
+
+type StaleEnvironmentAction = 'closed_pull_request' | 'disable_pull_request' | 'already_disabled' | 'expired_sandbox';
 
 interface StaleEnvironment {
   namespace: string;
@@ -40,7 +47,11 @@ interface StaleEnvironment {
   daysExpired: number;
   currentLabels: string[];
   hadLabelDrift: boolean;
+  action: StaleEnvironmentAction;
 }
+
+const TTL_NAMESPACE_PREFIXES = ['env-', 'sbx-'];
+const DAY_MS = 1000 * 60 * 60 * 24;
 
 export default class TTLCleanupService extends Service {
   /**
@@ -90,7 +101,7 @@ export default class TTLCleanupService extends Service {
             try {
               if (dryRun) {
                 getLogger().info(
-                  `TTL: dry run would cleanup namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`
+                  `TTL: dry run would cleanup namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber} action=${env.action}`
                 );
                 successCount++;
               } else {
@@ -131,7 +142,7 @@ export default class TTLCleanupService extends Service {
    * Find stale environments that haven't had activity within the TTL window
    */
   private async findStaleEnvironments(
-    _inactivityDays: number,
+    inactivityDays: number,
     excludedRepositories: string[]
   ): Promise<StaleEnvironment[]> {
     const staleEnvironments: StaleEnvironment[] = [];
@@ -142,12 +153,13 @@ export default class TTLCleanupService extends Service {
       kc.loadFromDefault();
       const client = kc.makeApiClient(k8s.CoreV1Api);
 
+      // `!=false` also matches namespaces with no TTL labels at all, which would otherwise never expire.
       const namespacesResponse = await client.listNamespace(
         undefined,
         undefined,
         undefined,
         undefined,
-        'lfc/ttl-enable=true'
+        'lfc/ttl-enable!=false'
       );
 
       const namespaces = namespacesResponse.body.items;
@@ -162,34 +174,36 @@ export default class TTLCleanupService extends Service {
         const nsName = namespace.metadata?.name;
         const labels = namespace.metadata?.labels || {};
 
-        if (!nsName || !nsName.startsWith('env-')) {
+        const prefix = nsName && TTL_NAMESPACE_PREFIXES.find((candidate) => nsName.startsWith(candidate));
+        if (!nsName || !prefix) {
           continue;
         }
 
         const expireAtUnix = labels['lfc/ttl-expireAtUnix'];
+        const hasTTLLabels = expireAtUnix != null || labels['lfc/ttl-enable'] != null;
 
-        if (!expireAtUnix) {
+        if (hasTTLLabels && !expireAtUnix) {
           getLogger().debug(`Namespace ${nsName} has no TTL expiration label, skipping`);
           continue;
         }
 
-        const expireTime = parseInt(expireAtUnix, 10);
+        let expireTime = hasTTLLabels ? parseInt(expireAtUnix, 10) : NaN;
 
-        if (isNaN(expireTime) || expireTime > now) {
+        if (hasTTLLabels && (isNaN(expireTime) || expireTime > now)) {
           continue;
         }
 
-        const daysExpired = Math.floor((now - expireTime) / (1000 * 60 * 60 * 24));
-
+        // Sandbox namespaces carry their `sbx-` prefix in the uuid label, unlike the bare build uuid.
         let buildUUID = labels['lfc/uuid'];
+        if (buildUUID?.startsWith(prefix)) {
+          buildUUID = buildUUID.slice(prefix.length);
+        }
         if (!buildUUID) {
-          buildUUID = nsName.replace('env-', '');
+          buildUUID = nsName.slice(prefix.length);
           getLogger().warn(`TTL: namespace missing uuid label, derived from name namespace=${nsName}`);
         }
 
         updateLogContext({ buildUuid: buildUUID });
-
-        getLogger().debug(`Namespace ${nsName} expired ${daysExpired} days ago`);
 
         const build = await this.db.models.Build.query()
           .findOne({ uuid: buildUUID })
@@ -210,7 +224,49 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
+        if (!hasTTLLabels) {
+          // No TTL labels to read, so measure inactivity from the namespace's own age or the build's last update.
+          const createdAt = new Date(namespace.metadata?.creationTimestamp ?? 0).getTime();
+          const updatedAt = new Date(build.updatedAt ?? 0).getTime();
+          expireTime = Math.max(createdAt || 0, updatedAt || 0) + inactivityDays * DAY_MS;
+          if (expireTime > now) {
+            continue;
+          }
+          getLogger().info(`TTL: namespace has no TTL labels, using last activity namespace=${nsName}`);
+        }
+
+        const daysExpired = Math.floor((now - expireTime) / DAY_MS);
+
+        getLogger().debug(`Namespace ${nsName} expired ${daysExpired} days ago`);
+
         const pullRequest = build.pullRequest;
+
+        if (build.kind === BuildKind.SANDBOX && pullRequest) {
+          if (excludedRepositories.includes(pullRequest.fullName)) {
+            continue;
+          }
+          // Session activity never refreshes the namespace TTL, so a sandbox still backing a live session stays up.
+          const liveSession = await this.db.models.AgentSession.query()
+            .where({ buildUuid: build.uuid })
+            .whereIn('status', ['starting', 'active'])
+            .first();
+          if (liveSession) {
+            getLogger().debug(`TTL: sandbox has a live agent session, skipping namespace=${nsName}`);
+            continue;
+          }
+          // The pull request belongs to the base environment, so its labels must not be touched.
+          staleEnvironments.push({
+            namespace: nsName,
+            buildUUID,
+            build,
+            pullRequest,
+            daysExpired,
+            currentLabels: parsePullRequestLabels(pullRequest.labels),
+            hadLabelDrift: false,
+            action: 'expired_sandbox',
+          });
+          continue;
+        }
 
         if (!pullRequest) {
           // API-environment expiry belongs to the expiresAt sweep; the scanner
@@ -240,6 +296,7 @@ export default class TTLCleanupService extends Service {
             daysExpired,
             currentLabels: parsePullRequestLabels(pullRequest.labels),
             hadLabelDrift: false,
+            action: 'closed_pull_request',
           });
           continue;
         }
@@ -271,14 +328,11 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
-        if (currentLabels.includes(disabledLabel)) {
-          getLogger().debug(`Already has ${disabledLabel} label (verified from GitHub), skipping`);
-          continue;
-        }
-
         const dbLabels = parsePullRequestLabels(pullRequest.labels);
         const hadLabelDrift = JSON.stringify(currentLabels.sort()) !== JSON.stringify(dbLabels.sort());
 
+        // An expired build that is still alive under the disabled label means the label webhook that should have
+        // torn it down never arrived.
         staleEnvironments.push({
           namespace: nsName,
           buildUUID,
@@ -287,6 +341,7 @@ export default class TTLCleanupService extends Service {
           daysExpired,
           currentLabels,
           hadLabelDrift,
+          action: currentLabels.includes(disabledLabel) ? 'already_disabled' : 'disable_pull_request',
         });
       }
     } catch (error) {
@@ -306,13 +361,48 @@ export default class TTLCleanupService extends Service {
     commentTemplate: string | undefined,
     dryRun: boolean
   ) {
-    if (env.pullRequest.status !== PullRequestStatus.OPEN) {
-      await this.enqueueClosedPullRequestCleanup(env);
-      return;
+    switch (env.action) {
+      case 'closed_pull_request':
+        await this.enqueueClosedPullRequestCleanup(env);
+        return;
+      case 'expired_sandbox':
+        getLogger().info(`TTL: enqueueing expired sandbox cleanup namespace=${env.namespace}`);
+        await this.db.services.BuildService.enqueueBuildDeletion(env.build, 'ttl_sandbox_expired');
+        return;
+      case 'already_disabled': {
+        // Labels were read during the scan; a re-enable since then must win over the stale snapshot.
+        const latestLabels = await getPullRequestLabels({
+          installationId: env.pullRequest.repository.githubInstallationId,
+          pullRequestNumber: env.pullRequest.pullRequestNumber,
+          fullName: env.pullRequest.fullName,
+        });
+        if (!latestLabels.includes(await getDisabledLabel()) || latestLabels.includes(await getKeepLabel())) {
+          getLogger().info(`TTL: pull request re-enabled since scan, skipping namespace=${env.namespace}`);
+          return;
+        }
+        getLogger().info(
+          `TTL: tearing down disabled environment namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`
+        );
+        await this.disableAndEnqueueDeletion(env, latestLabels);
+        return;
+      }
+      case 'disable_pull_request':
+        getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
+        await this.cleanupStaleEnvironment(env, inactivityDays, commentTemplate, dryRun);
+        return;
     }
+  }
 
-    getLogger().info(`TTL: cleaning namespace=${env.namespace} pr=${env.pullRequest.pullRequestNumber}`);
-    await this.cleanupStaleEnvironment(env, inactivityDays, commentTemplate, dryRun);
+  /**
+   * Teardown must not depend on the label webhook: if GitHub drops or delays it, the environment would stay up and
+   * later scans would skip it for already carrying the disabled label.
+   */
+  private async disableAndEnqueueDeletion(env: StaleEnvironment, labels: string[]) {
+    await env.pullRequest.$query().patch({
+      labels: JSON.stringify(labels) as any,
+      deployOnUpdate: false,
+    });
+    await this.db.services.BuildService.enqueueBuildDeletion(env.build, 'deploy_disabled');
   }
 
   private async enqueueClosedPullRequestCleanup(env: StaleEnvironment) {
@@ -376,9 +466,7 @@ export default class TTLCleanupService extends Service {
 
       getLogger().debug(`TTL: cleanup comment posted PR#${pullRequest.pullRequestNumber}`);
 
-      await pullRequest.$query().patch({
-        labels: JSON.stringify(updatedLabels) as any,
-      });
+      await this.disableAndEnqueueDeletion(env, updatedLabels);
 
       // Track successful cleanup metric
       const metrics = new Metrics('ttl.cleanup', { repositoryName: pullRequest.fullName });

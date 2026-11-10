@@ -30,7 +30,7 @@ const ROOT = path.resolve(__dirname, '../../../..');
 const BUILD_ANCHORED_ALLOWLIST: Record<string, number> = {
   // legacy push filter: PR builds only by design; API builds use the autoTrack lookup
   'src/server/services/github.ts': 1,
-  // cleanupBuilds sweep: guarded PR-only branch (currently unwired queue)
+  // cleanupBuilds sweep: guarded PR-only branch (hourly closed-PR cleanup queue)
   'src/server/services/build.ts': 1,
   // v1 serializer derives display status for PR builds
   'src/pages/api/v1/builds/[uuid]/index.ts': 1,
