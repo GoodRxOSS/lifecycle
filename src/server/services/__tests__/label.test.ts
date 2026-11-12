@@ -191,6 +191,17 @@ describe('LabelService.processLabelQueue', () => {
     expect(mockRemovePullRequestLabel).not.toHaveBeenCalled();
   });
 
+  it('stops removing deploy labels at the first GitHub failure so the job retries', async () => {
+    const failure = new Error('github unavailable');
+    mockRemovePullRequestLabel.mockRejectedValueOnce(failure);
+    const { service } = createService();
+
+    await expect(
+      service.processLabelQueue(job({ action: 'disable', labels: ['deploy', 'deploy-stg'] }) as any)
+    ).rejects.toBe(failure);
+    expect(mockRemovePullRequestLabel).toHaveBeenCalledTimes(1);
+  });
+
   it('waits for a Mission Control comment before updating labels when requested', async () => {
     const pullRequest = pullRequestRecord({ commentId: null });
     const { service } = createService({ pullRequest });

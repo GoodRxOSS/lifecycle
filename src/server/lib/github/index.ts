@@ -178,8 +178,14 @@ export async function removePullRequestLabel({
       `DELETE /repos/${fullName}/issues/${pullRequestNumber}/labels/${encodeURIComponent(label)}`
     );
   } catch (error) {
-    // GitHub answers 404 when the label is already gone, which is the state we wanted.
-    if (error?.status === 404) return null;
+    // GitHub answers 404 when the label is already gone, which is the state we wanted. A missing
+    // issue or lost app access also 404s, so keep it visible.
+    if (error?.status === 404) {
+      getLogger({ repo: fullName, pr: pullRequestNumber, label, message: error?.message }).warn(
+        'GitHub: label remove returned 404, treating as already removed'
+      );
+      return null;
+    }
     getLogger({
       error,
       repo: fullName,

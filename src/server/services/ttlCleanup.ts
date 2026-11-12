@@ -366,8 +366,8 @@ export default class TTLCleanupService extends Service {
         pullRequestNumber: pullRequest.pullRequestNumber,
         fullName: pullRequest.fullName,
       };
-      await removePullRequestLabel({ ...target, label: deployLabel });
       await addPullRequestLabels({ ...target, labels: [disabledLabel] });
+      await removePullRequestLabel({ ...target, label: deployLabel });
 
       getLogger().debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
 

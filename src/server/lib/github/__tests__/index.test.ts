@@ -390,6 +390,14 @@ describe('repository and pull-request API wrappers', () => {
       removePullRequestLabel({ installationId: 19, pullRequestNumber: 7, fullName: 'org/repo', label: 'deploy now!' })
     ).resolves.toEqual({ data: [] });
     expect(request).toHaveBeenCalledWith('DELETE /repos/org/repo/issues/7/labels/deploy%20now!');
+
+    await removePullRequestLabel({
+      installationId: 19,
+      pullRequestNumber: 7,
+      fullName: 'org/repo',
+      label: 'team/infra',
+    });
+    expect(request).toHaveBeenCalledWith('DELETE /repos/org/repo/issues/7/labels/team%2Finfra');
   });
 
   test('treats a missing label as already removed but preserves other provider errors', async () => {
@@ -397,6 +405,16 @@ describe('repository and pull-request API wrappers', () => {
     await expect(
       removePullRequestLabel({ installationId: 19, pullRequestNumber: 7, fullName: 'org/repo', label: 'deploy' })
     ).resolves.toBeNull();
+    expect(getLogger).toHaveBeenCalledWith({
+      repo: 'org/repo',
+      pr: 7,
+      label: 'deploy',
+      message: 'Label does not exist',
+    });
+    expect((getLogger as jest.Mock)().warn).toHaveBeenCalledWith(
+      'GitHub: label remove returned 404, treating as already removed'
+    );
+    expect((getLogger as jest.Mock)().error).not.toHaveBeenCalledWith('GitHub: label remove failed');
 
     const failure = Object.assign(new Error('forbidden'), { status: 403 });
     mockClient(jest.fn().mockRejectedValue(failure));
