@@ -143,6 +143,7 @@ const schema_1_0_0 = {
         properties: {
           name: { type: 'string' },
           ignoreFiles,
+          includeFiles: ignoreFiles,
           appShort: { type: 'string' },
           defaultUUID: { type: 'string' },
           requires: {

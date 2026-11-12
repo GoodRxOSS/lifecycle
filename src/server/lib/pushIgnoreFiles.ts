@@ -18,12 +18,16 @@ import picomatch from 'picomatch';
 import type { LifecycleConfig } from 'server/models/yaml/Config';
 
 const MAX_IGNORE_PATTERNS = 50;
+// A dependency closure in a monorepo can list many package directories.
+const MAX_INCLUDE_PATTERNS = 200;
 const MAX_IGNORE_PATTERN_LENGTH = 200;
 const LIFECYCLE_CONFIG_FILE_PATHS = new Set(['lifecycle.yaml', 'lifecycle.yml', '.lifecycle.yaml', '.lifecycle.yml']);
 
 export interface PushIgnoreServicePolicy {
   serviceName: string;
   ignoreFiles: string[];
+  /** When set, any changed file outside these patterns is ignored for this service. */
+  includeFiles?: string[];
 }
 
 export interface PushIgnoreDecision {
@@ -31,51 +35,61 @@ export interface PushIgnoreDecision {
   reason: string;
   serviceName?: string;
   filePath?: string;
+  /** Services whose own policy ignores every changed file, when the others still deploy. */
+  skipServices?: string[];
 }
 
 export function normalizeGithubPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
 }
 
-function validateIgnorePattern(rawPattern: unknown): string {
+function validatePattern(rawPattern: unknown, field: string): string {
   if (typeof rawPattern !== 'string') {
-    throw new Error(`ignoreFiles patterns must be strings`);
+    throw new Error(`${field} patterns must be strings`);
   }
 
   const pattern = rawPattern.trim().replace(/\\/g, '/');
   if (!pattern) {
-    throw new Error('ignoreFiles patterns cannot be empty');
+    throw new Error(`${field} patterns cannot be empty`);
   }
 
   if (pattern.length > MAX_IGNORE_PATTERN_LENGTH) {
-    throw new Error(`ignoreFiles pattern exceeds maximum length of ${MAX_IGNORE_PATTERN_LENGTH}: "${pattern}"`);
+    throw new Error(`${field} pattern exceeds maximum length of ${MAX_IGNORE_PATTERN_LENGTH}: "${pattern}"`);
   }
 
   if (pattern.startsWith('/')) {
-    throw new Error(`ignoreFiles patterns must be repo-relative: "${pattern}"`);
+    throw new Error(`${field} patterns must be repo-relative: "${pattern}"`);
   }
 
   if (pattern.split('/').some((segment) => segment === '..')) {
-    throw new Error(`ignoreFiles patterns cannot traverse directories: "${pattern}"`);
+    throw new Error(`${field} patterns cannot traverse directories: "${pattern}"`);
   }
 
   return pattern.replace(/^\.\//, '');
 }
 
-export function normalizeIgnoreFiles(rawPatterns: unknown): string[] {
+function normalizePatterns(rawPatterns: unknown, field: string, maxPatterns: number): string[] {
   if (rawPatterns == null) {
     return [];
   }
 
   if (!Array.isArray(rawPatterns)) {
-    throw new Error('ignoreFiles must be an array of strings');
+    throw new Error(`${field} must be an array of strings`);
   }
 
-  if (rawPatterns.length > MAX_IGNORE_PATTERNS) {
-    throw new Error(`ignoreFiles has too many patterns: ${rawPatterns.length} exceeds ${MAX_IGNORE_PATTERNS}`);
+  if (rawPatterns.length > maxPatterns) {
+    throw new Error(`${field} has too many patterns: ${rawPatterns.length} exceeds ${maxPatterns}`);
   }
 
-  return Array.from(new Set(rawPatterns.map(validateIgnorePattern)));
+  return Array.from(new Set(rawPatterns.map((pattern) => validatePattern(pattern, field))));
+}
+
+export function normalizeIgnoreFiles(rawPatterns: unknown): string[] {
+  return normalizePatterns(rawPatterns, 'ignoreFiles', MAX_IGNORE_PATTERNS);
+}
+
+export function normalizeIncludeFiles(rawPatterns: unknown): string[] {
+  return normalizePatterns(rawPatterns, 'includeFiles', MAX_INCLUDE_PATTERNS);
 }
 
 export function getEffectiveIgnoreFiles(environmentIgnoreFiles: unknown, serviceIgnoreFiles: unknown): string[] {
@@ -94,14 +108,22 @@ export function getServicePushIgnorePolicy(
   }
 
   const ignoreFiles = getEffectiveIgnoreFiles(config.environment?.ignoreFiles, service.ignoreFiles);
-  if (ignoreFiles.length === 0) {
+  const includeFiles = normalizeIncludeFiles(service.includeFiles);
+  if (ignoreFiles.length === 0 && includeFiles.length === 0) {
     return null;
   }
 
   return {
     serviceName,
     ignoreFiles,
+    ...(includeFiles.length > 0 ? { includeFiles } : {}),
   };
+}
+
+function compileIgnoreMatcher(servicePolicy: PushIgnoreServicePolicy): (filePath: string) => boolean {
+  const isIgnored = servicePolicy.ignoreFiles.length > 0 ? picomatch(servicePolicy.ignoreFiles, { dot: true }) : null;
+  const isIncluded = servicePolicy.includeFiles?.length ? picomatch(servicePolicy.includeFiles, { dot: true }) : null;
+  return (filePath) => (isIgnored?.(filePath) ?? false) || (isIncluded != null && !isIncluded(filePath));
 }
 
 export function hasLifecycleConfigChange(changedFiles: string[]): boolean {
@@ -132,22 +154,27 @@ export function shouldSkipPushDeploy({
     return { shouldSkip: false, reason: 'no_service_policies' };
   }
 
+  let deployDecision: PushIgnoreDecision | null = null;
+  const skipServices: string[] = [];
   for (const servicePolicy of servicePolicies) {
-    if (servicePolicy.ignoreFiles.length === 0) {
-      return { shouldSkip: false, reason: 'missing_service_policy', serviceName: servicePolicy.serviceName };
+    const { serviceName } = servicePolicy;
+    if (servicePolicy.ignoreFiles.length === 0 && !servicePolicy.includeFiles?.length) {
+      deployDecision ??= { shouldSkip: false, reason: 'missing_service_policy', serviceName };
+      continue;
     }
 
-    for (const filePath of normalizedChangedFiles) {
-      if (!picomatch.isMatch(filePath, servicePolicy.ignoreFiles, { dot: true })) {
-        return {
-          shouldSkip: false,
-          reason: 'file_not_ignored',
-          serviceName: servicePolicy.serviceName,
-          filePath,
-        };
-      }
+    const isIgnored = compileIgnoreMatcher(servicePolicy);
+    const filePath = normalizedChangedFiles.find((changedFile) => !isIgnored(changedFile));
+    if (filePath) {
+      deployDecision ??= { shouldSkip: false, reason: 'file_not_ignored', serviceName, filePath };
+    } else {
+      skipServices.push(serviceName);
     }
   }
 
-  return { shouldSkip: true, reason: 'all_changed_files_ignored' };
+  if (!deployDecision) {
+    return { shouldSkip: true, reason: 'all_changed_files_ignored' };
+  }
+
+  return skipServices.length > 0 ? { ...deployDecision, skipServices } : deployDecision;
 }

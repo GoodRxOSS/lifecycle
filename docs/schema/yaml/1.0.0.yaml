@@ -795,3 +795,7 @@ services:
     ignoreFiles:
       # @param services.ignoreFiles[]
       - ''
+    # @param services.includeFiles
+    includeFiles:
+      # @param services.includeFiles[]
+      - ''

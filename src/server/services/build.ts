@@ -83,6 +83,7 @@ import {
   acceptDeploymentIntent,
   deploymentIntentDeployFilter,
   deploymentIntentSelectsAllDeploys,
+  excludeSkippedServiceDeploys,
   deployStampForGeneration,
   recordIntentConfigFailures,
   type AcceptedDeploymentIntent,
@@ -215,6 +216,8 @@ interface DeploymentReconciliationRequest {
   sourceGithubRepositoryId?: number | null;
   sourceRef?: string | null;
   sourceBeforeRef?: string | null;
+  /** Repository-scoped pushes only: services whose ignore policy matched every changed file. */
+  skipServices?: string[] | null;
   runUUID?: string | null;
   origin?: BuildEventOrigin | null;
 }
@@ -330,6 +333,7 @@ export default class BuildService extends BaseService {
       sourceGithubRepositoryId,
       sourceRef,
       sourceBeforeRef,
+      skipServices,
     }: DeploymentReconciliationRequest,
     requestId: string
   ): DeploymentIntent {
@@ -343,6 +347,7 @@ export default class BuildService extends BaseService {
         branch: sourceBranch,
         sha: immutableSourceRef,
         ...(sourceBeforeRef ? { beforeSha: sourceBeforeRef } : {}),
+        ...(githubRepositoryId != null && skipServices?.length ? { skipServices } : {}),
       };
     }
     if (githubRepositoryId != null) {
@@ -4405,11 +4410,15 @@ export default class BuildService extends BaseService {
   }
 
   private async adoptDeploysForIntent(buildId: number, intent: DeploymentIntent, generation: number): Promise<void> {
-    await this.db.models.Deploy.query()
-      .patch(deployStampForGeneration(generation))
-      .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
-      .where('desiredGeneration', '<', generation)
-      .where('observedGeneration', '<', generation);
+    await excludeSkippedServiceDeploys(
+      this.db.models.Deploy.query()
+        .patch(deployStampForGeneration(generation))
+        .where({ buildId, active: true, ...deploymentIntentDeployFilter(intent) })
+        .where('desiredGeneration', '<', generation)
+        .where('observedGeneration', '<', generation),
+      buildId,
+      intent
+    );
   }
 
   /**

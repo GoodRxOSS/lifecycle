@@ -1044,6 +1044,70 @@ describe('Github Service - handlePushWebhook', () => {
       expect(mockLoggerInfo).toHaveBeenCalledWith('Push: deploying reason=ignoreFiles_not_matched');
     });
 
+    describe('per-service ignoreFiles', () => {
+      const monorepoConfig = {
+        version: '1.0.0',
+        environment: {},
+        services: [
+          { name: 'next-web', ignoreFiles: ['apps/psp/**'] },
+          { name: 'psp-web', includeFiles: ['apps/psp/**', 'packages/**'] },
+        ],
+      };
+
+      const pushMonorepo = async (features: Record<string, boolean>) => {
+        const buildId = 100;
+        const nextWeb = {
+          ...createMockDeploy(buildId, DeployStatus.READY, 1),
+          deployable: { name: 'next-web', defaultBranchName: 'main' },
+        };
+        const pspWeb = {
+          ...createMockDeploy(buildId, DeployStatus.READY, 2),
+          deployable: { name: 'psp-web', defaultBranchName: 'main' },
+        };
+        mockDb.services.GlobalConfig.getAllConfigs.mockResolvedValue({ features });
+        (YamlService.fetchLifecycleConfig as jest.Mock).mockResolvedValue(monorepoConfig as any);
+
+        let queryCount = 0;
+        mockDb.models.Deploy.query.mockImplementation(() => {
+          queryCount++;
+          return queryCount === 1 ? createAllDeploysQuery([nextWeb, pspWeb]) : createFailedDeploysQuery([]);
+        });
+
+        await githubService.handlePushWebhook({
+          ...createMockPushEvent(),
+          before: 'previous-commit',
+          after: 'latest-commit',
+          commits: [{ added: [], removed: [], modified: ['apps/next-web/src/page.tsx'] }],
+          distinct_size: 1,
+        } as PushEvent);
+
+        return buildId;
+      };
+
+      test('redeploys only the services whose policy does not ignore the push', async () => {
+        const buildId = await pushMonorepo({ ignoreFiles: true, ignoreFilesPerService: true });
+
+        expect(mockLoggerInfo).toHaveBeenCalledWith('Push: skipped services reason=ignoreFiles');
+        expect(mockDb.services.BuildService.resolveAndDeployBuildQueue.add).toHaveBeenCalledWith(
+          'resolve-deploy',
+          expect.objectContaining({ buildId, githubRepositoryId: 12345, skipServices: ['psp-web'] })
+        );
+        expect(mockDb.services.Webhook.webhookQueue.add).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['the per-service flag is off', { ignoreFiles: true }],
+        ['ignoreFiles is off', { ignoreFiles: false, ignoreFilesPerService: true }],
+      ])('dry-runs per-service skips when %s', async (_label, features) => {
+        await pushMonorepo(features);
+
+        expect(mockLoggerInfo).toHaveBeenCalledWith('Push: dry-run would skip services reason=ignoreFiles');
+        const payload = mockDb.services.BuildService.resolveAndDeployBuildQueue.add.mock.calls[0][1];
+        expect(payload).toEqual(expect.objectContaining({ githubRepositoryId: 12345 }));
+        expect(payload).not.toHaveProperty('skipServices');
+      });
+    });
+
     test('always redeploys failed deploys without fetching changed files', async () => {
       const buildId = 100;
       const mockDeploy = createMockDeploy(buildId);

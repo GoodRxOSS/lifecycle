@@ -25,6 +25,11 @@ jest.mock('server/models/Build', () => ({
 const deployStamp: any = {
   patch: jest.fn(() => deployStamp),
   where: jest.fn(() => deployStamp),
+  whereNotIn: jest.fn(() => deployStamp),
+  select: jest.fn(() => deployStamp),
+  join: jest.fn(() => deployStamp),
+  whereIn: jest.fn(() => deployStamp),
+  whereRaw: jest.fn(() => deployStamp),
   then: (resolve: (value: number) => void, reject: (reason: unknown) => void) =>
     Promise.resolve(2).then(resolve, reject),
 };
@@ -506,6 +511,51 @@ describe('deploymentIntentDeployFilter', () => {
 });
 
 describe('acceptDeploymentIntent row stamping', () => {
+  const skipIntent = {
+    type: 'source' as const,
+    requestId: 'request-skip',
+    target: 'repository' as const,
+    githubRepositoryId: 123,
+    branch: 'main',
+    sha: 'commit-b',
+    skipServices: ['psp-web'],
+  };
+
+  it('leaves settled, healthy rows of skipped services out of the stamp', async () => {
+    (Build.query as jest.Mock)
+      .mockReturnValueOnce(readQuery({ desiredGeneration: '1', acceptedRefs: {} }))
+      .mockReturnValueOnce(writeQuery());
+
+    await acceptDeploymentIntent(42, skipIntent);
+
+    expect(deployStamp.whereNotIn).toHaveBeenCalledWith('id', deployStamp);
+    expect(deployStamp.join).toHaveBeenCalledWith('deployables', 'deployables.id', 'deploys.deployableId');
+    expect(deployStamp.where).toHaveBeenCalledWith('deploys.buildId', 42);
+    expect(deployStamp.whereIn).toHaveBeenCalledWith('deployables.name', ['psp-web']);
+    expect(deployStamp.whereIn).toHaveBeenCalledWith('deploys.status', [
+      DeployStatus.READY,
+      DeployStatus.DEPLOYED,
+      DeployStatus.BUILT,
+    ]);
+    expect(deployStamp.whereRaw).toHaveBeenCalledWith('?? >= ??', [
+      'deploys.observedGeneration',
+      'deploys.desiredGeneration',
+    ]);
+  });
+
+  it('stamps every selected row when no service is skipped or the push selects the whole environment', async () => {
+    (Build.query as jest.Mock)
+      .mockReturnValueOnce(readQuery({ desiredGeneration: '1', acceptedRefs: {} }))
+      .mockReturnValueOnce(writeQuery())
+      .mockReturnValueOnce(readQuery({ desiredGeneration: '2', acceptedRefs: {} }))
+      .mockReturnValueOnce(writeQuery());
+
+    await acceptDeploymentIntent(42, { ...skipIntent, skipServices: [] });
+    await acceptDeploymentIntent(42, { ...skipIntent, requestId: 'request-all', target: 'all' });
+
+    expect(deployStamp.whereNotIn).not.toHaveBeenCalled();
+  });
+
   it('does not touch Deploy rows when a redelivery is deduplicated', async () => {
     const existing: AcceptedDeploymentRefs = {
       'source:123:main': {

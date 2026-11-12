@@ -20,6 +20,7 @@ import {
   hasLifecycleConfigChange,
   normalizeGithubPath,
   normalizeIgnoreFiles,
+  normalizeIncludeFiles,
   shouldSkipPushDeploy,
 } from '../pushIgnoreFiles';
 
@@ -145,6 +146,87 @@ describe('pushIgnoreFiles', () => {
     });
   });
 
+  test('lists the services whose own policy ignores every changed file when others still deploy', () => {
+    expect(
+      shouldSkipPushDeploy({
+        changedFiles: ['apps/next-web/src/page.tsx'],
+        servicePolicies: [
+          { serviceName: 'next-web', ignoreFiles: ['docs/**'] },
+          { serviceName: 'psp-web', ignoreFiles: ['apps/next-web/**'] },
+          { serviceName: 'rxsaver-web', ignoreFiles: ['apps/next-web/**'] },
+        ],
+      })
+    ).toEqual({
+      shouldSkip: false,
+      reason: 'file_not_ignored',
+      serviceName: 'next-web',
+      filePath: 'apps/next-web/src/page.tsx',
+      skipServices: ['psp-web', 'rxsaver-web'],
+    });
+  });
+
+  test('keeps a service without a policy deploying while skipping services that ignore the change', () => {
+    expect(
+      shouldSkipPushDeploy({
+        changedFiles: ['apps/next-web/src/page.tsx'],
+        servicePolicies: [
+          { serviceName: 'worker', ignoreFiles: [] },
+          { serviceName: 'psp-web', ignoreFiles: ['apps/next-web/**'] },
+        ],
+      })
+    ).toEqual({
+      shouldSkip: false,
+      reason: 'missing_service_policy',
+      serviceName: 'worker',
+      skipServices: ['psp-web'],
+    });
+  });
+
+  test('treats files outside includeFiles as ignored, with ignoreFiles still applied inside them', () => {
+    const psp = {
+      serviceName: 'psp-web',
+      ignoreFiles: ['**/*.spec.ts'],
+      includeFiles: ['apps/psp/**', 'packages/shared/**', 'pnpm-lock.yaml'],
+    };
+
+    expect(
+      shouldSkipPushDeploy({
+        changedFiles: ['packages/accounts/src/a.ts', 'packages/shared/src/a.spec.ts'],
+        servicePolicies: [psp],
+      })
+    ).toEqual({ shouldSkip: true, reason: 'all_changed_files_ignored' });
+    expect(shouldSkipPushDeploy({ changedFiles: ['pnpm-lock.yaml'], servicePolicies: [psp] })).toEqual({
+      shouldSkip: false,
+      reason: 'file_not_ignored',
+      serviceName: 'psp-web',
+      filePath: 'pnpm-lock.yaml',
+    });
+  });
+
+  test('builds an includeFiles-only service policy', () => {
+    const config = {
+      version: '1.0.0',
+      environment: {},
+      services: [{ name: 'psp-web', includeFiles: ['apps/psp/**'] }],
+    } as any;
+
+    expect(getServicePushIgnorePolicy(config, 'psp-web')).toEqual({
+      serviceName: 'psp-web',
+      ignoreFiles: [],
+      includeFiles: ['apps/psp/**'],
+    });
+  });
+
+  test('validates includeFiles with a larger pattern cap', () => {
+    expect(normalizeIncludeFiles(Array.from({ length: 200 }, (_value, index) => `packages/${index}/**`))).toHaveLength(
+      200
+    );
+    expect(() => normalizeIncludeFiles(Array.from({ length: 201 }, (_value, index) => `p/${index}/**`))).toThrow(
+      'includeFiles has too many patterns'
+    );
+    expect(() => normalizeIncludeFiles(['../outside/**'])).toThrow('includeFiles patterns cannot traverse');
+  });
+
   test('detects lifecycle config changes by new path', () => {
     expect(hasLifecycleConfigChange(['docs/readme.md', 'lifecycle.yaml'])).toBe(true);
     expect(hasLifecycleConfigChange(['docs/lifecycle.yml'])).toBe(false);
@@ -154,7 +236,10 @@ describe('pushIgnoreFiles', () => {
     expect(
       shouldSkipPushDeploy({
         changedFiles: ['./lifecycle.yml'],
-        servicePolicies: [{ serviceName: 'api', ignoreFiles: ['**/*'] }],
+        servicePolicies: [
+          { serviceName: 'api', ignoreFiles: ['**/*'] },
+          { serviceName: 'web', ignoreFiles: [], includeFiles: ['apps/web/**'] },
+        ],
       })
     ).toEqual({
       shouldSkip: false,
