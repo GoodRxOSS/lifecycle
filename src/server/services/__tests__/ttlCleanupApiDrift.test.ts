@@ -45,7 +45,8 @@ jest.mock('server/lib/logger', () => ({
 }));
 jest.mock('server/lib/github', () => ({
   getPullRequestLabels: (...args: any[]) => mockGetPullRequestLabels(...args),
-  updatePullRequestLabels: jest.fn(),
+  addPullRequestLabels: jest.fn(),
+  removePullRequestLabel: jest.fn(),
   createOrUpdatePullRequestComment: jest.fn(),
 }));
 jest.mock('server/lib/utils', () => ({
@@ -104,8 +105,7 @@ const buildLookup = (build: any) => {
   });
 };
 
-const runCleanup = () =>
-  service().processTTLCleanupQueue({ data: {} } as any);
+const runCleanup = () => service().processTTLCleanupQueue({ data: {} } as any);
 
 beforeEach(() => {
   jest.clearAllMocks();

@@ -30,6 +30,8 @@ import {
   getPullRequest,
   getPullRequestByRepositoryFullName,
   getPullRequestLabels,
+  addPullRequestLabels,
+  removePullRequestLabel,
   getRepositoryByFullName,
   getSHAForBranch,
   getShaForDeploy,
@@ -38,7 +40,6 @@ import {
   getYamlFileContentFromPullRequest,
   listBranchesForRepo,
   listInstallationRepositories,
-  updatePullRequestLabels,
   verifyWebhookSignature,
 } from 'server/lib/github';
 import * as client from 'server/lib/github/client';
@@ -357,29 +358,50 @@ describe('repository and pull-request API wrappers', () => {
     ).rejects.toThrow('Unable to create or update pull request comment');
   });
 
-  test('replaces pull-request labels and preserves provider errors', async () => {
-    const request = mockClient(jest.fn().mockResolvedValue({ data: [{ name: 'ready' }] }));
+  test('adds pull-request labels without replacing existing ones and preserves provider errors', async () => {
+    const request = mockClient(jest.fn().mockResolvedValue({ data: [{ name: 'existing' }, { name: 'ready' }] }));
     await expect(
-      updatePullRequestLabels({
+      addPullRequestLabels({
         installationId: 19,
         pullRequestNumber: 7,
         fullName: 'org/repo',
         labels: ['ready'],
       })
-    ).resolves.toEqual({ data: [{ name: 'ready' }] });
-    expect(request).toHaveBeenCalledWith('PUT /repos/org/repo/issues/7/labels', {
+    ).resolves.toEqual({ data: [{ name: 'existing' }, { name: 'ready' }] });
+    expect(request).toHaveBeenCalledWith('POST /repos/org/repo/issues/7/labels', {
       data: { labels: ['ready'] },
     });
 
-    const failure = new Error('label update failed');
+    const failure = new Error('label add failed');
     mockClient(jest.fn().mockRejectedValue(failure));
     await expect(
-      updatePullRequestLabels({
+      addPullRequestLabels({
         installationId: 19,
         pullRequestNumber: 7,
         fullName: 'org/repo',
         labels: ['ready'],
       })
+    ).rejects.toBe(failure);
+  });
+
+  test('removes a single URL-encoded pull-request label', async () => {
+    const request = mockClient(jest.fn().mockResolvedValue({ data: [] }));
+    await expect(
+      removePullRequestLabel({ installationId: 19, pullRequestNumber: 7, fullName: 'org/repo', label: 'deploy now!' })
+    ).resolves.toEqual({ data: [] });
+    expect(request).toHaveBeenCalledWith('DELETE /repos/org/repo/issues/7/labels/deploy%20now!');
+  });
+
+  test('treats a missing label as already removed but preserves other provider errors', async () => {
+    mockClient(jest.fn().mockRejectedValue(Object.assign(new Error('Label does not exist'), { status: 404 })));
+    await expect(
+      removePullRequestLabel({ installationId: 19, pullRequestNumber: 7, fullName: 'org/repo', label: 'deploy' })
+    ).resolves.toBeNull();
+
+    const failure = Object.assign(new Error('forbidden'), { status: 403 });
+    mockClient(jest.fn().mockRejectedValue(failure));
+    await expect(
+      removePullRequestLabel({ installationId: 19, pullRequestNumber: 7, fullName: 'org/repo', label: 'deploy' })
     ).rejects.toBe(failure);
   });
 

@@ -20,7 +20,12 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
-import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
+import {
+  addPullRequestLabels,
+  removePullRequestLabel,
+  createOrUpdatePullRequestComment,
+  getPullRequestLabels,
+} from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel, parsePullRequestLabels } from 'server/lib/utils';
 import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
@@ -356,12 +361,13 @@ export default class TTLCleanupService extends Service {
     const updatedLabels = currentLabels.filter((label) => label !== deployLabel).concat(disabledLabel);
 
     try {
-      await updatePullRequestLabels({
+      const target = {
         installationId: repository.githubInstallationId,
         pullRequestNumber: pullRequest.pullRequestNumber,
         fullName: pullRequest.fullName,
-        labels: updatedLabels,
-      });
+      };
+      await removePullRequestLabel({ ...target, label: deployLabel });
+      await addPullRequestLabels({ ...target, labels: [disabledLabel] });
 
       getLogger().debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
 

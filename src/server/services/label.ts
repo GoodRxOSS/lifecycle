@@ -20,7 +20,7 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import { waitForColumnValue } from 'shared/utils';
-import { updatePullRequestLabels } from 'server/lib/github';
+import { addPullRequestLabels, removePullRequestLabel } from 'server/lib/github';
 import { getDeployLabel } from 'server/lib/utils';
 
 interface LabelJob {
@@ -96,30 +96,28 @@ export default class LabelService extends Service {
           }
         }
 
-        let updatedLabels: string[];
+        const target = {
+          installationId: repository.githubInstallationId,
+          pullRequestNumber: pullRequest.pullRequestNumber,
+          fullName: pullRequest.fullName,
+        };
 
         const deployLabel = await getDeployLabel();
         if (action === 'enable') {
-          if (!currentLabels.includes(deployLabel)) {
-            updatedLabels = [...currentLabels, deployLabel];
-          } else {
+          if (currentLabels.includes(deployLabel)) {
             getLogger({ stage: LogStage.LABEL_COMPLETE }).debug(
               `Deploy label "${deployLabel}" already exists on PR, skipping update`
             );
             return;
           }
+          await addPullRequestLabels({ ...target, labels: [deployLabel] });
         } else {
           const labelsConfig = await this.db.services.GlobalConfig.getLabels();
           const deployLabels = labelsConfig.deploy || [];
-          updatedLabels = currentLabels.filter((label) => !deployLabels.includes(label));
+          for (const label of currentLabels.filter((name) => deployLabels.includes(name))) {
+            await removePullRequestLabel({ ...target, label });
+          }
         }
-
-        await updatePullRequestLabels({
-          installationId: repository.githubInstallationId,
-          pullRequestNumber: pullRequest.pullRequestNumber,
-          fullName: pullRequest.fullName,
-          labels: updatedLabels,
-        });
 
         getLogger({ stage: LogStage.LABEL_COMPLETE }).info(
           `Label: ${action === 'enable' ? 'added' : 'removed'} label=${deployLabel}`
