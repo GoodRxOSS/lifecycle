@@ -539,8 +539,8 @@ describe('TTLCleanupService', () => {
     expect(mockMetricsIncrement).not.toHaveBeenCalled();
   });
 
-  it('skips reporting when removing the deploy label fails after the disabled label was added', async () => {
-    const patch = jest.fn();
+  it('still posts the cleanup comment when removing the deploy label fails after the disabled label was added', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
     mockExpiredNamespace();
     mockBuildLookup({
       id: 1,
@@ -559,13 +559,42 @@ describe('TTLCleanupService', () => {
     mockGetPullRequestLabels.mockResolvedValue(['sample-deploy']);
     mockAddPullRequestLabels.mockResolvedValue(undefined);
     mockRemovePullRequestLabel.mockRejectedValue(new Error('GitHub update failed'));
+    mockCreateOrUpdatePullRequestComment.mockResolvedValue(undefined);
 
     await expect(buildService().processTTLCleanupQueue({ data: {} } as any)).resolves.toBeUndefined();
 
     expect(mockAddPullRequestLabels).toHaveBeenCalledWith(expect.objectContaining({ labels: ['sample-disabled'] }));
-    expect(mockCreateOrUpdatePullRequestComment).not.toHaveBeenCalled();
-    expect(patch).not.toHaveBeenCalled();
-    expect(mockMetricsIncrement).not.toHaveBeenCalled();
+    expect(mockCreateOrUpdatePullRequestComment).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith({ labels: JSON.stringify(['sample-disabled']) });
+    expect(mockMetricsIncrement).toHaveBeenCalledWith('total', { dry_run: 'false' });
+  });
+
+  it('retries a pull request left with both the disabled and deploy labels', async () => {
+    const patch = jest.fn().mockResolvedValue(undefined);
+    mockExpiredNamespace();
+    mockBuildLookup({
+      id: 1,
+      uuid: 'sample-123456',
+      status: 'deployed',
+      isStatic: false,
+      pullRequest: {
+        status: 'open',
+        pullRequestNumber: 1,
+        fullName: 'ExampleOrg/half-done',
+        labels: JSON.stringify(['sample-disabled', 'sample-deploy']),
+        repository: { githubInstallationId: 1 },
+        $query: jest.fn(() => ({ patch })),
+      },
+    });
+    mockGetPullRequestLabels.mockResolvedValue(['sample-disabled', 'sample-deploy']);
+    mockAddPullRequestLabels.mockResolvedValue(undefined);
+    mockRemovePullRequestLabel.mockResolvedValue(undefined);
+    mockCreateOrUpdatePullRequestComment.mockResolvedValue(undefined);
+
+    await buildService().processTTLCleanupQueue({ data: {} } as any);
+
+    expect(mockRemovePullRequestLabel).toHaveBeenCalledWith(expect.objectContaining({ label: 'sample-deploy' }));
+    expect(mockCreateOrUpdatePullRequestComment).toHaveBeenCalledTimes(1);
   });
 
   it('renders configured cleanup placeholders using the active label names', async () => {

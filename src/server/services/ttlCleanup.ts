@@ -162,6 +162,7 @@ export default class TTLCleanupService extends Service {
       // Fetch dynamic labels once at the start
       const keepLabel = await getKeepLabel();
       const disabledLabel = await getDisabledLabel();
+      const deployLabel = await getDeployLabel();
 
       for (const namespace of namespaces) {
         const nsName = namespace.metadata?.name;
@@ -276,7 +277,7 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
-        if (currentLabels.includes(disabledLabel)) {
+        if (currentLabels.includes(disabledLabel) && !currentLabels.includes(deployLabel)) {
           getLogger().debug(`Already has ${disabledLabel} label (verified from GitHub), skipping`);
           continue;
         }
@@ -367,7 +368,13 @@ export default class TTLCleanupService extends Service {
         fullName: pullRequest.fullName,
       };
       await addPullRequestLabels({ ...target, labels: [disabledLabel] });
-      await removePullRequestLabel({ ...target, label: deployLabel });
+      // The disabled label alone tears the environment down, so a failed removal must not
+      // stop the cleanup comment from being posted.
+      try {
+        await removePullRequestLabel({ ...target, label: deployLabel });
+      } catch (error) {
+        getLogger().warn({ error }, `TTL: deploy label removal failed pr=${pullRequest.pullRequestNumber}`);
+      }
 
       getLogger().debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
 

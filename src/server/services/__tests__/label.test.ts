@@ -25,6 +25,7 @@ const mockUpdateLogContext = jest.fn();
 const mockWaitForColumnValue = jest.fn();
 const mockAddPullRequestLabels = jest.fn();
 const mockRemovePullRequestLabel = jest.fn();
+const mockGetPullRequestLabels = jest.fn();
 const mockGetDeployLabel = jest.fn();
 const mockRegisterQueue = jest.fn();
 
@@ -55,6 +56,7 @@ jest.mock('shared/utils', () => ({
 jest.mock('server/lib/github', () => ({
   addPullRequestLabels: (input: unknown) => mockAddPullRequestLabels(input),
   removePullRequestLabel: (input: unknown) => mockRemovePullRequestLabel(input),
+  getPullRequestLabels: (input: unknown) => mockGetPullRequestLabels(input),
 }));
 
 jest.mock('server/lib/utils', () => ({
@@ -125,6 +127,7 @@ describe('LabelService.processLabelQueue', () => {
     mockWaitForColumnValue.mockResolvedValue({ commentId: 101 });
     mockAddPullRequestLabels.mockResolvedValue(undefined);
     mockRemovePullRequestLabel.mockResolvedValue(undefined);
+    mockGetPullRequestLabels.mockResolvedValue([]);
   });
 
   it('adds only the deploy label and propagates the queued logging context', async () => {
@@ -158,12 +161,11 @@ describe('LabelService.processLabelQueue', () => {
     expect(mockLogger.debug).toHaveBeenCalledWith('Deploy label "deploy" already exists on PR, skipping update');
   });
 
-  it('removes each configured deploy label individually without touching other labels', async () => {
+  it('removes each configured deploy label currently on the PR without touching other labels', async () => {
+    mockGetPullRequestLabels.mockResolvedValue(['deploy', 'keep', 'deploy-stg', 'also-keep']);
     const { service, getLabels } = createService();
 
-    await service.processLabelQueue(
-      job({ action: 'disable', labels: ['deploy', 'keep', 'deploy-stg', 'also-keep'] }) as any
-    );
+    await service.processLabelQueue(job({ action: 'disable', labels: [] }) as any);
 
     expect(getLabels).toHaveBeenCalledTimes(1);
     expect(mockRemovePullRequestLabel.mock.calls.map(([input]) => input)).toEqual([
@@ -179,21 +181,35 @@ describe('LabelService.processLabelQueue', () => {
 
     await service.processLabelQueue(job({ action: 'disable', labels: ['keep'] }) as any);
 
+    expect(mockGetPullRequestLabels).not.toHaveBeenCalled();
     expect(mockRemovePullRequestLabel).not.toHaveBeenCalled();
     expect(mockAddPullRequestLabels).not.toHaveBeenCalled();
   });
 
-  it('makes no GitHub calls on disable when the PR carries no deploy label', async () => {
+  it('removes nothing on disable when the PR carries no deploy label', async () => {
+    mockGetPullRequestLabels.mockResolvedValue(['keep', 'dependencies']);
     const { service } = createService();
 
-    await service.processLabelQueue(job({ action: 'disable', labels: ['keep', 'dependencies'] }) as any);
+    await service.processLabelQueue(job({ action: 'disable', labels: ['keep', 'dependencies', 'deploy'] }) as any);
 
+    expect(mockRemovePullRequestLabel).not.toHaveBeenCalled();
+  });
+
+  it('propagates a failed label lookup on disable so the job retries', async () => {
+    const failure = new Error('labels unavailable');
+    mockGetPullRequestLabels.mockRejectedValue(failure);
+    const { service } = createService();
+
+    await expect(service.processLabelQueue(job({ action: 'disable', labels: ['deploy'] }) as any)).rejects.toBe(
+      failure
+    );
     expect(mockRemovePullRequestLabel).not.toHaveBeenCalled();
   });
 
   it('stops removing deploy labels at the first GitHub failure so the job retries', async () => {
     const failure = new Error('github unavailable');
     mockRemovePullRequestLabel.mockRejectedValueOnce(failure);
+    mockGetPullRequestLabels.mockResolvedValue(['deploy', 'deploy-stg']);
     const { service } = createService();
 
     await expect(

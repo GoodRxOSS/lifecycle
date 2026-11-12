@@ -20,7 +20,7 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { withLogContext, getLogger, LogStage, updateLogContext } from 'server/lib/logger';
 import { waitForColumnValue } from 'shared/utils';
-import { addPullRequestLabels, removePullRequestLabel } from 'server/lib/github';
+import { addPullRequestLabels, getPullRequestLabels, removePullRequestLabel } from 'server/lib/github';
 import { getDeployLabel } from 'server/lib/utils';
 
 interface LabelJob {
@@ -114,8 +114,12 @@ export default class LabelService extends Service {
         } else {
           const labelsConfig = await this.db.services.GlobalConfig.getLabels();
           const deployLabels = labelsConfig.deploy || [];
-          for (const label of currentLabels.filter((name) => deployLabels.includes(name))) {
-            await removePullRequestLabel({ ...target, label });
+          if (deployLabels.length > 0) {
+            // The webhook payload can predate a deploy label added after the event.
+            const liveLabels = await getPullRequestLabels(target);
+            for (const label of liveLabels.filter((name) => deployLabels.includes(name))) {
+              await removePullRequestLabel({ ...target, label });
+            }
           }
         }
 
