@@ -35,6 +35,8 @@ export interface AgentRuntimeProviderConfig {
   name: string;
   enabled: boolean;
   apiKeyEnvVar: string;
+  baseUrl?: string;
+  discoverModels?: boolean;
   models: AgentRuntimeModelConfig[];
 }
 
