@@ -20,7 +20,12 @@ import { QUEUE_NAMES } from 'shared/config';
 import { redisClient } from 'server/lib/dependencies';
 import { withLogContext, updateLogContext, getLogger, LogStage } from 'server/lib/logger';
 import * as k8s from '@kubernetes/client-node';
-import { updatePullRequestLabels, createOrUpdatePullRequestComment, getPullRequestLabels } from 'server/lib/github';
+import {
+  addPullRequestLabels,
+  removePullRequestLabel,
+  createOrUpdatePullRequestComment,
+  getPullRequestLabels,
+} from 'server/lib/github';
 import { getKeepLabel, getDisabledLabel, getDeployLabel, parsePullRequestLabels } from 'server/lib/utils';
 import { Build, PullRequest } from 'server/models';
 import Metrics from 'server/lib/metrics';
@@ -157,6 +162,7 @@ export default class TTLCleanupService extends Service {
       // Fetch dynamic labels once at the start
       const keepLabel = await getKeepLabel();
       const disabledLabel = await getDisabledLabel();
+      const deployLabel = await getDeployLabel();
 
       for (const namespace of namespaces) {
         const nsName = namespace.metadata?.name;
@@ -271,7 +277,7 @@ export default class TTLCleanupService extends Service {
           continue;
         }
 
-        if (currentLabels.includes(disabledLabel)) {
+        if (currentLabels.includes(disabledLabel) && !currentLabels.includes(deployLabel)) {
           getLogger().debug(`Already has ${disabledLabel} label (verified from GitHub), skipping`);
           continue;
         }
@@ -356,12 +362,19 @@ export default class TTLCleanupService extends Service {
     const updatedLabels = currentLabels.filter((label) => label !== deployLabel).concat(disabledLabel);
 
     try {
-      await updatePullRequestLabels({
+      const target = {
         installationId: repository.githubInstallationId,
         pullRequestNumber: pullRequest.pullRequestNumber,
         fullName: pullRequest.fullName,
-        labels: updatedLabels,
-      });
+      };
+      await addPullRequestLabels({ ...target, labels: [disabledLabel] });
+      // The disabled label alone tears the environment down, so a failed removal must not
+      // stop the cleanup comment from being posted.
+      try {
+        await removePullRequestLabel({ ...target, label: deployLabel });
+      } catch (error) {
+        getLogger().warn({ error }, `TTL: deploy label removal failed pr=${pullRequest.pullRequestNumber}`);
+      }
 
       getLogger().debug(`TTL: labels updated PR#${pullRequest.pullRequestNumber}`);
 

@@ -134,7 +134,7 @@ export async function createOrUpdatePullRequestComment({
   }
 }
 
-export async function updatePullRequestLabels({
+export async function addPullRequestLabels({
   installationId,
   pullRequestNumber,
   fullName,
@@ -146,9 +146,8 @@ export async function updatePullRequestLabels({
   labels: string[];
 }) {
   try {
-    const client = await createOctokitClient({ installationId, caller: 'updatePullRequestLabels' });
-    const requestUrl = `PUT /repos/${fullName}/issues/${pullRequestNumber}/labels`;
-    return await client.request(requestUrl, {
+    const client = await createOctokitClient({ installationId, caller: 'addPullRequestLabels' });
+    return await client.request(`POST /repos/${fullName}/issues/${pullRequestNumber}/labels`, {
       data: { labels },
     });
   } catch (error) {
@@ -157,7 +156,42 @@ export async function updatePullRequestLabels({
       repo: fullName,
       pr: pullRequestNumber,
       labels: labels.toString(),
-    }).error('GitHub: labels update failed');
+    }).error('GitHub: labels add failed');
+    throw error;
+  }
+}
+
+export async function removePullRequestLabel({
+  installationId,
+  pullRequestNumber,
+  fullName,
+  label,
+}: {
+  installationId: number;
+  pullRequestNumber: number;
+  fullName: string;
+  label: string;
+}) {
+  try {
+    const client = await createOctokitClient({ installationId, caller: 'removePullRequestLabel' });
+    return await client.request(
+      `DELETE /repos/${fullName}/issues/${pullRequestNumber}/labels/${encodeURIComponent(label)}`
+    );
+  } catch (error) {
+    // GitHub answers 404 when the label is already gone, which is the state we wanted. A missing
+    // issue or lost app access also 404s, so keep it visible.
+    if (error?.status === 404) {
+      getLogger({ repo: fullName, pr: pullRequestNumber, label, message: error?.message }).warn(
+        'GitHub: label remove returned 404, treating as already removed'
+      );
+      return null;
+    }
+    getLogger({
+      error,
+      repo: fullName,
+      pr: pullRequestNumber,
+      label,
+    }).error('GitHub: label remove failed');
     throw error;
   }
 }
