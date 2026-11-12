@@ -15,6 +15,7 @@
  */
 
 import { Deploy } from '../../models';
+import { shellQuote, escapeK8sDollar } from '../shellQuote';
 import { shellPromise } from '../shell';
 import { getLogger } from '../logger';
 import GlobalConfigService from '../../services/globalConfig';
@@ -99,9 +100,7 @@ interface BuildArgOptions {
 // Each secret goes to buildctl twice: as a build arg, for Dockerfiles that read it with ARG, and as a
 // BuildKit secret, for Dockerfiles that read it with `RUN --mount=type=secret,id=<KEY>`. The secret
 // form never reaches the image history; a build arg only does if the Dockerfile declares its ARG.
-export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
+export { shellQuote };
 
 export function generateSecretArgsScript(secretEnvKeys?: string[]): string {
   if (!secretEnvKeys || secretEnvKeys.length === 0) {
@@ -163,7 +162,7 @@ const ENGINES: Record<string, BuildEngine> = {
 set -e
 
 # Detect registry type and perform appropriate login
-REGISTRY_DOMAIN=${shellQuote(ecrDomain)}
+REGISTRY_DOMAIN=${escapeK8sDollar(shellQuote(ecrDomain))}
 
 # AWS ECR Detection (format: <account-id>.dkr.ecr.<region>.amazonaws.com)
 if echo "\${REGISTRY_DOMAIN}" | grep -qE "^[0-9]+\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com$"; then
@@ -207,7 +206,7 @@ set --
 ${generateSecretArgsScript(secretEnvKeys)}
 
 echo "Running buildctl..."
-buildctl ${buildctlArgs.map(shellQuote).join(' \\\n  ')} "$@"
+buildctl ${buildctlArgs.map((arg) => escapeK8sDollar(shellQuote(arg))).join(' \\\n  ')} "$@"
 `;
 
       return [script.trim()];
@@ -239,7 +238,7 @@ buildctl ${buildctlArgs.map(shellQuote).join(' \\\n  ')} "$@"
         args.push(`--build-arg=${key}=${value}`);
       });
 
-      return args;
+      return args.map(escapeK8sDollar);
     },
     getCacheRef: (cacheRegistry, ecrRepo) => `${cacheRegistry}/${ecrRepo}/cache`,
   },
@@ -311,7 +310,10 @@ function createBuildContainer(
     image: engine.image,
     command: engine.command,
     args,
-    env: Object.entries(containerEnvVars).map(([envName, value]) => ({ name: envName, value: String(value) })),
+    env: Object.entries(containerEnvVars).map(([envName, value]) => ({
+      name: envName,
+      value: escapeK8sDollar(String(value)),
+    })),
     volumeMounts,
     resources,
   };
