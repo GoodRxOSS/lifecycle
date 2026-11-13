@@ -261,6 +261,8 @@ services:
           args:
             # @param services.helm.nativeHelm.postRenderer.args[]
             - ''
+      # @param services.helm.skipImageBuild
+      skipImageBuild: false
     # @param services.codefresh
     codefresh:
       # @param services.codefresh.repository (required)
