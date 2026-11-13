@@ -491,6 +491,90 @@ services:
     });
   });
 
+  describe('helm.skipImageBuild', () => {
+    const configFor = (helm = {}) => ({
+      version: '1.0.0',
+      services: [
+        {
+          name: 'gateway',
+          helm: {
+            repository: 'org/chart-repo',
+            branchName: 'main',
+            deploymentMethod: 'native',
+            chart: { name: './charts/gateway' },
+            ...helm,
+          },
+        },
+      ],
+    });
+
+    test.each([undefined, false, true])('accepts boolean opt-in %s', (skipImageBuild) => {
+      expect(() => new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild }) as any)).not.toThrow();
+    });
+
+    test.each(['true', 1, null])('rejects non-boolean opt-in %s', (skipImageBuild) => {
+      expect(() => new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild }) as any)).toThrow();
+    });
+
+    test.each(['ci', undefined])('rejects opt-in without explicit native deployment (%s)', (deploymentMethod) => {
+      expect(() =>
+        new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild: true, deploymentMethod }) as any)
+      ).toThrow();
+    });
+
+    test('rejects opt-in combined with a Docker build declaration', () => {
+      expect(() =>
+        new YamlConfigValidator().validate_1_0_0(
+          configFor({
+            skipImageBuild: true,
+            docker: { defaultTag: 'main', app: { dockerfilePath: 'Dockerfile' } },
+          }) as any
+        )
+      ).toThrow();
+    });
+
+    test('preserves legacy Docker declarations when the option is false', () => {
+      expect(() =>
+        new YamlConfigValidator().validate_1_0_0(
+          configFor({
+            skipImageBuild: false,
+            deploymentMethod: 'ci',
+            docker: { defaultTag: 'main', app: { dockerfilePath: 'Dockerfile' } },
+          }) as any
+        )
+      ).not.toThrow();
+    });
+
+    test('explicit opt-in overrides inherited Docker defaults without mutating them', async () => {
+      const defaults = {
+        helmDefaults: { docker: { defaultTag: 'main', app: { dockerfilePath: 'default.Dockerfile' } } },
+      };
+      mockGetAllConfigs.mockResolvedValue(defaults);
+      const service = configFor({ skipImageBuild: true }).services[0];
+      const helm = await YamlService.getHelmConfigFromYaml(service as any);
+
+      expect(helm.skipImageBuild).toBe(true);
+      expect(helm.chart.name).toBe('./charts/gateway');
+      expect(helm.docker).toBeUndefined();
+      expect(defaults.helmDefaults.docker.app.dockerfilePath).toBe('default.Dockerfile');
+
+      const legacyHelm = await YamlService.getHelmConfigFromYaml(configFor().services[0] as any);
+      expect(legacyHelm.docker.app.dockerfilePath).toBe('default.Dockerfile');
+    });
+
+    test('does not discard an explicit Docker declaration when merging an unchecked service', async () => {
+      mockGetAllConfigs.mockResolvedValue({});
+      const service = configFor({
+        skipImageBuild: true,
+        docker: { defaultTag: 'main', app: { dockerfilePath: 'Dockerfile' } },
+      }).services[0];
+
+      await expect(YamlService.getHelmConfigFromYaml(service as any)).rejects.toThrow(
+        'helm.skipImageBuild cannot be combined with helm.docker'
+      );
+    });
+  });
+
   describe('hasLifecycleManagedDockerBuild', () => {
     test('returns true for github services with docker config', () => {
       const parser = new YamlConfigParser();

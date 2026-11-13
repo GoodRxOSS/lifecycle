@@ -553,10 +553,17 @@ export default class DeployService extends BaseService {
             getLogger().info('Image: skipped reason=public status=built');
             return true;
           case DeployTypes.HELM: {
+            const skipImageBuild = deployable.helm?.skipImageBuild === true;
             try {
               const chartType = await determineChartType(deploy);
 
-              if (chartType !== ChartType.PUBLIC) {
+              if (skipImageBuild && (deployable.helm?.deploymentMethod !== 'native' || deployable.helm?.docker)) {
+                throw new Error(
+                  'helm.skipImageBuild requires deploymentMethod: native and no helm.docker configuration'
+                );
+              }
+
+              if (chartType !== ChartType.PUBLIC && !skipImageBuild) {
                 return await this.buildImageForHelmAndGithub(
                   deploy,
                   runUUID,
@@ -570,8 +577,12 @@ export default class DeployService extends BaseService {
               }
 
               let fullSha = null;
+              const requiresChartSource = skipImageBuild && chartType === ChartType.LOCAL;
 
               await deploy.$fetchGraph('deployable.repository');
+              if (requiresChartSource && !deployable.repository) {
+                throw this.sourceResolutionFailure(null, deploy.branchName);
+              }
               if (deploy.deployable?.repository) {
                 try {
                   fullSha = await this.resolveSourceSha(
@@ -584,6 +595,7 @@ export default class DeployService extends BaseService {
                     acceptedSourcePins
                   );
                 } catch (shaError) {
+                  if (requiresChartSource) throw shaError;
                   getLogger().debug(
                     { error: shaError },
                     'Could not get SHA for PUBLIC helm chart, continuing without it'
@@ -594,14 +606,16 @@ export default class DeployService extends BaseService {
                 deploy,
                 {
                   status: DeployStatus.BUILT,
-                  statusMessage: 'Helm chart does not need to be built',
+                  statusMessage: skipImageBuild
+                    ? 'Image build skipped; Helm chart uses prebuilt images'
+                    : 'Helm chart does not need to be built',
                   ...(fullSha && { sha: fullSha }),
                 },
                 runUUID
               );
               return true;
             } catch (error) {
-              if (error instanceof AuthorityLockLostError) throw error;
+              if (error instanceof AuthorityLockLostError || skipImageBuild) throw error;
               getLogger().warn({ error }, 'Helm: deployment processing failed');
               return false;
             }

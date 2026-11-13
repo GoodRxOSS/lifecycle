@@ -32,6 +32,32 @@ Happy coding! Join the community on [Discord](https://discord.gg/TEtKgCs8T8)
 
 ## Development
 
+### Helm charts with prebuilt images
+
+For native Helm services whose images are already specified in chart values, opt out of image
+building explicitly:
+
+```yaml
+services:
+  - name: gateway
+    helm:
+      repository: example-org/gateway-config
+      branchName: main
+      deploymentMethod: native
+      skipImageBuild: true
+      chart:
+        name: ./charts/gateway
+        valueFiles:
+          - charts/gateway/values-preview.yaml
+```
+
+`skipImageBuild` defaults to `false`, preserving the existing build behavior for local and
+organization charts. Setting it to `true` requires explicit `deploymentMethod: native` and no
+service-level `helm.docker` declaration; inherited Docker build defaults are ignored for that
+service. The chart must supply its prebuilt image references. Git revision resolution, chart
+checkout, and native Helm deployment still run, and unresolved local chart revisions fail the
+deployment instead of silently deploying a different revision.
+
 ### Prerequisites
 
 Install the following tools using [Homebrew](https://brew.sh/):

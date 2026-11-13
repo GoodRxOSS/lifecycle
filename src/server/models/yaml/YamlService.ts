@@ -203,6 +203,7 @@ export interface Helm {
   readonly builder?: Builder;
   readonly envLens?: boolean;
   readonly deploymentMethod?: 'native' | 'ci';
+  readonly skipImageBuild?: boolean;
   readonly nativeHelm?: NativeHelmConfig;
   readonly envMapping?: {
     readonly app?: {
@@ -572,6 +573,14 @@ export async function getHelmConfigFromYaml(service: Service): Promise<Helm> {
     const chartConfig = globalConfig[helmService?.chart?.name] || {};
 
     const helmConfig = _.merge({}, helmDefaults, chartConfig, helmService);
+
+    // Chart-only services must not inherit Docker build inputs from installation defaults.
+    if (helmService?.skipImageBuild === true) {
+      if (helmService.docker) {
+        throw new Error('helm.skipImageBuild cannot be combined with helm.docker');
+      }
+      delete helmConfig.docker;
+    }
 
     // Preserve value files from service config if specified
     if (helmService?.chart?.valueFiles?.length > 0) {

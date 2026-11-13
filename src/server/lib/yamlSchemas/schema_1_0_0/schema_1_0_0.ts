@@ -167,6 +167,17 @@ const schema_1_0_0 = {
           helm: {
             type: 'object',
             additionalProperties: true,
+            anyOf: [
+              { properties: { skipImageBuild: { enum: [false] } } },
+              {
+                properties: {
+                  skipImageBuild: { enum: [true] },
+                  deploymentMethod: { enum: ['native'] },
+                },
+                required: ['skipImageBuild', 'deploymentMethod'],
+                not: { required: ['docker'] },
+              },
+            ],
             properties: {
               cfStepType: { type: 'string' },
               type: { type: 'string' },
@@ -176,6 +187,12 @@ const schema_1_0_0 = {
               repository: { type: 'string' },
               branchName: { type: 'string' },
               deploymentMethod: { type: 'string', enum: ['native', 'ci'] },
+              skipImageBuild: {
+                type: 'boolean',
+                default: false,
+                description:
+                  'Skip image building for a native Helm service that uses prebuilt images in its chart values. Requires deploymentMethod: native and no docker configuration.',
+              },
               chart: {
                 type: 'object',
                 additionalProperties: false,
