@@ -580,14 +580,16 @@ export default class DeployService extends BaseService {
               const requiresChartSource = skipImageBuild && chartType === ChartType.LOCAL;
 
               await deploy.$fetchGraph('deployable.repository');
-              if (requiresChartSource && !deployable.repository) {
+              // Graph loading replaces the related deployable instance.
+              const repository = deploy.deployable?.repository;
+              if (requiresChartSource && !repository) {
                 throw this.sourceResolutionFailure(null, deploy.branchName);
               }
-              if (deploy.deployable?.repository) {
+              if (repository) {
                 try {
                   fullSha = await this.resolveSourceSha(
                     deploy,
-                    deploy.deployable.repository.fullName,
+                    repository.fullName,
                     deploy.branchName,
                     sourceRef,
                     sourceGithubRepositoryId,
