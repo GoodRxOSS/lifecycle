@@ -532,6 +532,40 @@
                     }
                   }
                 }
+              },
+              "skipImageBuild": {
+                "type": "boolean",
+                "default": false,
+                "description": "Skip image building for a native Helm service that uses prebuilt images in its chart values. Requires deploymentMethod: native and no docker configuration."
+              }
+            },
+            "if": {
+              "properties": {
+                "skipImageBuild": {
+                  "enum": [
+                    true
+                  ]
+                }
+              },
+              "required": [
+                "skipImageBuild"
+              ]
+            },
+            "then": {
+              "properties": {
+                "deploymentMethod": {
+                  "enum": [
+                    "native"
+                  ]
+                }
+              },
+              "required": [
+                "deploymentMethod"
+              ],
+              "not": {
+                "required": [
+                  "docker"
+                ]
               }
             }
           },

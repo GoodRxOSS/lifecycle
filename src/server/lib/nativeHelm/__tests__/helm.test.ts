@@ -70,6 +70,7 @@ jest.mock('server/lib/nativeBuild/utils', () => {
   return {
     ...originalModule,
     waitForJobAndGetLogs: jest.fn(),
+    getGitHubToken: jest.fn().mockResolvedValue('test-github-token'),
   };
 });
 jest.mock('server/services/logArchival', () => ({
@@ -1868,6 +1869,60 @@ describe('Native Helm', () => {
   });
 
   describe('generateHelmManifest', () => {
+    it('checks out the pinned chart revision and deploys a local chart with image building disabled', async () => {
+      mockGetAllConfigs.mockResolvedValue({});
+      (nativeHelmUtils.determineChartType as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').determineChartType
+      );
+      (nativeHelmUtils.mergeHelmConfigWithGlobal as jest.Mock).mockImplementation(
+        jest.requireActual('../utils').mergeHelmConfigWithGlobal
+      );
+      const deploy = {
+        uuid: 'gateway-preview',
+        sha: 'accepted-chart-commit',
+        branchName: 'chart-main',
+        id: 42,
+        deployableId: 99,
+        deployable: {
+          name: 'gateway',
+          repository: { fullName: 'example-org/chart-repo' },
+          helm: {
+            deploymentMethod: 'native',
+            skipImageBuild: true,
+            args: '--dependency-update',
+            chart: { name: './charts/gateway' },
+          },
+        },
+        build: { uuid: 'preview', namespace: 'env-preview', isStatic: false },
+        $fetchGraph: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const manifest = await generateHelmManifest(
+        deploy,
+        'test-job',
+        { namespace: 'env-preview' },
+        {
+          chartType: ChartType.LOCAL,
+          customValues: [],
+          helmSecretRefs: [],
+          secretSetFiles: [],
+          valuesFiles: ['charts/gateway/values-preview.yaml'],
+          chartPath: './charts/gateway',
+          releaseName: 'gateway-preview',
+          helmVersion: '3.18.6',
+        }
+      );
+      const job = yaml.load(manifest) as any;
+      const clone = job.spec.template.spec.initContainers.find((container) => container.name === 'clone-repo');
+      expect(clone).toBeDefined();
+      expect(JSON.stringify(clone)).toContain('example-org/chart-repo');
+      expect(JSON.stringify(clone)).toContain('accepted-chart-commit');
+      const runner = job.spec.template.spec.containers.find((container) => container.name === 'helm-deploy');
+      expect(runner.args[0]).toContain('helm upgrade --install gateway-preview ./charts/gateway');
+      expect(runner.args[0]).toContain('-f ./charts/gateway/values-preview.yaml');
+      expect(runner.args[0]).toContain('--dependency-update');
+    });
+
     it('builds the expected manifest for plain native Helm without a renderer', async () => {
       mockGetAllConfigs.mockResolvedValue({
         publicChart: { block: false },

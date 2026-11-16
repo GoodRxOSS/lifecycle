@@ -659,6 +659,173 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
     });
   });
 
+  describe('chart-only native Helm services', () => {
+    const createChartDeploy = (helm = {}) => ({
+      id: 17,
+      uuid: 'gateway-preview',
+      branchName: 'chart-main',
+      githubRepositoryId: 84,
+      build: {
+        githubRepositoryId: 42,
+        triggerType: 'pull_request',
+        branchName: 'app-feature',
+        configSha: 'app-config-sha',
+      },
+      deployable: {
+        name: 'gateway',
+        type: DeployTypes.HELM,
+        repository: { fullName: 'example-org/chart-repo' },
+        helm: {
+          deploymentMethod: 'native',
+          chart: { name: './charts/gateway' },
+          ...helm,
+        },
+      },
+      $fetchGraph: jest.fn().mockResolvedValue(undefined),
+    });
+
+    beforeEach(() => {
+      mockDetermineChartType.mockResolvedValue(ChartType.LOCAL);
+      (github.getSHAForBranch as jest.Mock).mockReset().mockResolvedValue('chart-sha');
+    });
+
+    test('skips image builders and pins the chart repository revision instead of the app revision', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const build = jest.spyOn(deployService, 'buildImageForHelmAndGithub').mockResolvedValue(true);
+
+      await expect(
+        deployService.buildImage(deploy as any, 0, 'run-1', 'app-push-sha', 42, 'app-feature')
+      ).resolves.toBe(true);
+
+      expect(github.getSHAForBranch).toHaveBeenCalledWith('chart-main', 'example-org', 'chart-repo');
+      expect(build).not.toHaveBeenCalled();
+      expect(mockCodefreshBuildImage).not.toHaveBeenCalled();
+      expect(mockBuildWithNative).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        {
+          status: DeployStatus.BUILT,
+          statusMessage: 'Image build skipped; Helm chart uses prebuilt images',
+          sha: 'chart-sha',
+        },
+        'run-1'
+      );
+    });
+
+    test('keeps the accepted chart SHA when replaying a deployment', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+      await expect(
+        deployService.buildImage(deploy as any, 0, 'run-1', undefined, undefined, undefined, undefined, undefined, {
+          '84:chart-main': 'accepted-chart-sha',
+        })
+      ).resolves.toBe(true);
+
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledWith(deploy, expect.objectContaining({ sha: 'accepted-chart-sha' }), 'run-1');
+    });
+
+    test('picks up a new chart commit on a later deployment without building an image', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      (github.getSHAForBranch as jest.Mock)
+        .mockResolvedValueOnce('first-chart-sha')
+        .mockResolvedValueOnce('second-chart-sha');
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(true);
+      await expect(deployService.buildImage(deploy as any, 0, 'run-2')).resolves.toBe(true);
+
+      expect(patch).toHaveBeenNthCalledWith(1, deploy, expect.objectContaining({ sha: 'first-chart-sha' }), 'run-1');
+      expect(patch).toHaveBeenNthCalledWith(2, deploy, expect.objectContaining({ sha: 'second-chart-sha' }), 'run-2');
+      expect(mockCodefreshBuildImage).not.toHaveBeenCalled();
+      expect(mockBuildWithNative).not.toHaveBeenCalled();
+    });
+
+    test.each([undefined, false])(
+      'retains local chart image building when skipImageBuild is %s',
+      async (skipImageBuild) => {
+        const deploy = createChartDeploy({ skipImageBuild });
+        const build = jest.spyOn(deployService, 'buildImageForHelmAndGithub').mockResolvedValue(true);
+
+        await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(true);
+        expect(build).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    test('retains organization chart image building without the flag', async () => {
+      mockDetermineChartType.mockResolvedValue(ChartType.ORG_CHART);
+      const deploy = createChartDeploy();
+      const build = jest.spyOn(deployService, 'buildImageForHelmAndGithub').mockResolvedValue(true);
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(true);
+      expect(build).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      { skipImageBuild: true, deploymentMethod: 'ci' },
+      { skipImageBuild: true, docker: { app: { dockerfilePath: 'Dockerfile' } } },
+    ])('rejects conflicting persisted settings before starting a builder (%j)', async (helm) => {
+      const deploy = createChartDeploy(helm);
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      const build = jest.spyOn(deployService, 'buildImageForHelmAndGithub').mockResolvedValue(true);
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(false);
+      expect(build).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({
+          status: DeployStatus.BUILD_FAILED,
+          statusMessage: expect.stringContaining('helm.skipImageBuild'),
+        }),
+        'run-1'
+      );
+    });
+
+    test('fails closed when the local chart source revision cannot be resolved', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('Not Found'));
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(false);
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.BUILD_FAILED }),
+        'run-1'
+      );
+      expect(patch.mock.calls.some(([, update]) => update.status === DeployStatus.BUILT)).toBe(false);
+    });
+
+    test('fails closed when a local chart has no source repository', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      (deploy.deployable as any).repository = null;
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(false);
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.BUILD_FAILED }),
+        'run-1'
+      );
+    });
+
+    test('preserves public charts that do not need a repository revision', async () => {
+      mockDetermineChartType.mockResolvedValue(ChartType.PUBLIC);
+      const deploy = createChartDeploy();
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+      (github.getSHAForBranch as jest.Mock).mockRejectedValue(new Error('Not Found'));
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(true);
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        { status: DeployStatus.BUILT, statusMessage: 'Helm chart does not need to be built' },
+        'run-1'
+      );
+    });
+  });
+
   describe('failure boundaries', () => {
     const createNativeAfterBuildDeploy = () => ({
       id: 17,
