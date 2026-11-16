@@ -167,17 +167,17 @@ const schema_1_0_0 = {
           helm: {
             type: 'object',
             additionalProperties: true,
-            anyOf: [
-              { properties: { skipImageBuild: { enum: [false] } } },
-              {
-                properties: {
-                  skipImageBuild: { enum: [true] },
-                  deploymentMethod: { enum: ['native'] },
-                },
-                required: ['skipImageBuild', 'deploymentMethod'],
-                not: { required: ['docker'] },
+            if: {
+              properties: { skipImageBuild: { enum: [true] } },
+              required: ['skipImageBuild'],
+            },
+            then: {
+              properties: {
+                deploymentMethod: { enum: ['native'] },
               },
-            ],
+              required: ['deploymentMethod'],
+              not: { required: ['docker'] },
+            },
             properties: {
               cfStepType: { type: 'string' },
               type: { type: 'string' },

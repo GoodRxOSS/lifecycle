@@ -516,10 +516,18 @@ services:
       expect(() => new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild }) as any)).toThrow();
     });
 
-    test.each(['ci', undefined])('rejects opt-in without explicit native deployment (%s)', (deploymentMethod) => {
+    test('identifies the missing native deployment method', () => {
       expect(() =>
-        new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild: true, deploymentMethod }) as any)
-      ).toThrow();
+        new YamlConfigValidator().validate_1_0_0(
+          configFor({ skipImageBuild: true, deploymentMethod: undefined }) as any
+        )
+      ).toThrow('requires property "deploymentMethod"');
+    });
+
+    test('identifies an incompatible deployment method', () => {
+      expect(() =>
+        new YamlConfigValidator().validate_1_0_0(configFor({ skipImageBuild: true, deploymentMethod: 'ci' }) as any)
+      ).toThrow('helm.deploymentMethod is not one of enum values: native');
     });
 
     test('rejects opt-in combined with a Docker build declaration', () => {
@@ -533,11 +541,11 @@ services:
       ).toThrow();
     });
 
-    test('preserves legacy Docker declarations when the option is false', () => {
+    test.each([undefined, false])('preserves legacy Docker declarations when the option is %s', (skipImageBuild) => {
       expect(() =>
         new YamlConfigValidator().validate_1_0_0(
           configFor({
-            skipImageBuild: false,
+            skipImageBuild,
             deploymentMethod: 'ci',
             docker: { defaultTag: 'main', app: { dockerfilePath: 'Dockerfile' } },
           }) as any
