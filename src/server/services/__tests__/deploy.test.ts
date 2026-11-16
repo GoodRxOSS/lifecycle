@@ -713,6 +713,53 @@ describe('DeployService - shouldTriggerGithubDeployment', () => {
       );
     });
 
+    test('uses the repository on the refreshed deployable when graph loading replaces the relation', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const repository = deploy.deployable.repository;
+      (deploy.deployable as any).repository = undefined;
+      const unloadedDeployable = deploy.deployable;
+      deploy.$fetchGraph.mockImplementation(async (expression) => {
+        if (expression === 'deployable.repository') {
+          deploy.deployable = { ...unloadedDeployable, repository };
+        }
+      });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+      await expect(
+        deployService.buildImage(deploy as any, 0, 'run-1', 'app-push-sha', 42, 'app-feature')
+      ).resolves.toBe(true);
+
+      expect(github.getSHAForBranch).toHaveBeenCalledWith('chart-main', 'example-org', 'chart-repo');
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.BUILT, sha: 'chart-sha' }),
+        'run-1'
+      );
+      expect(mockCodefreshBuildImage).not.toHaveBeenCalled();
+      expect(mockBuildWithNative).not.toHaveBeenCalled();
+    });
+
+    test('fails closed when the refreshed deployable no longer has a chart repository', async () => {
+      const deploy = createChartDeploy({ skipImageBuild: true });
+      const originalDeployable = deploy.deployable;
+      deploy.$fetchGraph.mockImplementation(async (expression) => {
+        if (expression === 'deployable.repository') {
+          deploy.deployable = { ...originalDeployable, repository: null };
+        }
+      });
+      const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
+
+      await expect(deployService.buildImage(deploy as any, 0, 'run-1')).resolves.toBe(false);
+
+      expect(github.getSHAForBranch).not.toHaveBeenCalled();
+      expect(patch).toHaveBeenCalledWith(
+        deploy,
+        expect.objectContaining({ status: DeployStatus.BUILD_FAILED }),
+        'run-1'
+      );
+      expect(patch.mock.calls.some(([, update]) => update.status === DeployStatus.BUILT)).toBe(false);
+    });
+
     test('keeps the accepted chart SHA when replaying a deployment', async () => {
       const deploy = createChartDeploy({ skipImageBuild: true });
       const patch = jest.spyOn(deployService, 'patchAndUpdateActivityFeed').mockResolvedValue(undefined);
