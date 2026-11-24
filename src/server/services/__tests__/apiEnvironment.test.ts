@@ -1030,6 +1030,7 @@ describe('sweepExpiredApiEnvironments', () => {
       where: jest.fn().mockReturnThis(),
       whereNotNull: jest.fn().mockReturnThis(),
       whereNotIn: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
       whereNull: jest.fn().mockResolvedValue(expired),
     };
     const apiTeardownScope: any = {
@@ -1094,6 +1095,21 @@ describe('sweepExpiredApiEnvironments', () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue).toHaveBeenCalledWith(expired[0], 'lease_expired');
     expect(result).toEqual({ expired: 2, stuckTeardowns: 0, enqueued: 2 });
+  });
+
+  it('excludes static API builds from the expiry query', async () => {
+    const expired = [
+      { id: 1, uuid: 'old-env-111111' },
+      { id: 2, uuid: 'old-env-222222' },
+    ];
+    const { expiredChain, stuckChain } = sweepChains(expired);
+    const { service, models } = makeService();
+    (models.Build.query as jest.Mock).mockReturnValueOnce(expiredChain).mockReturnValueOnce(stuckChain);
+    jest.spyOn(service, 'enqueueBuildDeletion').mockResolvedValue();
+
+    await service.sweepExpiredApiEnvironments();
+
+    expect(expiredChain.whereRaw).toHaveBeenCalledWith('?? is not true', ['isStatic']);
   });
 
   it('keeps sweeping after one enqueue fails', async () => {
@@ -3136,6 +3152,33 @@ describe('processDeleteQueue', () => {
 
     await service.processDeleteQueue(deleteJob('lease_expired'));
 
+    expect(deleteBuild).not.toHaveBeenCalled();
+  });
+
+  it('skips a lease_expired deletion for a static environment', async () => {
+    const build = { id: 3, uuid: 'x', isStatic: true, expiresAt: new Date(NOW.getTime() - 1000).toISOString() };
+    const { service, deleteBuild, claimPatch } = makeDeleteQueueService(build);
+
+    await service.processDeleteQueue(deleteJob('lease_expired'));
+
+    expect(claimPatch).not.toHaveBeenCalled();
+    expect(deleteBuild).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a lease_expired build pinned static after the authority check', async () => {
+    const expiresAt = new Date(NOW.getTime() - 1000).toISOString();
+    const build = { id: 3, uuid: 'x', isStatic: false, expiresAt };
+    const { service, deleteBuild, expiryLock, claimPatch } = makeDeleteQueueService(build);
+    expiryLock.forUpdate.mockResolvedValue({
+      ...build,
+      isStatic: true,
+      $query: jest.fn(() => ({ patch: claimPatch })),
+    });
+
+    await service.processDeleteQueue(deleteJob('lease_expired'));
+
+    expect(expiryLock.forUpdate).toHaveBeenCalled();
+    expect(claimPatch).not.toHaveBeenCalled();
     expect(deleteBuild).not.toHaveBeenCalled();
   });
 
