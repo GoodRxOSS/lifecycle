@@ -2082,6 +2082,8 @@ export default class BuildService extends BaseService {
       .where('triggerType', 'api')
       .whereNotNull('expiresAt')
       .where('expiresAt', '<=', now.toISOString())
+      // isStatic is nullable; "is not true" keeps rows where it was never set.
+      .whereRaw('?? is not true', ['isStatic'])
       .whereNotIn('status', [BuildStatus.TORN_DOWN, BuildStatus.TEARING_DOWN])
       .whereNull('deletedAt');
 
@@ -4183,7 +4185,10 @@ export default class BuildService extends BaseService {
     if (reason === 'teardown_stuck' && (build.pullRequestId == null || build.runUUID !== teardownRunUUID)) return false;
     if (reason === 'lease_expired') {
       return (
-        build.kind === BuildKind.ENVIRONMENT && build.triggerType === 'api' && isExpired(new Date(), build.expiresAt)
+        build.kind === BuildKind.ENVIRONMENT &&
+        build.triggerType === 'api' &&
+        !build.isStatic &&
+        isExpired(new Date(), build.expiresAt)
       );
     }
     if (
@@ -4220,7 +4225,14 @@ export default class BuildService extends BaseService {
     teardownRunUUID: string
   ): Promise<{
     build: Build | null;
-    outcome: 'claimed' | 'already_claimed' | 'lease_extended' | 'authority_restored' | 'stale' | 'missing';
+    outcome:
+      | 'claimed'
+      | 'already_claimed'
+      | 'lease_extended'
+      | 'static_protected'
+      | 'authority_restored'
+      | 'stale'
+      | 'missing';
   }> {
     return this.db.models.Build.transact(async (trx) => {
       const build = await this.db.models.Build.query(trx).findById(buildId).whereNull('deletedAt').forUpdate();
@@ -4253,6 +4265,11 @@ export default class BuildService extends BaseService {
         ) {
           return { build: null, outcome: 'authority_restored' };
         }
+      }
+
+      // A pin that lands after the sweep enqueued this job still wins.
+      if (reason === 'lease_expired' && build.isStatic) {
+        return { build: null, outcome: 'static_protected' };
       }
 
       // Extension takes the same row lock, so whichever transaction commits first wins deterministically.
@@ -4295,6 +4312,10 @@ export default class BuildService extends BaseService {
               const claim = await this.claimBuildForDeletion(buildId, reason, activeTeardownRunUUID);
               if (claim.outcome === 'lease_extended') {
                 getLogger().info('Build: delete skipped reason=lease_extended');
+                return;
+              }
+              if (claim.outcome === 'static_protected') {
+                getLogger().info('Build: delete skipped reason=static_protected');
                 return;
               }
               if (claim.outcome === 'already_claimed') {
