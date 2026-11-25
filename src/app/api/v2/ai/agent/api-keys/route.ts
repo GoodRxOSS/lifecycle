@@ -59,7 +59,7 @@ async function getConfiguredProviders(): Promise<SupportedProvider[]> {
   }
 }
 
-async function validateProviderKey(provider: SupportedProvider, apiKey: string): Promise<boolean> {
+async function validateProviderKey(provider: SupportedProvider, apiKey: string, baseUrl?: string): Promise<boolean> {
   try {
     switch (provider) {
       case 'anthropic': {
@@ -79,12 +79,13 @@ async function validateProviderKey(provider: SupportedProvider, apiKey: string):
         return response.status !== 401 && response.status !== 403;
       }
       case 'openai': {
-        const response = await fetch('https://api.openai.com/v1/models', {
+        const response = await fetch(`${(baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')}/models`, {
           headers: {
             Authorization: `Bearer ${apiKey}`,
           },
+          signal: AbortSignal.timeout(10_000),
         });
-        return response.status !== 401 && response.status !== 403;
+        return baseUrl ? response.ok : response.status !== 401 && response.status !== 403;
       }
       case 'gemini': {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
@@ -315,7 +316,8 @@ const postHandler = async (req: NextRequest) => {
     return errorResponse(new Error('apiKey is required and must be a string'), { status: 400 }, req);
   }
 
-  const valid = await validateProviderKey(provider, apiKey);
+  const baseUrl = await AgentProviderRegistry.getProviderBaseUrl({ provider });
+  const valid = await validateProviderKey(provider, apiKey, baseUrl);
   if (!valid) {
     return errorResponse(new Error(`Invalid API key: authentication failed with ${provider}`), { status: 400 }, req);
   }
