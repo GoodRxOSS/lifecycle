@@ -299,14 +299,15 @@ export default class BuildService extends BaseService {
     for (const build of builds) {
       try {
         await build?.$fetchGraph('pullRequest.[repository]');
-        if (build.pullRequest?.repository != null) {
-          const isActive = await this.db.services.PullRequest.lifecycleEnabledForPullRequest(build.pullRequest);
-          // Either we want the PR status to be closed or
-          // if deployOnUpdate at the PR level (with the lifecycle-disabled! label)
-          if (
-            build.pullRequest.status === 'closed' ||
-            (isActive === false && build.pullRequest.deployOnUpdate === false)
-          ) {
+        if (build.pullRequest?.repository != null && !build.isStatic) {
+          const { status } = build.pullRequest;
+          // Only an open PR with deploys turned off can be inactive, so the GitHub lookup is skipped for every other
+          // build; this sweep visits every active build each hour.
+          const isInactiveOpenPullRequest =
+            status !== 'closed' &&
+            build.pullRequest.deployOnUpdate === false &&
+            (await this.db.services.PullRequest.lifecycleEnabledForPullRequest(build.pullRequest)) === false;
+          if (status === 'closed' || isInactiveOpenPullRequest) {
             // Enqueue a deletion job
             const buildId = build?.id;
             if (!buildId) {
