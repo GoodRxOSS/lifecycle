@@ -76,10 +76,12 @@ const okHandler = jest.fn(async () => NextResponse.json({ ok: true }, { status: 
 
 let query: any;
 const originalEnableAuth = process.env.ENABLE_AUTH;
+const originalAppEnv = process.env.APP_ENV;
 
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.ENABLE_AUTH = 'true';
+  process.env.APP_ENV = 'development';
   query = {
     findOne: jest.fn(),
     findById: jest.fn().mockReturnThis(),
@@ -94,6 +96,8 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  if (originalAppEnv === undefined) delete process.env.APP_ENV;
+  else process.env.APP_ENV = originalAppEnv;
   if (originalEnableAuth === undefined) {
     delete process.env.ENABLE_AUTH;
   } else {
@@ -467,5 +471,29 @@ describe('__routePolicy markers', () => {
     }
     expect(Object.isFrozen((markerOf(admin) as { roles: string[] }).roles)).toBe(true);
     expect(Object.isFrozen((markerOf(principal) as { kinds: string[] }).kinds)).toBe(true);
+  });
+});
+
+describe('production authentication boundary', () => {
+  it.each(['session', 'principal'])('rejects direct %s wrapper access without relying on middleware', async (kind) => {
+    process.env.APP_ENV = 'production';
+    process.env.ENABLE_AUTH = 'false';
+    const handler =
+      kind === 'session'
+        ? createApiHandler(okHandler, { auth: 'session' })
+        : createPrincipalApiHandler({ scope: null }, okHandler);
+    const res = await handler(request(sessionHeader(['admin'], 'spoofed')));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: 'authentication_unavailable' } });
+    expect(okHandler).not.toHaveBeenCalled();
+    expect(ApiToken.query).not.toHaveBeenCalled();
+  });
+
+  it('preserves public handlers that implement their own authentication', async () => {
+    process.env.APP_ENV = 'production';
+    process.env.ENABLE_AUTH = 'false';
+    const res = await createPublicApiHandler(okHandler)(request());
+    expect(res.status).toBe(200);
+    expect(okHandler).toHaveBeenCalledTimes(1);
   });
 });

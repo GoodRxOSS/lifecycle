@@ -481,6 +481,7 @@ export default class AgentRunExecutor {
         workspaceToolDiscoveryMode: dispatchReason === 'approval_resolved' ? 'prefer_cached' : 'live',
         autoProvisionWorkspace: runControlPlaneConfig.autoProvisionWorkspace,
         agentDefinitionId: executionRunPlan?.agent.id,
+        agentDefinitionOwnerKind: executionRunPlan?.agent.ownerKind,
         agentSourceKind: executionRunPlan?.agent.sourceKind,
         requestGitHubToken: effectiveRequestGitHubAuth.githubToken,
         requestGitHubAuth: effectiveRequestGitHubAuth,

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { codefreshRunArgs } from 'server/lib/codefresh/command';
 import yaml from 'js-yaml';
 import fs from 'fs';
 import { nanoid } from 'nanoid';
@@ -22,7 +23,7 @@ import GlobalConfigService from 'server/services/globalConfig';
 import { TMP_PATH } from 'shared/config';
 import { getLogger } from 'server/lib/logger';
 import { getBuildSource, resolveBuildSourceRepository } from 'server/lib/buildSource';
-import { shellPromise } from 'server/lib/shell';
+import { execFilePromise } from 'server/lib/shell';
 import { kubeContextStep } from 'server/lib/codefresh';
 import Build from 'server/models/Build';
 import { staticEnvTolerations } from './constants';
@@ -270,7 +271,7 @@ export async function deployHelm(
  * @param {Deploy} deploy - The deploy object containing deployment details.
  * @returns {Promise<string>} A promise that resolves to the generated Codefresh command.
  */
-export async function generateCodefreshRunCommand(deploy: Deploy): Promise<{ command: string; configPath: string }> {
+export async function generateCodefreshRunCommand(deploy: Deploy): Promise<{ command: string[]; configPath: string }> {
   const hasValueFiles = deploy?.deployable?.helm?.chart?.valueFiles?.length > 0;
   await deploy.$fetchGraph('build');
   const yamlContent = hasValueFiles
@@ -279,7 +280,14 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<{ com
 
   const generatedYaml = yaml.dump(yamlContent);
   // One file per submission: a superseded run preparing the same service must not overwrite a newer run's YAML.
-  const configPath = `${CODEFRESH_PATH}/helm-deploy-${deploy.uuid}-${nanoid(10)}.yaml`;
+  const configPath = `${CODEFRESH_PATH}/helm-deploy-${nanoid(10)}.yaml`;
+
+  const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
+  const command = codefreshRunArgs(String(lifecycleDefaults.helmDeployPipeline), [
+    `--branch=${deploy.branchName}`,
+    `--yaml=${configPath}`,
+    '--variable=ENV=lfc',
+  ]);
 
   try {
     await fs.promises.mkdir(CODEFRESH_PATH, { recursive: true });
@@ -288,8 +296,6 @@ export async function generateCodefreshRunCommand(deploy: Deploy): Promise<{ com
     getLogger({ error }).error(`Codefresh: config write failed`);
     throw error;
   }
-  const { lifecycleDefaults } = await GlobalConfigService.getInstance().getAllConfigs();
-  const command = `codefresh run ${lifecycleDefaults.helmDeployPipeline} -b "${deploy.branchName}" -y ${configPath} -v ENV=lfc -d`;
 
   return { command, configPath };
 }
@@ -426,7 +432,7 @@ export async function uninstallHelmReleases(build: Build) {
       if (!deploy.active) continue;
 
       try {
-        await shellPromise(`helm uninstall ${deploy.uuid} --namespace ${build.namespace}`);
+        await execFilePromise('helm', ['uninstall', `--namespace=${build.namespace}`, '--', deploy.uuid]);
         await deploy.$query().patch({ statusMessage: 'Uninstalled via Helm' });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

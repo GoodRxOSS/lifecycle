@@ -16,6 +16,8 @@
 
 type Listener = (...args: any[]) => unknown;
 
+const mockBootstrapJobs = jest.fn();
+const mockServices = { kind: 'services' };
 const mockNextHandler = jest.fn();
 const mockPrepare = jest.fn(() => Promise.resolve());
 const mockMcpHttpRequestHandler = jest.fn();
@@ -92,6 +94,10 @@ const mockCreateServer = jest.fn((handler: Listener) => {
 });
 const mockWebSocketServer = jest.fn(() => mockWss);
 
+jest.mock('./src/server/jobs/index', () => ({ __esModule: true, default: mockBootstrapJobs }));
+jest.mock('./src/server/services', () => ({ __esModule: true, default: () => mockServices }));
+jest.mock('shared/config', () => ({ LIFECYCLE_MODE: mockLifecycleMode }));
+
 jest.mock('module-alias/register', () => ({}));
 jest.mock('module-alias', () => ({
   __esModule: true,
@@ -133,6 +139,7 @@ jest.mock('./src/server/services/sites', () => ({
 }));
 jest.mock('./src/server/lib/sites/gateway', () => ({ handleSitesRequest: mockHandleSitesRequest }));
 jest.mock('./src/server/lib/agentSession/workspaceEditorProxy', () => ({
+  ...jest.requireActual('./src/server/lib/agentSession/workspaceEditorProxy'),
   EDITOR_PROXY_PING_INTERVAL_MS: 10_000,
   EDITOR_PROXY_PONG_DEADLINE_MS: 5_000,
   EDITOR_PROXY_TIMEOUT_MS: 30_000,
@@ -370,9 +377,16 @@ async function bootServer() {
   return mockHttpHandler;
 }
 
+function connectLogStream(ws: ReturnType<typeof webSocket>, req: ReturnType<typeof request>) {
+  mockWss.handleUpgrade.mockImplementationOnce((_request, _socket, _head, callback: Listener) => callback(ws));
+  mockServerListeners.upgrade(req, { end: jest.fn(), destroy: jest.fn() }, Buffer.alloc(0));
+}
+
 describe('ws-server public dispatch', () => {
   let setIntervalSpy: jest.SpyInstance;
   const originalEnableAuth = process.env.ENABLE_AUTH;
+  const originalAppEnv = process.env.APP_ENV;
+  const originalGrantSecret = process.env.CHAT_PREVIEW_GRANT_SECRET;
 
   beforeAll(() => {
     setIntervalSpy = jest
@@ -391,6 +405,7 @@ describe('ws-server public dispatch', () => {
     mockResolveChatPreviewSessionForHost.mockResolvedValue(null);
     mockMatchesGatewayHost.mockResolvedValue(false);
     mockHandleSitesRequest.mockResolvedValue(undefined);
+    mockWss.handleUpgrade.mockReset();
     mockHttpRequest.mockReset();
     mockHttpsRequest.mockReset();
     mockLifecycleMode = 'web';
@@ -470,15 +485,83 @@ describe('ws-server public dispatch', () => {
     }
     mockExposureQuery.mockReturnValue(exposureQuery);
     delete process.env.ENABLE_AUTH;
+    process.env.APP_ENV = 'development';
+    process.env.CHAT_PREVIEW_GRANT_SECRET = 'test-ticket-secret';
   });
 
   afterAll(() => {
     setIntervalSpy.mockRestore();
+    if (originalAppEnv === undefined) delete process.env.APP_ENV;
+    else process.env.APP_ENV = originalAppEnv;
+    if (originalGrantSecret === undefined) delete process.env.CHAT_PREVIEW_GRANT_SECRET;
+    else process.env.CHAT_PREVIEW_GRANT_SECRET = originalGrantSecret;
     if (originalEnableAuth === undefined) {
       delete process.env.ENABLE_AUTH;
     } else {
       process.env.ENABLE_AUTH = originalEnableAuth;
     }
+  });
+
+  it.each([undefined, 'false', 'TRUE'])(
+    'denies production editor and preview HTTP/WS before lookup when auth=%s',
+    async (value) => {
+      process.env.APP_ENV = 'production';
+      if (value === undefined) delete process.env.ENABLE_AUTH;
+      else process.env.ENABLE_AUTH = value;
+      const handler = await bootServer();
+      for (const preview of [false, true]) {
+        if (preview) configurePreviewHost();
+        const req = request(preview ? '/app' : '/api/agent-session/workspace-editor/session-1/');
+        const res = response();
+        await handler(req, res);
+        expect(res.statusCode).toBe(503);
+        expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ error: { code: 'authentication_unavailable' } });
+        expect(res.getHeader('Cache-Control')).toBe('no-store');
+        const socket = rawSocket();
+        mockServerListeners.upgrade(req, socket, Buffer.alloc(0));
+        expect(socket.end).toHaveBeenCalled();
+        expect(mockSerializeSocketHttpResponse).toHaveBeenLastCalledWith(
+          expect.objectContaining({ statusCode: 503, body: expect.stringContaining('authentication_unavailable') })
+        );
+      }
+      expect(mockAgentSessionGetSession).not.toHaveBeenCalled();
+      expect(mockResolveChatPreviewSessionForHost).not.toHaveBeenCalled();
+      expect(mockAgentSessionFindOne).not.toHaveBeenCalled();
+      expect(mockHttpRequest).not.toHaveBeenCalled();
+      expect(mockHttpsRequest).not.toHaveBeenCalled();
+      expect(mockVerifyBearerToken).not.toHaveBeenCalled();
+      expect(mockNextHandler).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    '/setup',
+    '/api/setup/status',
+    '/api/setup/configure',
+    '/api/setup/callback',
+    '/api/health',
+    '/api/webhooks/github',
+    '/_next/static/app.js',
+    '/',
+  ])('delegates %s with production authentication disabled', async (path) => {
+    process.env.APP_ENV = 'production';
+    process.env.ENABLE_AUTH = 'false';
+    const handler = await bootServer();
+    const req = request(path);
+    const res = response();
+    await handler(req, res);
+    expect(mockNextHandler).toHaveBeenCalledWith(req, res, expect.any(Object));
+  });
+
+  it('preserves the site gateway when production interactive authentication is unavailable', async () => {
+    mockLifecycleMode = 'gateway';
+    process.env.APP_ENV = 'production';
+    delete process.env.ENABLE_AUTH;
+    mockMatchesGatewayHost.mockResolvedValue(true);
+    const handler = await bootServer();
+    await handler(request('/published-site'), response());
+    expect(mockHandleSitesRequest).toHaveBeenCalledTimes(1);
+    expect(mockNextHandler).not.toHaveBeenCalled();
   });
 
   it('starts on the configured port and delegates an ordinary request to Next with its parsed URL', async () => {
@@ -542,6 +625,7 @@ describe('ws-server public dispatch', () => {
   });
 
   it('exchanges an authenticated editor query token for a scoped cookie and a clean redirect', async () => {
+    process.env.APP_ENV = 'production';
     process.env.ENABLE_AUTH = 'true';
     mockAgentSessionGetSession.mockResolvedValue({
       id: 'db-session-1',
@@ -551,7 +635,10 @@ describe('ws-server public dispatch', () => {
       userId: 'user-1',
       workspaceStatus: 'ready',
     });
-    mockVerifyBearerToken.mockResolvedValue({ payload: { sub: 'user-1' }, success: true });
+    mockVerifyBearerToken.mockResolvedValue({
+      payload: { sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 300 },
+      success: true,
+    });
     const handler = await bootServer();
     const res = response();
 
@@ -561,7 +648,7 @@ describe('ws-server public dispatch', () => {
     expect(res.statusCode).toBe(302);
     expect(res.setHeader).toHaveBeenCalledWith(
       'Set-Cookie',
-      expect.stringContaining('lfc_session_workspace_editor_auth=bootstrap-token')
+      expect.stringContaining('lfc_session_workspace_editor_auth=lfceg_v1.')
     );
     expect(res.setHeader).toHaveBeenCalledWith('Location', '/api/agent-session/workspace-editor/session-1/?theme=dark');
     expect(mockTryRegisterEditorConnection).not.toHaveBeenCalled();
@@ -580,7 +667,10 @@ describe('ws-server public dispatch', () => {
       uuid: 'session-1',
       workspaceStatus: 'ready',
     });
-    mockVerifyBearerToken.mockResolvedValue({ payload: { sub: 'user-1' }, success: true });
+    mockVerifyBearerToken.mockResolvedValue({
+      payload: { sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 300 },
+      success: true,
+    });
     const { proxyRequest } = mockUpstreamResponse({
       headers: {
         connection: 'close',
@@ -590,9 +680,18 @@ describe('ws-server public dispatch', () => {
       statusCode: 201,
     });
     const handler = await bootServer();
+    mockBuildProxyHeaders.mockImplementation(
+      jest.requireActual('./src/server/lib/agentSession/chatPreviewProxy').buildProxyHeaders
+    );
     const req = {
       ...request('/api/agent-session/workspace-editor/session-1/project?theme=dark'),
-      headers: { authorization: 'Bearer editor-token', host: 'lifecycle.test' },
+      headers: {
+        authorization: 'Bearer editor-token',
+        cookie: 'session=private',
+        origin: 'https://lifecycle.test',
+        referer: 'https://lifecycle.test/?token=editor-token',
+        host: 'lifecycle.test',
+      },
     };
     const res = response();
 
@@ -603,16 +702,185 @@ describe('ws-server public dispatch', () => {
     expect(target.toString()).toBe('http://agent-pod.agent-ns.svc.cluster.local:13337/project?theme=dark');
     expect(mockHttpRequest).toHaveBeenCalledWith(
       target,
-      { headers: { 'x-forwarded-by': 'lifecycle' }, method: 'GET' },
+      { headers: expect.objectContaining({ host: 'agent-pod.agent-ns.svc.cluster.local:13337' }), method: 'GET' },
       expect.any(Function)
     );
+    for (const header of ['authorization', 'cookie', 'origin', 'referer']) {
+      expect(mockHttpRequest.mock.calls[0][1].headers).not.toHaveProperty(header);
+    }
     expect(proxyRequest.end).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(201);
     expect(res.setHeader).toHaveBeenCalledWith('x-editor', 'ready');
-    expect(res.setHeader).toHaveBeenCalledWith('Set-Cookie', 'editor=ready; Path=/');
+    expect(res.setHeader).not.toHaveBeenCalledWith('Set-Cookie', expect.anything());
     expect(res.setHeader).not.toHaveBeenCalledWith('connection', expect.anything());
     expect(mockReleaseEditorConnection).toHaveBeenCalledWith('session-1', expect.any(Object));
     expect(mockNextHandler).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('uses a scoped editor cookie and strips credentials for remote=%s', async (remote) => {
+    process.env.ENABLE_AUTH = 'true';
+    const session = {
+      id: 'db-session-1',
+      uuid: 'session-1',
+      namespace: 'agent-ns',
+      podName: 'agent-pod',
+      status: 'active',
+      userId: 'user-1',
+      workspaceStatus: 'ready',
+    };
+    mockAgentSessionGetSession.mockResolvedValue(session);
+    const tokenExpiresAt = Math.floor(Date.now() / 1000) + 30;
+    mockVerifyBearerToken.mockResolvedValue({ success: true, payload: { sub: 'user-1', exp: tokenExpiresAt } });
+    if (remote)
+      mockResolveWorkspaceEditorEndpoint.mockResolvedValue({
+        url: 'https://editor.example.test',
+        headers: { 'x-provider-token': 'upstream-only' },
+      });
+    const handler = await bootServer();
+    const proxyHelpers = jest.requireActual('./src/server/lib/agentSession/chatPreviewProxy');
+    mockBuildProxyHeaders.mockImplementation(proxyHelpers.buildProxyHeaders);
+    mockParseCookieHeader.mockImplementation(proxyHelpers.parseCookieHeader);
+    const bootstrap = response();
+    await handler(
+      {
+        ...request('/api/agent-session/workspace-editor/session-1/?token=primary-jwt&theme=dark'),
+        headers: { host: 'lifecycle.test', 'x-forwarded-proto': 'https' },
+      },
+      bootstrap
+    );
+    const cookie = bootstrap.getHeader('Set-Cookie') as string;
+    expect(cookie).toContain('lfc_session_workspace_editor_auth=lfceg_v1.');
+    expect(cookie).not.toContain('primary-jwt');
+    expect(cookie).toContain('Path=/api/agent-session/workspace-editor/session-1;');
+    expect(cookie).toContain('HttpOnly; SameSite=Lax; Secure');
+    expect(Number(/Max-Age=(\d+)/.exec(cookie)?.[1])).toBeLessThanOrEqual(30);
+    expect(bootstrap.getHeader('Cache-Control')).toBe('no-store');
+    const grant = proxyHelpers.parseCookieHeader(cookie).lfc_session_workspace_editor_auth;
+    const { readWorkspaceEditorGrantClaims } = require('./src/server/lib/agentSession/workspaceEditorGrant');
+    expect(readWorkspaceEditorGrantClaims(grant)).toMatchObject({
+      sessionId: 'session-1',
+      userId: 'user-1',
+      exp: tokenExpiresAt,
+    });
+
+    const transport = remote ? mockHttpsRequest : mockHttpRequest;
+    mockUpstreamResponse({ headers: { 'set-cookie': ['hostile=1; Path=/'], 'x-editor': 'ready' } }, transport);
+    const res = response();
+    await handler(
+      {
+        ...request('/api/agent-session/workspace-editor/session-1/asset.js?theme=dark'),
+        headers: {
+          host: 'lifecycle.test',
+          cookie: cookie.split(';')[0],
+          origin: 'https://lifecycle.test',
+          referer: 'https://lifecycle.test/?token=primary-jwt',
+          referrer: 'primary-jwt',
+        },
+      },
+      res
+    );
+    expect(mockVerifyBearerToken).toHaveBeenCalledTimes(1);
+    expect(mockAgentSessionGetSession).toHaveBeenCalledTimes(2);
+    const headers = transport.mock.calls[0][1].headers;
+    for (const header of ['cookie', 'authorization', 'origin', 'referer', 'referrer'])
+      expect(headers).not.toHaveProperty(header);
+    expect(JSON.stringify(transport.mock.calls)).not.toContain('primary-jwt');
+    expect(JSON.stringify(transport.mock.calls)).not.toContain(grant);
+    if (remote) expect(headers['x-provider-token']).toBe('upstream-only');
+    expect(res.getHeader('x-editor')).toBe('ready');
+    expect(res.setHeader).not.toHaveBeenCalledWith('Set-Cookie', expect.anything());
+    expect(res.setHeader).not.toHaveBeenCalledWith('set-cookie', expect.anything());
+  });
+
+  it.each(['legacy-jwt', 'wrong-session', 'wrong-owner', 'expired', 'inactive', 'workspace-unready'])(
+    'rejects an editor cookie when %s',
+    async (reason) => {
+      process.env.ENABLE_AUTH = 'true';
+      mockAgentSessionGetSession.mockResolvedValue({
+        id: 'db-session-1',
+        namespace: 'agent-ns',
+        podName: 'agent-pod',
+        status: reason === 'inactive' ? 'archived' : 'active',
+        userId: 'user-1',
+        workspaceStatus: reason === 'workspace-unready' ? 'none' : 'ready',
+      });
+      const handler = await bootServer();
+      const { createWorkspaceEditorGrant } = require('./src/server/lib/agentSession/workspaceEditorGrant');
+      const { sealGrant } = require('./src/server/lib/opaqueGrant');
+      const { grant, claims } = createWorkspaceEditorGrant({
+        sessionId: reason === 'wrong-session' ? 'session-2' : 'session-1',
+        userId: reason === 'wrong-owner' ? 'user-2' : 'user-1',
+        tokenExpiresAt: Math.floor(Date.now() / 1000) + 300,
+      });
+      const cookie =
+        reason === 'legacy-jwt'
+          ? 'header.payload.signature'
+          : reason === 'expired'
+          ? sealGrant(
+              { prefix: 'lfceg_v1', aad: 'lifecycle.workspace-editor-grant.v1' },
+              { ...claims, exp: Math.floor(Date.now() / 1000) - 1 }
+            )
+          : grant;
+      mockParseCookieHeader.mockReturnValue({ lfc_session_workspace_editor_auth: cookie });
+      const res = response();
+      await handler(
+        { ...request('/api/agent-session/workspace-editor/session-1/'), headers: { host: 'lifecycle.test', cookie } },
+        res
+      );
+      expect(res.statusCode).toBeGreaterThanOrEqual(400);
+      expect(mockVerifyBearerToken).not.toHaveBeenCalled();
+      expect(mockHttpRequest).not.toHaveBeenCalled();
+      expect(mockTryRegisterEditorConnection).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([false, true])('refuses an invalid or foreign-owner editor bootstrap: foreign=%s', async (foreignOwner) => {
+    process.env.ENABLE_AUTH = 'true';
+    mockAgentSessionGetSession.mockResolvedValue({
+      id: 'db-session-1',
+      namespace: 'agent-ns',
+      podName: 'agent-pod',
+      status: 'active',
+      userId: 'user-1',
+      workspaceStatus: 'ready',
+    });
+    mockVerifyBearerToken.mockResolvedValue(
+      foreignOwner
+        ? { success: true, payload: { sub: 'user-2', exp: Math.floor(Date.now() / 1000) + 300 } }
+        : { success: false }
+    );
+    const handler = await bootServer();
+    const res = response();
+    await handler(
+      {
+        ...request('/api/agent-session/workspace-editor/session-1/?token=untrusted-query-token'),
+        headers: { host: 'lifecycle.test', authorization: 'Bearer different-header-token' },
+      },
+      res
+    );
+    expect(mockVerifyBearerToken).toHaveBeenCalledWith('untrusted-query-token');
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.setHeader).not.toHaveBeenCalledWith('Set-Cookie', expect.anything());
+    expect(mockHttpRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 0, NaN])('rejects editor bootstrap with unusable verified token expiry %s', async (exp) => {
+    process.env.ENABLE_AUTH = 'true';
+    mockAgentSessionGetSession.mockResolvedValue({
+      id: 'db-session-1',
+      namespace: 'agent-ns',
+      podName: 'agent-pod',
+      status: 'active',
+      userId: 'user-1',
+      workspaceStatus: 'ready',
+    });
+    mockVerifyBearerToken.mockResolvedValue({ success: true, payload: { sub: 'user-1', exp } });
+    const handler = await bootServer();
+    const res = response();
+    await handler(request('/api/agent-session/workspace-editor/session-1/?token=primary-jwt'), res);
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.setHeader).not.toHaveBeenCalledWith('Set-Cookie', expect.anything());
+    expect(mockHttpRequest).not.toHaveBeenCalled();
   });
 
   it('maps an editor upstream failure and releases the reserved connection slot', async () => {
@@ -694,6 +962,7 @@ describe('ws-server public dispatch', () => {
   });
 
   it('exchanges a valid preview grant for a cookie and removes it from the redirect URL', async () => {
+    process.env.APP_ENV = 'production';
     process.env.ENABLE_AUTH = 'true';
     configurePreviewHost();
     mockVerifyChatPreviewGrant.mockImplementation((grant: string | undefined) => grant === 'valid-grant');
@@ -785,14 +1054,26 @@ describe('ws-server public dispatch', () => {
       uuid: 'session-1',
       workspaceStatus: 'ready',
     });
-    mockVerifyBearerToken.mockResolvedValue({ payload: { sub: 'user-1' }, success: true });
+    mockVerifyBearerToken.mockResolvedValue({
+      payload: { sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 300 },
+      success: true,
+    });
     const { listeners, proxyRequest } = mockUpgradeRequest();
     await bootServer();
+    mockBuildProxyHeaders.mockImplementation(
+      jest.requireActual('./src/server/lib/agentSession/chatPreviewProxy').buildProxyHeaders
+    );
     const clientSocket = rawSocket();
     const upstreamSocket = rawSocket();
     const req = {
       ...request('/api/agent-session/workspace-editor/session-1/socket?theme=dark'),
-      headers: { authorization: 'Bearer editor-token', host: 'lifecycle.test' },
+      headers: {
+        authorization: 'Bearer editor-token',
+        cookie: 'session=private',
+        origin: 'https://lifecycle.test',
+        referer: 'https://lifecycle.test/?token=editor-token',
+        host: 'lifecycle.test',
+      },
     };
     const clientHead = Buffer.from('client-head');
     const upstreamHead = Buffer.from('upstream-head');
@@ -803,9 +1084,12 @@ describe('ws-server public dispatch', () => {
     const upstreamUrl = mockHttpRequest.mock.calls[0][0] as URL;
     expect(upstreamUrl.toString()).toBe('http://agent-pod.agent-ns.svc.cluster.local:13337/socket?theme=dark');
     expect(mockBuildProxyHeaders.mock.calls.at(-1)?.[4]).toBe(true);
+    for (const header of ['authorization', 'cookie', 'origin', 'referer']) {
+      expect(mockHttpRequest.mock.calls[0][1].headers).not.toHaveProperty(header);
+    }
     listeners.upgrade(
       {
-        headers: { 'set-cookie': ['editor=ready'], upgrade: 'websocket' },
+        headers: { upgrade: 'websocket' },
         statusCode: 101,
         statusMessage: 'Switching',
       },
@@ -817,7 +1101,7 @@ describe('ws-server public dispatch', () => {
     expect(proxyRequest.end).toHaveBeenCalledTimes(1);
     expect(mockSerializeSocketHttpResponse).toHaveBeenCalledWith(
       expect.objectContaining({
-        headers: { 'set-cookie': ['editor=ready'], upgrade: 'websocket' },
+        headers: { upgrade: 'websocket' },
         statusCode: 101,
       })
     );
@@ -830,6 +1114,114 @@ describe('ws-server public dispatch', () => {
     clientSocket.emit('close');
     expect(mockReleaseEditorConnection).toHaveBeenCalledWith('session-1', expect.any(Object));
     expect(upstreamSocket.end).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])('protects editor upgrade and rejection headers for remote=%s', async (remote) => {
+    process.env.ENABLE_AUTH = 'true';
+    mockAgentSessionGetSession.mockResolvedValue({
+      id: 'db-session-1',
+      uuid: 'session-1',
+      namespace: 'agent-ns',
+      podName: 'agent-pod',
+      status: 'active',
+      userId: 'user-1',
+      workspaceStatus: 'ready',
+    });
+    if (remote)
+      mockResolveWorkspaceEditorEndpoint.mockResolvedValue({
+        url: 'https://editor.example.test',
+        headers: { 'x-provider-token': 'upstream-only' },
+      });
+    await bootServer();
+    const proxyHelpers = jest.requireActual('./src/server/lib/agentSession/chatPreviewProxy');
+    mockBuildProxyHeaders.mockImplementation(proxyHelpers.buildProxyHeaders);
+    mockParseCookieHeader.mockImplementation(proxyHelpers.parseCookieHeader);
+    const { createWorkspaceEditorGrant } = require('./src/server/lib/agentSession/workspaceEditorGrant');
+    const { grant } = createWorkspaceEditorGrant({
+      sessionId: 'session-1',
+      userId: 'user-1',
+      tokenExpiresAt: Math.floor(Date.now() / 1000) + 300,
+    });
+    const transport = remote ? mockHttpsRequest : mockHttpRequest;
+    for (const success of [true, false]) {
+      const { listeners } = mockUpgradeRequest(transport);
+      const clientSocket = rawSocket();
+      const previousCalls = transport.mock.calls.length;
+      mockServerListeners.upgrade(
+        {
+          ...request('/api/agent-session/workspace-editor/session-1/socket?theme=dark'),
+          headers: {
+            host: 'lifecycle.test',
+            cookie: `lfc_session_workspace_editor_auth=${grant}`,
+            origin: 'https://lifecycle.test',
+            referer: 'https://lifecycle.test/?token=primary-jwt',
+          },
+        },
+        clientSocket,
+        Buffer.alloc(0)
+      );
+      await waitFor(() => transport.mock.calls.length > previousCalls, 'editor upgrade did not contact backend');
+      const headers = transport.mock.calls.at(-1)[1].headers;
+      for (const header of ['cookie', 'authorization', 'origin', 'referer']) expect(headers).not.toHaveProperty(header);
+      expect(headers.upgrade).toBe('websocket');
+      expect(headers.connection).toBe('Upgrade');
+      if (success) {
+        const upstreamSocket = rawSocket();
+        listeners.upgrade(
+          { headers: { 'set-cookie': ['hostile=1'], upgrade: 'websocket' }, statusCode: 101 },
+          upstreamSocket,
+          Buffer.alloc(0)
+        );
+        await waitFor(() => clientSocket.pipe.mock.calls.length === 1, 'editor pipe did not open');
+        expect(mockSerializeSocketHttpResponse).toHaveBeenCalledWith(
+          expect.objectContaining({ statusCode: 101, headers: { upgrade: 'websocket' } })
+        );
+        clientSocket.emit('close');
+      } else {
+        const responseListeners: Record<string, Listener> = {};
+        listeners.response({
+          statusCode: 403,
+          statusMessage: 'Forbidden',
+          headers: { 'set-cookie': ['hostile=1'], 'x-upstream': 'denied' },
+          on: (event: string, callback: Listener) => {
+            responseListeners[event] = callback;
+          },
+        });
+        responseListeners.data(Buffer.from('denied'));
+        responseListeners.end();
+        await waitFor(() => clientSocket.end.mock.calls.length > 0, 'editor rejection did not close');
+        expect(mockSerializeSocketHttpResponse).toHaveBeenCalledWith(
+          expect.objectContaining({ statusCode: 403, headers: { 'x-upstream': 'denied' } })
+        );
+      }
+    }
+    expect(mockVerifyBearerToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects a legacy editor JWT cookie on WebSocket upgrade before contacting the backend', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    mockAgentSessionGetSession.mockResolvedValue({
+      id: 'db-session-1',
+      namespace: 'agent-ns',
+      podName: 'agent-pod',
+      status: 'active',
+      userId: 'user-1',
+      workspaceStatus: 'ready',
+    });
+    mockParseCookieHeader.mockReturnValue({ lfc_session_workspace_editor_auth: 'header.payload.signature' });
+    await bootServer();
+    const clientSocket = rawSocket();
+    mockServerListeners.upgrade(
+      {
+        ...request('/api/agent-session/workspace-editor/session-1/socket'),
+        headers: { host: 'lifecycle.test', cookie: 'lfc_session_workspace_editor_auth=header.payload.signature' },
+      },
+      clientSocket,
+      Buffer.alloc(0)
+    );
+    await waitFor(() => clientSocket.end.mock.calls.length > 0, 'legacy editor socket did not close');
+    expect(mockVerifyBearerToken).not.toHaveBeenCalled();
+    expect(mockHttpRequest).not.toHaveBeenCalled();
   });
 
   it('drops a malformed encoded editor session id before resolving a session or backend', async () => {
@@ -937,7 +1329,7 @@ describe('ws-server public dispatch', () => {
     const upgrade = mockServerListeners.upgrade;
     const acceptedSocket = { destroy: jest.fn() };
     const rejectedSocket = { destroy: jest.fn() };
-    const req = request('/api/logs/stream');
+    const req = request('/api/logs/stream?namespace=preview&podName=api-0&containerName=api');
     const upgradedWs = webSocket();
     mockWss.handleUpgrade.mockImplementationOnce((_request, _socket, _head, callback: Listener) => {
       callback(upgradedWs);
@@ -947,7 +1339,10 @@ describe('ws-server public dispatch', () => {
     upgrade(request('/unknown'), rejectedSocket, Buffer.alloc(0));
 
     expect(mockWss.handleUpgrade).toHaveBeenCalledWith(req, acceptedSocket, expect.any(Buffer), expect.any(Function));
-    expect(mockWss.emit).toHaveBeenCalledWith('connection', upgradedWs, req);
+    expect(mockStreamK8sLogs).toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: 'preview', podName: 'api-0', containerName: 'api' }),
+      expect.any(Object)
+    );
     expect(acceptedSocket.destroy).not.toHaveBeenCalled();
     expect(rejectedSocket.destroy).toHaveBeenCalledTimes(1);
   });
@@ -956,7 +1351,7 @@ describe('ws-server public dispatch', () => {
     await bootServer();
     const ws = webSocket();
 
-    mockWssListeners.connection(ws, request('/api/logs/stream?podName=api'));
+    connectLogStream(ws, request('/api/logs/stream?podName=api'));
 
     expect(mockStreamK8sLogs).not.toHaveBeenCalled();
     expect(ws.send).toHaveBeenCalledWith(
@@ -975,10 +1370,7 @@ describe('ws-server public dispatch', () => {
     await bootServer();
     const ws = webSocket();
 
-    mockWssListeners.connection(
-      ws,
-      request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api&tailLines=lots')
-    );
+    connectLogStream(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api&tailLines=lots'));
 
     expect(mockStreamK8sLogs).not.toHaveBeenCalled();
     expect(ws.send).toHaveBeenCalledWith(
@@ -993,7 +1385,7 @@ describe('ws-server public dispatch', () => {
     mockStreamK8sLogs.mockReturnValue({ abort });
     const ws = webSocket();
 
-    mockWssListeners.connection(
+    connectLogStream(
       ws,
       request(
         '/api/logs/stream?podName=api-0&namespace=preview&containerName=api&follow=true&tailLines=25&timestamps=true'
@@ -1026,7 +1418,7 @@ describe('ws-server public dispatch', () => {
   it('reports Kubernetes stream failure to the client and closes with an internal-error code', async () => {
     await bootServer();
     const ws = webSocket();
-    mockWssListeners.connection(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
+    connectLogStream(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
     const callbacks = mockStreamK8sLogs.mock.calls[0][1];
 
     callbacks.onError(new Error('pod disappeared'));
@@ -1040,7 +1432,7 @@ describe('ws-server public dispatch', () => {
   it('signals a clean end when Kubernetes reports that the container terminated', async () => {
     await bootServer();
     const ws = webSocket();
-    mockWssListeners.connection(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
+    connectLogStream(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
     const callbacks = mockStreamK8sLogs.mock.calls[0][1];
 
     callbacks.onEnd();
@@ -1054,11 +1446,243 @@ describe('ws-server public dispatch', () => {
     const abort = jest.fn();
     mockStreamK8sLogs.mockReturnValue({ abort });
     const ws = webSocket();
-    mockWssListeners.connection(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
+    connectLogStream(ws, request('/api/logs/stream?podName=api-0&namespace=preview&containerName=api'));
 
     ws.listeners.error(new Error('transport failed'));
 
     expect(abort).toHaveBeenCalledTimes(1);
     expect(ws.close).toHaveBeenCalledWith(1011, 'WebSocket error');
+  });
+
+  it.each([undefined, 'false', 'true'])('limits job workers to probes with ENABLE_AUTH=%s', async (auth) => {
+    mockLifecycleMode = 'job';
+    process.env.APP_ENV = 'production';
+    if (auth === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = auth;
+    const handler = await bootServer();
+    const bootstrap = require('./src/pages/api/jobs').default;
+    mockNextHandler.mockImplementation((req, res) => {
+      if (req.url === '/api/jobs') bootstrap(req, res);
+    });
+    for (const url of ['/api/health', '/api/jobs', '/api/jobs']) {
+      const res = response();
+      await handler(request(url), res);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(mockBootstrapJobs).toHaveBeenCalledTimes(1);
+    expect(mockBootstrapJobs).toHaveBeenCalledWith(mockServices);
+    expect(mockNextHandler).toHaveBeenCalledTimes(3);
+    expect(mockParseChatPreviewHost).not.toHaveBeenCalled();
+    expect(mockMcpHttpRequestHandler).not.toHaveBeenCalled();
+    expect(mockMatchesGatewayHost).not.toHaveBeenCalled();
+
+    mockNextHandler.mockClear();
+    for (const url of [
+      '/api/v2/logs/stream-tickets',
+      '/api/v1/builds/abc/services/web/logs',
+      '/api/v1/builds/abc/services/web/logs/job',
+      '/api/v1/builds/abc/services/web/buildLogs/job',
+      '/api/v1/builds/abc/services/web/deployLogs/job',
+      '/api/v1/builds/abc/jobs/job/logs',
+      '/api/v2/builds/abc/services/web/build-jobs/job',
+      '/api/v2/builds/abc/services/web/deploy-jobs/job',
+      '/api/agent-session/workspace-editor/session-1/',
+      '/api/jobs/extra',
+      '/api/jobs/',
+      '/api/%6aobs',
+      '/api/health/../jobs',
+      '//api/jobs',
+    ]) {
+      const req = request(url);
+      req.headers.host = 'preview-host.test';
+      const res = response();
+      await handler(req, res);
+      expect(res.statusCode).toBe(404);
+      expect(res.end).toHaveBeenCalledWith('Not found');
+    }
+    const post = request('/api/jobs');
+    post.method = 'POST';
+    const postResponse = response();
+    await handler(post, postResponse);
+    expect(postResponse.statusCode).toBe(404);
+    expect(mockNextHandler).not.toHaveBeenCalled();
+    expect(mockParseChatPreviewHost).not.toHaveBeenCalled();
+    expect(mockHttpRequest).not.toHaveBeenCalled();
+    expect(mockStreamK8sLogs).not.toHaveBeenCalled();
+    expect(mockBootstrapJobs).toHaveBeenCalledTimes(1);
+
+    for (const path of ['/api/logs/stream', '/api/agent-session/workspace-editor/session-1/', '/socket']) {
+      const socket = { end: jest.fn(), destroy: jest.fn() };
+      mockServerListeners.upgrade(request(path), socket, Buffer.alloc(0));
+      expect(socket.end).toHaveBeenCalledWith('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    }
+    expect(mockWss.handleUpgrade).not.toHaveBeenCalled();
+    expect(mockHttpRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'false'])('blocks production log HTTP and upgrades with ENABLE_AUTH=%s', async (auth) => {
+    process.env.APP_ENV = 'production';
+    if (auth === undefined) delete process.env.ENABLE_AUTH;
+    else process.env.ENABLE_AUTH = auth;
+    const handler = await bootServer();
+    for (const path of [
+      '/api/v2/logs/stream-tickets',
+      '/api/v1/builds/a/services/b/logs/job',
+      '/api/v1/builds/a/services/b/buildLogs/job',
+      '/api/v1/builds/a/services/b/deployLogs/job',
+      '/api/v2/builds/a/services/b/build-jobs/job',
+      '/api/v2/builds/a/services/b/deploy-jobs/job',
+      '/api/v2/%6cogs/stream-tickets',
+    ]) {
+      const res = response();
+      await handler(request(path), res);
+      expect(res.statusCode).toBe(403);
+    }
+    const { createLogStreamTicket } = require('./src/server/lib/logStreamTicket');
+    const { ticket } = createLogStreamTicket({
+      namespace: 'env-a',
+      buildUuid: 'a',
+      podName: 'web-0',
+      containerName: 'web',
+      actor: 'user',
+    });
+    for (const path of [
+      '/api/logs/stream?namespace=env-a&podName=web-0&containerName=web',
+      `/api/logs/stream?ticket=${ticket}`,
+    ]) {
+      const socket = { end: jest.fn(), destroy: jest.fn() };
+      mockServerListeners.upgrade(request(path), socket, Buffer.alloc(0));
+      expect(socket.end).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    }
+    expect(mockNextHandler).not.toHaveBeenCalled();
+    expect(mockStreamK8sLogs).not.toHaveBeenCalled();
+    expect(mockWss.handleUpgrade).not.toHaveBeenCalled();
+    await handler(request('/api/webhooks/github'), response());
+    expect(mockNextHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses only the sealed target and permits repeated handshakes during the ticket lifetime', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    await bootServer();
+    const { createLogStreamTicket } = require('./src/server/lib/logStreamTicket');
+    const { ticket } = createLogStreamTicket({
+      namespace: 'env-a',
+      buildUuid: 'a',
+      podName: 'web-0',
+      containerName: 'web',
+      actor: 'user',
+    });
+    for (let i = 0; i < 2; i += 1) {
+      connectLogStream(
+        webSocket(),
+        request(`/api/logs/stream?ticket=${ticket}&namespace=kube-system&podName=other&containerName=other&follow=true`)
+      );
+    }
+    expect(mockStreamK8sLogs).toHaveBeenCalledTimes(2);
+    expect(mockStreamK8sLogs).toHaveBeenLastCalledWith(
+      {
+        namespace: 'env-a',
+        podName: 'web-0',
+        containerName: 'web',
+        follow: true,
+        timestamps: false,
+        tailLines: undefined,
+      },
+      expect.any(Object)
+    );
+  });
+
+  it('rejects missing, invalid, duplicate and primary credentials before upgrade', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    await bootServer();
+    for (const query of [
+      '',
+      '?ticket=',
+      '?ticket=bad',
+      '?ticket=one&ticket=two',
+      '?token=primary-jwt',
+      '?namespace=kube-system&podName=api&containerName=api',
+    ]) {
+      const req = request(`/api/logs/stream${query}`);
+      Object.assign(req.headers, { authorization: 'Bearer primary-jwt', cookie: 'session=primary-jwt' });
+      const socket = { end: jest.fn(), destroy: jest.fn() };
+      mockServerListeners.upgrade(req, socket, Buffer.alloc(0));
+      expect(socket.end).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    }
+    expect(mockWss.handleUpgrade).not.toHaveBeenCalled();
+    expect(mockStreamK8sLogs).not.toHaveBeenCalled();
+  });
+
+  it('does not downgrade an invalid local ticket to coordinates', async () => {
+    await bootServer();
+    connectLogStream(
+      webSocket(),
+      request('/api/logs/stream?ticket=bad&namespace=env-a&podName=web-0&containerName=web')
+    );
+    expect(mockWss.handleUpgrade).not.toHaveBeenCalled();
+    expect(mockStreamK8sLogs).not.toHaveBeenCalled();
+  });
+
+  it('does not log ticket values when an upgrade fails', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    await bootServer();
+    const { createLogStreamTicket } = require('./src/server/lib/logStreamTicket');
+    const { ticket } = createLogStreamTicket({
+      namespace: 'env-a',
+      buildUuid: 'a',
+      podName: 'web-0',
+      containerName: 'web',
+      actor: 'user',
+    });
+    mockWss.handleUpgrade.mockImplementationOnce(() => {
+      throw new Error(`failed request ticket=${ticket}`);
+    });
+    mockServerListeners.upgrade(
+      request(`/api/logs/stream?ticket=${ticket}`),
+      { end: jest.fn(), destroy: jest.fn() },
+      Buffer.alloc(0)
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith({ errorName: 'Error' }, 'WebSocket: upgrade dispatch failed');
+    expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain(ticket);
+  });
+
+  it('rejects expired and wrong-purpose tickets before Kubernetes access without expiring an active stream', async () => {
+    process.env.ENABLE_AUTH = 'true';
+    await bootServer();
+    const { createLogStreamTicket } = require('./src/server/lib/logStreamTicket');
+    const { sealGrant } = require('./src/server/lib/opaqueGrant');
+    const now = Date.now();
+    const time = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const { ticket, claims } = createLogStreamTicket({
+        namespace: 'env-a',
+        buildUuid: 'a',
+        podName: 'web-0',
+        containerName: 'web',
+        actor: 'user',
+      });
+      const active = webSocket();
+      connectLogStream(active, request(`/api/logs/stream?ticket=${ticket}`));
+      const callbacks = mockStreamK8sLogs.mock.calls[0][1];
+      time.mockReturnValue(now + 301_000);
+      const wrongPurpose = sealGrant(
+        { prefix: 'lfclt_v1', aad: 'lifecycle.other-purpose' },
+        { ...claims, exp: claims.exp + 301 }
+      );
+      mockStreamK8sLogs.mockClear();
+      mockWss.handleUpgrade.mockClear();
+      for (const rejected of [ticket, wrongPurpose]) {
+        const socket = { end: jest.fn(), destroy: jest.fn() };
+        mockServerListeners.upgrade(request(`/api/logs/stream?ticket=${rejected}`), socket, Buffer.alloc(0));
+        expect(socket.end).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      }
+      expect(mockStreamK8sLogs).not.toHaveBeenCalled();
+      expect(mockWss.handleUpgrade).not.toHaveBeenCalled();
+      callbacks.onData('still streaming');
+      expect(active.send).toHaveBeenCalledWith(JSON.stringify({ type: 'log', payload: 'still streaming' }));
+      expect(active.close).not.toHaveBeenCalled();
+    } finally {
+      time.mockRestore();
+    }
   });
 });

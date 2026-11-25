@@ -19,7 +19,7 @@ import mockRedisClient from 'server/lib/__mocks__/redisClientMock';
 mockRedisClient();
 
 const mockDeployQuery = jest.fn();
-const mockShellPromise = jest.fn();
+const mockExecFilePromise = jest.fn();
 const mockKubeContextStep = jest.fn();
 const mockGenerateCheckoutStep = jest.fn();
 const mockDeletePendingHelmReleaseStep = jest.fn();
@@ -56,7 +56,7 @@ jest.mock('server/models/Deploy', () => ({
   },
 }));
 jest.mock('server/lib/shell', () => ({
-  shellPromise: (...args: unknown[]) => mockShellPromise(...args),
+  execFilePromise: (...args: unknown[]) => mockExecFilePromise(...args),
 }));
 jest.mock('server/lib/codefresh', () => ({
   kubeContextStep: (...args: unknown[]) => mockKubeContextStep(...args),
@@ -610,7 +610,7 @@ describe('Codefresh Helm YAML generation', () => {
     expect(result.steps.clone.steps.Checkout.git).toBe('REPLACE_ME_ORG');
   });
 
-  test('writes checkout YAML before returning the quoted Codefresh command', async () => {
+  test('writes checkout YAML before returning literal Codefresh arguments', async () => {
     const deploy = makePublicDeploy();
     deploy.deployable.helm.chart.valueFiles = ['helm/preview.yaml'];
 
@@ -618,12 +618,29 @@ describe('Codefresh Helm YAML generation', () => {
 
     expect(deploy.$fetchGraph).toHaveBeenCalledWith('build');
     expect(mockMkdir).toHaveBeenCalledWith('/tmp/lifecycle/codefresh', { recursive: true });
-    expect(configPath).toMatch(/^\/tmp\/lifecycle\/codefresh\/helm-deploy-Preview-ABC-[\w-]{10}\.yaml$/);
+    expect(configPath).toMatch(/^\/tmp\/lifecycle\/codefresh\/helm-deploy-[\w-]{10}\.yaml$/);
     expect(mockWriteFile).toHaveBeenCalledWith(configPath, expect.any(String), 'utf8');
     const writtenYaml = yaml.load(mockWriteFile.mock.calls[0][1] as string) as any;
     expect(writtenYaml.steps.clone.type).toBe('parallel');
     expect(writtenYaml.steps.deploy.arguments.custom_value_files).toEqual(['helm/preview.yaml']);
-    expect(command).toBe(`codefresh run goodrx/helm-deploy -b "feature/helm-preview" -y ${configPath} -v ENV=lfc -d`);
+    expect(command).toEqual([
+      'run',
+      'goodrx/helm-deploy',
+      '--branch=feature/helm-preview',
+      `--yaml=${configPath}`,
+      '--variable=ENV=lfc',
+      '-d',
+    ]);
+  });
+
+  test('keeps a Git-valid branch literal and deploy identity out of the submission path', async () => {
+    const deploy = makePublicDeploy();
+    deploy.branchName = "feature/o'hare#$(id)";
+    deploy.uuid = '../../outside';
+    const { command, configPath } = await generateCodefreshRunCommand(deploy);
+    expect(command[2]).toEqual(`--branch=${deploy.branchName}`);
+    expect(configPath).toMatch(/^\/tmp\/lifecycle\/codefresh\/helm-deploy-[\w-]{10}\.yaml$/);
+    expect(configPath).not.toContain('outside');
   });
 
   test('writes a separate file for every submission of the same service', async () => {
@@ -636,7 +653,15 @@ describe('Codefresh Helm YAML generation', () => {
     expect(mockWriteFile).toHaveBeenCalledTimes(2);
   });
 
-  test('logs and preserves a YAML write failure without constructing a command', async () => {
+  test('rejects an option-like pipeline before writing a submission file', async () => {
+    const configs = makeConfigs();
+    configs.lifecycleDefaults.helmDeployPipeline = '--local';
+    installConfigs(configs);
+    await expect(generateCodefreshRunCommand(makePublicDeploy())).rejects.toThrow('must not start with a hyphen');
+    expect(mockWriteFile).not.toHaveBeenCalled();
+  });
+
+  test('logs and preserves a YAML write failure', async () => {
     const failure = new Error('temporary volume is read-only');
     mockWriteFile.mockRejectedValueOnce(failure);
     const deploy = makePublicDeploy();
@@ -692,21 +717,31 @@ describe('image metadata and teardown', () => {
     };
     const withGraphFetched = jest.fn().mockResolvedValue([activeDeploy, inactiveDeploy, queuedDeploy, nonHelmDeploy]);
     mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
-    mockShellPromise.mockResolvedValue('release "active-release" uninstalled');
+    mockExecFilePromise.mockResolvedValue('release "active-release" uninstalled');
 
     await uninstallHelmReleases({ id: 42, namespace: 'env-build-123' } as any);
 
-    expect(mockShellPromise).toHaveBeenCalledTimes(2);
-    expect(mockShellPromise).toHaveBeenCalledWith('helm uninstall active-release --namespace env-build-123');
-    expect(mockShellPromise).toHaveBeenCalledWith('helm uninstall queued-release --namespace env-build-123');
+    expect(mockExecFilePromise).toHaveBeenCalledTimes(2);
+    expect(mockExecFilePromise).toHaveBeenCalledWith('helm', [
+      'uninstall',
+      '--namespace=env-build-123',
+      '--',
+      'active-release',
+    ]);
+    expect(mockExecFilePromise).toHaveBeenCalledWith('helm', [
+      'uninstall',
+      '--namespace=env-build-123',
+      '--',
+      'queued-release',
+    ]);
     expect(successfulPatch).toHaveBeenCalledWith({ statusMessage: 'Uninstalled via Helm' });
     expect(queuedPatch).toHaveBeenCalledWith({ statusMessage: 'Uninstalled via Helm' });
     expect(skippedPatch).not.toHaveBeenCalled();
     expect(mockLoggerDebug).toHaveBeenCalledWith('Helm: releases uninstalled');
   });
 
-  test('preserves shellPromise string failures in the status and rejection contract', async () => {
-    const shellFailure = 'shellPromise command failed: cluster credentials expired';
+  test('preserves execFilePromise string failures in the status and rejection contract', async () => {
+    const shellFailure = 'execFilePromise command failed: cluster credentials expired';
     const patch = jest.fn().mockResolvedValue(undefined);
     const deploy = {
       uuid: 'active-release',
@@ -717,7 +752,7 @@ describe('image metadata and teardown', () => {
     };
     const withGraphFetched = jest.fn().mockResolvedValue([deploy]);
     mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
-    mockShellPromise.mockRejectedValueOnce(shellFailure);
+    mockExecFilePromise.mockRejectedValueOnce(shellFailure);
 
     await expect(uninstallHelmReleases({ id: 42, namespace: 'env-build-123' } as any)).rejects.toBe(shellFailure);
 

@@ -41,6 +41,6 @@ describe('API middleware composition', () => {
 
     expect(mockChain).toHaveBeenCalledWith([mockCorsMiddleware, mockRequestIdMiddleware, mockAuthMiddleware]);
     expect(loaded.middleware).toBe(mockCompiledMiddleware);
-    expect(loaded.config.matcher).toEqual(['/api/v1/:path*', '/api/v2/:path*']);
+    expect(loaded.config.matcher).toEqual(['/api/v2/:path*']);
   });
 });

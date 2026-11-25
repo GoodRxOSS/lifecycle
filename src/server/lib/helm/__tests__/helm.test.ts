@@ -27,7 +27,7 @@ import type { Deploy } from 'server/models';
 import GlobalConfigService from 'server/services/globalConfig';
 
 const mockDeployQuery = jest.fn();
-const mockShellPromise = jest.fn();
+const mockExecFilePromise = jest.fn();
 
 jest.mock('server/lib/envVariables', () => ({
   EnvironmentVariables: class {},
@@ -41,7 +41,7 @@ jest.mock('server/models/Deploy', () => ({
   },
 }));
 jest.mock('server/lib/shell', () => ({
-  shellPromise: (...args: unknown[]) => mockShellPromise(...args),
+  execFilePromise: (...args: unknown[]) => mockExecFilePromise(...args),
 }));
 jest.mock('server/lib/helm/utils', () => {
   const originalModule = jest.requireActual('server/lib/helm/utils');
@@ -74,7 +74,7 @@ describe('Helm tests', () => {
     };
     const withGraphFetched = jest.fn().mockResolvedValue([deploy]);
     mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
-    mockShellPromise.mockRejectedValueOnce(new Error('uninstall: Release not loaded: release: not found'));
+    mockExecFilePromise.mockRejectedValueOnce(new Error('uninstall: Release not loaded: release: not found'));
 
     await expect(uninstallHelmReleases({ id: 42, namespace: 'env-build-uuid' } as any)).resolves.toBeUndefined();
     expect(patch).toHaveBeenCalledWith({ statusMessage: 'Helm release not found, skipping uninstall.' });
@@ -92,7 +92,7 @@ describe('Helm tests', () => {
     };
     const withGraphFetched = jest.fn().mockResolvedValue([deploy]);
     mockDeployQuery.mockReturnValue({ where: jest.fn(() => ({ withGraphFetched })) });
-    mockShellPromise.mockRejectedValueOnce(failure);
+    mockExecFilePromise.mockRejectedValueOnce(failure);
 
     await expect(uninstallHelmReleases({ id: 42, namespace: 'env-build-uuid' } as any)).rejects.toBe(failure);
     expect(patch).toHaveBeenCalledWith({ statusMessage: 'Failed to uninstall via Helm\ncluster unavailable' });

@@ -32,8 +32,6 @@ const BUILD_ANCHORED_ALLOWLIST: Record<string, number> = {
   'src/server/services/github.ts': 1,
   // cleanupBuilds sweep: guarded PR-only branch (currently unwired queue)
   'src/server/services/build.ts': 1,
-  // v1 serializer derives display status for PR builds
-  'src/pages/api/v1/builds/[uuid]/index.ts': 1,
 };
 
 function gitGrep(pattern: string): string[] {

@@ -20,12 +20,16 @@ import { createApiHandler } from './createApiHandler';
 
 describe('createApiHandler', () => {
   const originalEnableAuth = process.env.ENABLE_AUTH;
+  const originalAppEnv = process.env.APP_ENV;
 
   beforeEach(() => {
     delete process.env.ENABLE_AUTH;
+    process.env.APP_ENV = 'development';
   });
 
   afterEach(() => {
+    if (originalAppEnv === undefined) delete process.env.APP_ENV;
+    else process.env.APP_ENV = originalAppEnv;
     if (originalEnableAuth === undefined) {
       delete process.env.ENABLE_AUTH;
     } else {
@@ -75,7 +79,7 @@ describe('createApiHandler', () => {
     expect(response.status).toBe(201);
   });
 
-  it('bypasses role checks when auth is disabled', async () => {
+  it('retains local administrator role checks in explicit local development', async () => {
     process.env.ENABLE_AUTH = 'false';
 
     const handler = createApiHandler(async () => NextResponse.json({ ok: true }), {

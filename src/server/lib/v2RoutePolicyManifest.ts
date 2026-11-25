@@ -267,6 +267,7 @@ export const V2_ROUTE_POLICY_MANIFEST: readonly V2RoutePolicyEntry[] = [
   { method: 'GET', route: '/api/v2/environments/branches', policy: 'principal', scope: 'env:read' },
   { method: 'GET', route: '/api/v2/environments/config-preview', policy: 'principal', scope: 'env:read' },
   { method: 'GET', route: '/api/v2/environments/policy', policy: 'session' },
+  { method: 'POST', route: '/api/v2/logs/stream-tickets', policy: 'principal', scope: 'env:read' },
   { method: 'GET', route: '/api/v2/me/tokens', policy: 'session' },
   { method: 'POST', route: '/api/v2/me/tokens', policy: 'session' },
   { method: 'DELETE', route: '/api/v2/me/tokens/{id}', policy: 'session' },

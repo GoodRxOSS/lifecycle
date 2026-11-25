@@ -26,6 +26,7 @@ const mockVerifyAuth = verifyAuth as jest.Mock;
 
 const VALID_TOKEN = `lfc_${'a'.repeat(40)}`;
 const originalEnableAuth = process.env.ENABLE_AUTH;
+const originalAppEnv = process.env.APP_ENV;
 
 const makeRequest = (url: string, headers: Record<string, string> = {}) => new NextRequest(url, { headers });
 
@@ -36,6 +37,8 @@ const runMiddleware = async (req: NextRequest) => {
 };
 
 afterEach(() => {
+  if (originalAppEnv === undefined) delete process.env.APP_ENV;
+  else process.env.APP_ENV = originalAppEnv;
   process.env.ENABLE_AUTH = originalEnableAuth;
   jest.clearAllMocks();
 });
@@ -43,6 +46,7 @@ afterEach(() => {
 describe('authMiddleware machine-token pass-through', () => {
   beforeEach(() => {
     process.env.ENABLE_AUTH = 'true';
+    process.env.APP_ENV = 'development';
   });
 
   it('passes lfc bearers on /api/v2/environments through without JWT verification, stripping x-user', async () => {
@@ -122,7 +126,8 @@ describe('authMiddleware machine-token pass-through', () => {
 });
 
 describe('authMiddleware unchanged behavior outside auth mode', () => {
-  it('passes everything through with x-user stripped when ENABLE_AUTH is not true', async () => {
+  it('passes local development requests with x-user stripped when ENABLE_AUTH is not true', async () => {
+    process.env.APP_ENV = 'development';
     delete process.env.ENABLE_AUTH;
     const req = makeRequest('http://localhost/api/v2/environments', { 'x-user': 'spoofed' });
 

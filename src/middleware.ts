@@ -23,5 +23,5 @@ const middlewares = [corsMiddleware, requestIdMiddleware, authMiddleware];
 export const middleware = chain(middlewares);
 
 export const config = {
-  matcher: ['/api/v1/:path*', '/api/v2/:path*'],
+  matcher: ['/api/v2/:path*'],
 };

@@ -2604,7 +2604,10 @@ async function collectFilesUnderPath(searchPath) {
 
       if (isLikelyTextFile(absolutePath)) {
         try {
-          files.push(await resolveWorkspaceFilePath(absolutePath));
+          const resolvedPath = await resolveWorkspaceFilePath(absolutePath);
+          if ((await stat(resolvedPath)).isFile()) {
+            files.push(resolvedPath);
+          }
         } catch (error) {
           if (error instanceof BoundaryPolicyError) {
             continue;

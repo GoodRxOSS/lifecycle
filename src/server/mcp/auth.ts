@@ -21,6 +21,7 @@ import { getIdentityFromClaims, getOAuthCredentialFromClaims } from 'server/lib/
 import { getLogger } from 'server/lib/logger';
 import type { Principal } from 'server/lib/principal';
 import { rememberVerifiedOAuthBearer } from 'server/lib/verifiedOAuthBearer';
+import { AUTHENTICATION_UNAVAILABLE, isInteractiveAuthUnavailable } from 'server/lib/serverAccess';
 import { getMcpResourceMetadataUrl, getMcpResourceUrl, isAuthEnabled, MCP_SCOPE } from './config';
 
 export interface McpAuthSuccess {
@@ -144,6 +145,12 @@ function oauthPrincipal(payload: JWTPayload, roles: Array<'user' | 'admin'>): Pr
  * consumers and never enter this path.
  */
 export async function authenticateMcpRequest(req: IncomingMessage): Promise<McpAuthResult> {
+  if (isInteractiveAuthUnavailable()) {
+    return failure(503, AUTHENTICATION_UNAVAILABLE.message, {
+      retryAfterSeconds: 30,
+      includeChallenge: false,
+    });
+  }
   if (!isAuthEnabled()) {
     return failure(503, 'OAuth verification is not configured.', {
       retryAfterSeconds: 30,

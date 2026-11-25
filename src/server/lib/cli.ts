@@ -17,7 +17,9 @@
 import { merge } from 'lodash';
 import { Build, Deploy, Deployable } from 'server/models';
 import { CLIDeployTypes, DeployTypes } from 'shared/constants';
-import { shellPromise } from './shell';
+import { execFilePromise, redactCommandOutput, shellPromise } from './shell';
+import { shellQuote } from './shellQuote';
+import { codefreshRunArgs } from './codefresh/command';
 import { getLogger, withLogContext, updateLogContext } from './logger';
 import GlobalConfigService from 'server/services/globalConfig';
 import { DatabaseSettings } from 'server/services/types/globalConfig';
@@ -85,21 +87,30 @@ export async function codefreshDeploy(deploy: Deploy, build: Build, deployable: 
     staticEnv: build?.isStatic,
     secretProviders: globalConfigs?.secretProviders,
   });
-  const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
+  const { variables, redactedVariables, redactValues } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
 
-  const deployTrigger = deployable.deployTrigger ? `--trigger ${deployable.deployTrigger}` : ``;
+  const deployTrigger = deployable.deployTrigger ? [`--trigger=${deployable.deployTrigger}`] : [];
   const serviceDeployPipelineId = deployable.deployPipelineId;
 
   const revision = sourceRef ?? deploy.branchName;
-  const command = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(revision)} ${variables.join(
-    ' '
-  )} ${deployTrigger} -d`;
-  const redactedCommand = `codefresh run ${shellQuote(serviceDeployPipelineId)} -b ${shellQuote(
-    revision
-  )} ${redactedVariables.join(' ')} ${deployTrigger} -d`;
+  const command = codefreshRunArgs(String(serviceDeployPipelineId ?? ''), [
+    `--branch=${revision ?? ''}`,
+    ...variables,
+    ...deployTrigger,
+  ]);
+  const redactedCommand = [
+    'codefresh',
+    ...codefreshRunArgs(String(serviceDeployPipelineId ?? ''), [
+      `--branch=${revision ?? ''}`,
+      ...redactedVariables,
+      ...deployTrigger,
+    ]),
+  ]
+    .map(shellQuote)
+    .join(' ');
   getLogger().debug(`About to run codefresh command: command=${redactedCommand}`);
-  const output = await shellPromise(command, { redactCommand: redactedCommand });
-  getLogger().debug(`Codefresh run output: output=${output}`);
+  const output = await execFilePromise('codefresh', command, { redactCommand: redactedCommand, redactValues });
+  getLogger().debug(`Codefresh run output: output=${redactCommandOutput(output, redactValues)}`);
   const id = output.trim();
   return id;
 }
@@ -141,20 +152,32 @@ export async function codefreshDestroy(deploy: Deploy) {
         staticEnv: deploy.build?.isStatic,
         secretProviders: globalConfigs?.secretProviders,
       });
-      const { variables, redactedVariables } = codefreshVariables(resolvedEnv.env, resolvedEnv.secretEnvKeys);
+      const { variables, redactedVariables, redactValues } = codefreshVariables(
+        resolvedEnv.env,
+        resolvedEnv.secretEnvKeys
+      );
 
-      const destroyTrigger = deploy.deployable.destroyTrigger ? `--trigger ${deploy.deployable.destroyTrigger}` : ``;
+      const destroyTrigger = deploy.deployable.destroyTrigger ? [`--trigger=${deploy.deployable.destroyTrigger}`] : [];
       const destroyPipelineId = deploy.deployable.destroyPipelineId;
       const serviceBranchName = deploy.deployable.branchName;
 
-      const command = `codefresh run ${shellQuote(destroyPipelineId)} -b ${shellQuote(
-        serviceBranchName
-      )} ${variables.join(' ')} ${destroyTrigger} -d`;
-      const redactedCommand = `codefresh run ${shellQuote(destroyPipelineId)} -b ${shellQuote(
-        serviceBranchName
-      )} ${redactedVariables.join(' ')} ${destroyTrigger} -d`;
+      const command = codefreshRunArgs(String(destroyPipelineId ?? ''), [
+        `--branch=${serviceBranchName ?? ''}`,
+        ...variables,
+        ...destroyTrigger,
+      ]);
+      const redactedCommand = [
+        'codefresh',
+        ...codefreshRunArgs(String(destroyPipelineId ?? ''), [
+          `--branch=${serviceBranchName ?? ''}`,
+          ...redactedVariables,
+          ...destroyTrigger,
+        ]),
+      ]
+        .map(shellQuote)
+        .join(' ');
       getLogger().debug(`Destroy command: command=${redactedCommand}`);
-      const output = await shellPromise(command, { redactCommand: redactedCommand });
+      const output = await execFilePromise('codefresh', command, { redactCommand: redactedCommand, redactValues });
       const id = output?.trim();
       return id;
     } finally {
@@ -173,21 +196,24 @@ export async function codefreshDestroy(deploy: Deploy) {
 }
 
 function codefreshVariables(envVariables: Record<string, any>, secretEnvKeys: Set<string>) {
-  const variables = Object.keys(envVariables).map((key) => codefreshVariable(key, envVariables[key]));
-  const redactedVariables = Object.keys(envVariables).map((key) =>
+  const variables = Object.keys(envVariables).flatMap((key) => codefreshVariable(key, envVariables[key]));
+  const redactedVariables = Object.keys(envVariables).flatMap((key) =>
     codefreshVariable(key, secretEnvKeys.has(key) ? '[REDACTED]' : envVariables[key])
   );
 
-  return { variables, redactedVariables };
+  const secretValues = (value: any): string[] => {
+    if (value && typeof value === 'object') {
+      return [JSON.stringify(value), ...Object.values(value).flatMap(secretValues)];
+    }
+    return value == null ? [] : [String(value)];
+  };
+  const redactValues = [...secretEnvKeys].flatMap((key) => secretValues(envVariables[key]));
+  return { variables, redactedVariables, redactValues };
 }
 
 function codefreshVariable(key: string, value: any) {
   const variableValue = typeof value === 'object' ? JSON.stringify(value) : value;
-  return ` -v ${shellQuote(key)}=${shellQuote(variableValue)}`;
-}
-
-function shellQuote(value: string | number | boolean | null | undefined): string {
-  return `'${String(value ?? '').replace(/'/g, "'\\''")}'`;
+  return [`--variable=${key}=${String(variableValue ?? '')}`];
 }
 
 /**
