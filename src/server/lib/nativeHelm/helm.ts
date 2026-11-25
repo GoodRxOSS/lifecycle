@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { escapeK8sDollar } from '../shellQuote';
 import yaml from 'js-yaml';
 import fs from 'fs';
 import Deploy from 'server/models/Deploy';
@@ -128,8 +129,8 @@ export async function createHelmContainer(
       { name: 'HELM_CACHE_HOME', value: '/workspace/.helm/cache' },
       { name: 'HELM_CONFIG_HOME', value: '/workspace/.helm/config' },
       { name: 'HELM_EXPERIMENTAL_OCI', value: '1' },
-      { name: 'LC_SERVICE_NAME', value: serviceName },
-      { name: 'LC_JOB_NAME', value: jobName },
+      { name: 'LC_SERVICE_NAME', value: escapeK8sDollar(serviceName) },
+      { name: 'LC_JOB_NAME', value: escapeK8sDollar(jobName) },
     ],
     command: ['/bin/sh', '-c'],
     args: [script],

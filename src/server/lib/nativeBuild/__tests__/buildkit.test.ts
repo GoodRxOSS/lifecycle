@@ -1414,9 +1414,30 @@ const HOSTILE_VALUES: Record<string, string> = {
   'single quote': "it's",
   'double quote': 'say "hi"',
   newline: 'line1\nline2; touch INJECTED',
+  'dollar pairs and var refs': 'a$$b $(NODE_ENV) $$(X) $$$ end',
   'dollar and backslash': '$HOME\\n\\$',
   pipe: 'a|b||c',
   empty: '',
+};
+
+const simulateK8sExpand = (input: string, env: Record<string, string>): string => {
+  let out = '';
+  for (let i = 0; i < input.length; ) {
+    if (input.startsWith('$$', i)) {
+      out += '$';
+      i += 2;
+      continue;
+    }
+    const ref = /^\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)/.exec(input.slice(i));
+    if (ref && ref[1] in env) {
+      out += env[ref[1]];
+      i += ref[0].length;
+      continue;
+    }
+    out += input[i];
+    i += 1;
+  }
+  return out;
 };
 
 describe('shellQuote', () => {
@@ -1428,6 +1449,8 @@ describe('shellQuote', () => {
     expect(result.stdout).toBe(value);
   });
 });
+
+const escapeForExpectation = (value: string): string => value.replace(/\$/g, '$$$$');
 
 describe('buildkit build args with shell metacharacters', () => {
   const mockDeploy = {
@@ -1453,7 +1476,16 @@ describe('buildkit build args with shell metacharacters', () => {
     const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
     const manifest = String(applyCall[0]).split("cat <<'EOF' | kubectl apply -f -\n")[1].split('\nEOF')[0];
     const job: any = yaml.load(manifest);
-    return job.spec.template.spec.containers[0].args[0];
+    const container = job.spec.template.spec.containers[0];
+    const env = Object.fromEntries(container.env.map((e: any) => [e.name, e.value]));
+    return simulateK8sExpand(container.args[0], env);
+  };
+
+  const getContainerEnv = (): Record<string, string> => {
+    const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
+    const manifest = String(applyCall[0]).split("cat <<'EOF' | kubectl apply -f -\n")[1].split('\nEOF')[0];
+    const job: any = yaml.load(manifest);
+    return Object.fromEntries(job.spec.template.spec.containers[0].env.map((e: any) => [e.name, e.value]));
   };
 
   it.each(Object.entries(HOSTILE_VALUES))('passes %s to buildctl as one literal argument', async (_name, value) => {
@@ -1462,7 +1494,7 @@ describe('buildkit build args with shell metacharacters', () => {
       {
         ecrRepo: 'test-repo',
         ecrDomain: '123456789.dkr.ecr.us-east-1.amazonaws.com',
-        envVars: { PR_VALUE: value },
+        envVars: { PR_VALUE: value, NODE_ENV: 'production' },
         secretEnvKeys: ['PR_VALUE'],
         dockerfilePath: 'Dockerfile',
         tag: 'v1.0.0',
@@ -1489,7 +1521,9 @@ describe('buildkit build args with shell metacharacters', () => {
       const argv = result.stdout.split('\0').slice(0, -1);
       expect(result.status).toBe(0);
       expect(argv).toContain(`build-arg:PR_VALUE=${value}`);
+      expect(argv.filter((a) => a === `build-arg:PR_VALUE=${value}`)).toHaveLength(value ? 2 : 1);
       expect(argv.filter((a) => a.startsWith('build-arg:PR_VALUE='))).toHaveLength(value ? 2 : 1);
+      expect(getContainerEnv().PR_VALUE).toBe(escapeForExpectation(value));
       expect(argv.includes('id=PR_VALUE,env=PR_VALUE')).toBe(value !== '');
       expect(fs.readdirSync(dir)).toEqual([]);
     } finally {
@@ -1517,6 +1551,6 @@ describe('buildkit build args with shell metacharacters', () => {
       'buildkit'
     );
     const applyCall = (shellPromise as jest.Mock).mock.calls.find((call) => call[0].includes('kubectl apply'));
-    expect(applyCall[0]).toContain("REGISTRY_DOMAIN='reg.example.com$(touch INJECTED)'");
+    expect(applyCall[0]).toContain("REGISTRY_DOMAIN='reg.example.com$$(touch INJECTED)'");
   });
 });
